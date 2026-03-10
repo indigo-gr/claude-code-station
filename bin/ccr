@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ccr - Claude Code Recall: fzf-powered session picker for Claude Code
-# https://github.com/daiske/ccr
+# https://github.com/indigo-gr/claude-code-recall
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="0.1.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CCR_PARSE="${SCRIPT_DIR}/ccr-parse.ts"
 CCR_PREVIEW="${SCRIPT_DIR}/ccr-preview.ts"
