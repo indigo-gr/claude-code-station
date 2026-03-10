@@ -157,4 +157,5 @@ cd "$SESSION_CWD" 2>/dev/null || {
 }
 
 # shellcheck disable=SC2086
-exec ${CLAUDE_CMD} --resume "$SESSION_ID" "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
+# Note: using direct invocation instead of exec to support shell functions (e.g. opr wrapper)
+${CLAUDE_CMD} --resume "$SESSION_ID" "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
