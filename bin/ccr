@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# ccr - Claude Code Recall: fzf-powered session picker for Claude Code
+# https://github.com/daiske/ccr
+
+set -euo pipefail
+
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CCR_PARSE="${SCRIPT_DIR}/ccr-parse.ts"
+CCR_PREVIEW="${SCRIPT_DIR}/ccr-preview.ts"
+CCR_DELETE="${SCRIPT_DIR}/ccr-delete.sh"
+
+# Command to launch Claude Code (customizable via env var)
+CLAUDE_CMD="${CCR_CMD:-claude}"
+
+# ── Clipboard helper (cross-platform) ──
+clipboard_cmd() {
+  if command -v pbcopy &>/dev/null; then
+    echo "pbcopy"
+  elif command -v xclip &>/dev/null; then
+    echo "xclip -selection clipboard"
+  elif command -v xsel &>/dev/null; then
+    echo "xsel --clipboard --input"
+  elif command -v wl-copy &>/dev/null; then
+    echo "wl-copy"
+  else
+    echo ""
+  fi
+}
+
+CLIP_CMD=$(clipboard_cmd)
+
+# ── Dependency check ──
+check_deps() {
+  local missing=()
+  command -v fzf &>/dev/null || missing+=("fzf")
+  command -v tsx &>/dev/null || missing+=("tsx (npm install -g tsx)")
+  command -v node &>/dev/null || missing+=("node")
+  command -v claude &>/dev/null || missing+=("claude (Claude Code CLI)")
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "❌ Missing dependencies:" >&2
+    for dep in "${missing[@]}"; do
+      echo "   - $dep" >&2
+    done
+    echo "" >&2
+    echo "Install with:" >&2
+    echo "  brew install fzf       # or: apt install fzf" >&2
+    echo "  npm install -g tsx" >&2
+    exit 1
+  fi
+}
+
+# ── Argument parsing ──
+DOT_ARG=""
+CLAUDE_ARGS=()
+
+for arg in "$@"; do
+  if [[ "$arg" == "." ]]; then
+    DOT_ARG="."
+  elif [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    cat <<HELP
+ccr v${VERSION} - Claude Code Recall (fzf-powered session picker)
+
+Usage:
+  ccr              Search all project sessions
+  ccr .            Show sessions for current directory only
+  ccr [options]    Pass-through options to claude
+
+Controls:
+  Enter            Resume selected session
+  Ctrl-Y           Copy full resume command to clipboard
+  Ctrl-I           Copy session ID to clipboard
+  Ctrl-D           Delete session (with confirmation)
+  Esc/Ctrl-C       Cancel
+
+Environment:
+  CCR_CMD          Command to run Claude Code (default: claude)
+                   Example: export CCR_CMD="opr claude"
+
+Examples:
+  ccr                                    # All sessions
+  ccr .                                  # Current project only
+  ccr --dangerously-skip-permissions     # Resume with options
+  CCR_CMD="opr claude" ccr               # With 1Password wrapper
+
+Current command: ${CLAUDE_CMD}
+HELP
+    exit 0
+  elif [[ "$arg" == "--version" || "$arg" == "-v" ]]; then
+    echo "ccr v${VERSION}"
+    exit 0
+  else
+    CLAUDE_ARGS+=("$arg")
+  fi
+done
+
+check_deps
+
+# ── Build fzf bindings ──
+PARSE_ARGS=()
+[[ -n "$DOT_ARG" ]] && PARSE_ARGS+=(".")
+
+# Clipboard bindings (only if clipboard tool available)
+CLIP_BINDS=()
+if [[ -n "$CLIP_CMD" ]]; then
+  CLIP_BINDS+=(--bind "ctrl-y:execute-silent(echo -n 'cd {5} && ${CLAUDE_CMD} --resume {4}' | ${CLIP_CMD})+abort")
+  CLIP_BINDS+=(--bind "ctrl-i:execute-silent(echo -n {4} | ${CLIP_CMD})+abort")
+  HEADER="Enter: resume | ^Y: copy cmd | ^I: copy ID | ^D: delete | Esc: cancel"
+else
+  HEADER="Enter: resume | ^D: delete | Esc: cancel  (no clipboard tool found)"
+fi
+
+# ── fzf session picker ──
+SELECTED=$(tsx "${CCR_PARSE}" "${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}" | fzf \
+  --ansi \
+  --delimiter='\t' \
+  --with-nth=1..3 \
+  --header="${HEADER}  [${CLAUDE_CMD}]" \
+  --preview="tsx '${CCR_PREVIEW}' {4}" \
+  --preview-window='right:50%:wrap' \
+  "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
+  --bind="ctrl-d:execute(bash '${CCR_DELETE}' {4})+reload(tsx '${CCR_PARSE}' ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"})" \
+  --height='80%' \
+  --layout=reverse \
+  --border \
+  --prompt='ccr> ' \
+  --tabstop=4 \
+) || exit 0
+
+# ── Extract session ID and cwd ──
+SESSION_ID=$(echo "$SELECTED" | cut -f4)
+SESSION_CWD=$(echo "$SELECTED" | cut -f5)
+
+if [[ -z "$SESSION_ID" ]]; then
+  echo "❌ Could not extract session ID" >&2
+  exit 1
+fi
+
+# UUID validation (injection prevention)
+if [[ ! "$SESSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  echo "❌ Invalid session ID format: ${SESSION_ID}" >&2
+  exit 1
+fi
+
+# Path validation (traversal prevention)
+if [[ ! "$SESSION_CWD" == "$HOME"* ]]; then
+  echo "⚠️  Session cwd is outside home directory: ${SESSION_CWD}" >&2
+  echo "Resuming in current directory instead." >&2
+  SESSION_CWD="."
+fi
+
+# ── Resume session ──
+echo "🔄 Resuming session in ${SESSION_CWD}..."
+cd "$SESSION_CWD" 2>/dev/null || {
+  echo "⚠️  Directory ${SESSION_CWD} not found. Resuming in $(pwd) instead." >&2
+}
+
+# shellcheck disable=SC2086
+exec ${CLAUDE_CMD} --resume "$SESSION_ID" "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
