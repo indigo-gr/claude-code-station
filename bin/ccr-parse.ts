@@ -40,10 +40,14 @@ function parseSessionFile(filePath: string, projectName: string): SessionMeta | 
     if (stats.size > MAX_FILE_SIZE) return null;
     if (stats.size === 0) return null;
 
+    // Use filename UUID as the canonical session ID (matches preview/delete lookup)
+    const fileBasename = filePath.split("/").pop()?.replace(".jsonl", "") ?? "";
+    if (!UUID_RE.test(fileBasename)) return null;
+
     const content = readFileSync(filePath, "utf-8");
     const lines = content.split("\n").filter((l) => l.trim());
 
-    let sessionId = "";
+    const sessionId = fileBasename;
     let cwd = "";
     let timestamp = "";
     let firstUserMsg = "";
@@ -51,11 +55,6 @@ function parseSessionFile(filePath: string, projectName: string): SessionMeta | 
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
-
-        // Session ID (UUID format only)
-        if (!sessionId && entry.sessionId && UUID_RE.test(entry.sessionId)) {
-          sessionId = entry.sessionId;
-        }
 
         // Working directory
         if (!cwd && entry.cwd) {
@@ -70,6 +69,8 @@ function parseSessionFile(filePath: string, projectName: string): SessionMeta | 
         // First meaningful user message (strip system tags)
         if (!firstUserMsg && entry.type === "user" && entry.message?.content) {
           const raw = extractUserText(entry.message.content);
+          // Skip system-generated interrupt markers
+          if (raw.includes("[Request interrupted by user")) continue;
           const cleaned = raw
             .replace(/<[a-z_-]+>[\s\S]*?<\/[a-z_-]+>/gi, "")
             .replace(/<[^>]+>/g, "")
@@ -82,8 +83,6 @@ function parseSessionFile(filePath: string, projectName: string): SessionMeta | 
         // Skip malformed lines
       }
     }
-
-    if (!sessionId) return null;
 
     const summary = firstUserMsg
       .replace(/\n/g, " ")

@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.2"
+VERSION="0.1.3"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CCR_PARSE="${SCRIPT_DIR}/ccr-parse.ts"
 CCR_PREVIEW="${SCRIPT_DIR}/ccr-preview.ts"
