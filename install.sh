@@ -1,65 +1,89 @@
 #!/usr/bin/env bash
-# Claude Code Recall (ccr) installer - copies bin/ to ~/.claude/scripts/ and ensures PATH
+# Claude Code Station (ccs) installer — copies bin/ to ~/.claude/scripts/ and ensures PATH
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.claude/scripts"
-REPO_BIN="$(cd "$(dirname "$0")" && pwd)/bin"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ccs"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ccs"
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+REPO_BIN="${REPO_ROOT}/bin"
+WITH_DEPS=0
 
-echo "Claude Code Recall (ccr) installer"
+for arg in "$@"; do
+  case "$arg" in
+    --with-deps) WITH_DEPS=1 ;;
+    -h|--help)
+      echo "Usage: install.sh [--with-deps]"
+      echo "  --with-deps   Run 'npm install' automatically if node_modules is missing."
+      exit 0 ;;
+  esac
+done
+
+echo "Claude Code Station (ccs) installer"
 echo "===================================="
 echo ""
 
-# Check dependencies
+# ── Dependency check ────────────────────────────────────────────────────────
 MISSING=()
-command -v fzf &>/dev/null || MISSING+=("fzf")
-command -v tsx &>/dev/null || MISSING+=("tsx (npm install -g tsx)")
-command -v node &>/dev/null || MISSING+=("node")
+if command -v node &>/dev/null; then
+  NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+  (( NODE_MAJOR >= 20 )) || MISSING+=("node >= 20 (found $(node -v))")
+else
+  MISSING+=("node >= 20")
+fi
+command -v fzf    &>/dev/null || MISSING+=("fzf (brew install fzf / apt install fzf)")
+command -v tsx    &>/dev/null || MISSING+=("tsx (npm install -g tsx)")
+command -v claude &>/dev/null || MISSING+=("claude (Claude Code CLI)")
 
-if [[ ${#MISSING[@]} -gt 0 ]]; then
-  echo "Missing dependencies:"
-  for dep in "${MISSING[@]}"; do
-    echo "  - $dep"
-  done
-  echo ""
-  echo "Please install them first:"
-  echo "  brew install fzf       # macOS"
-  echo "  apt install fzf        # Ubuntu/Debian"
-  echo "  npm install -g tsx"
+if (( ${#MISSING[@]} > 0 )); then
+  echo "Missing or insufficient dependencies:"
+  for dep in "${MISSING[@]}"; do echo "  - $dep"; done
   echo ""
   read -r -p "Continue anyway? (y/N): " cont
   [[ "$cont" == "y" || "$cont" == "Y" ]] || exit 1
 fi
 
-# Create install directory
+# ── npm install (opt-in) ────────────────────────────────────────────────────
+if [[ ! -d "${REPO_ROOT}/node_modules" ]]; then
+  if (( WITH_DEPS )); then
+    echo "Running 'npm install' ..."
+    (cd "$REPO_ROOT" && npm install)
+  else
+    echo "Note: node_modules not found. Run 'npm install' separately, or re-run with --with-deps."
+  fi
+fi
+
+# ── Copy scripts ────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
-
-# Copy files
 echo "Installing to ${INSTALL_DIR}/ ..."
-cp "$REPO_BIN/ccr" "$INSTALL_DIR/ccr"
-cp "$REPO_BIN/ccr-parse.ts" "$INSTALL_DIR/ccr-parse.ts"
-cp "$REPO_BIN/ccr-preview.ts" "$INSTALL_DIR/ccr-preview.ts"
-cp "$REPO_BIN/ccr-delete.sh" "$INSTALL_DIR/ccr-delete.sh"
-chmod +x "$INSTALL_DIR/ccr" "$INSTALL_DIR/ccr-delete.sh"
+cp -p "$REPO_BIN/ccs" "$INSTALL_DIR/"
+for f in "$REPO_BIN"/ccs-*.ts "$REPO_BIN"/ccs-*.sh; do
+  [[ -e "$f" ]] && cp -p "$f" "$INSTALL_DIR/"
+done
+chmod +x "$INSTALL_DIR/ccs"
+[[ -e "$INSTALL_DIR/ccs-delete.sh" ]] && chmod +x "$INSTALL_DIR/ccs-delete.sh"
 
-echo "  ccr"
-echo "  ccr-parse.ts"
-echo "  ccr-preview.ts"
-echo "  ccr-delete.sh"
+ls "$INSTALL_DIR" | grep -E '^ccs' | sed 's/^/  /'
 
-# Check PATH
-if echo "$PATH" | tr ':' '\n' | grep -q "$INSTALL_DIR"; then
+# ── Initialize config/cache dirs (ccs-config.ts populates template on first run) ─
+mkdir -p -m 0700 "$CONFIG_DIR" "$CACHE_DIR"
+
+# ── Legacy ccr notice ───────────────────────────────────────────────────────
+if ls "$INSTALL_DIR"/ccr* &>/dev/null; then
+  echo ""
+  echo "# Found legacy ccr — remove with: rm ${INSTALL_DIR}/ccr*"
+fi
+
+# ── PATH check ──────────────────────────────────────────────────────────────
+if echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   echo ""
   echo "PATH already includes ${INSTALL_DIR}"
 else
   echo ""
-  echo "Add this to your shell config (~/.zshrc or ~/.bashrc):"
-  echo ""
+  echo "Add this to ~/.zshrc or ~/.bashrc:"
   echo "  export PATH=\"\$HOME/.claude/scripts:\$PATH\""
-  echo ""
 fi
 
 echo ""
-echo "Done! Run 'ccr' to start (open a new terminal or source your shell config)."
-echo ""
-echo "Optional: set CCR_CMD for custom claude command:"
-echo "  export CCR_CMD=\"opr claude\"   # 1Password wrapper example"
+echo "Done! Now run 'ccs' to start (open a new terminal or source your shell config)."
+echo "Optional: export CCS_CMD=\"opr claude\"   # e.g. 1Password wrapper"
