@@ -197,9 +197,10 @@ SELECTED=$(tsx "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
 [[ -z "$SELECTED" ]] && exit 0
 
 # ── Parse selected row ───────────────────────────────────────────────────────
-KIND_KEY=$(echo "$SELECTED" | cut -f4)
-ROW_CWD=$(echo "$SELECTED"  | cut -f5)
-ROW_CMD=$(echo "$SELECTED"  | cut -f6)
+# 6-col TSV from ccs-list.ts: LABEL, DESCRIPTION, BADGES, KIND:KEY, CWD, COMMAND.
+# Use IFS-based read so values are never resplit by shell word-splitting
+# (H6 fix). The three `_` placeholders skip columns 1-3.
+IFS=$'\t' read -r _ _ _ KIND_KEY ROW_CWD ROW_CMD <<< "$SELECTED"
 
 if [[ -z "$KIND_KEY" || -z "$ROW_CMD" ]]; then
   echo "❌ Could not parse selection" >&2
@@ -241,10 +242,10 @@ if [[ ! "$ROW_CWD" == "$HOME"* ]]; then
   ROW_CWD="."
 fi
 
-# Informational warning for risky commands (non-blocking)
-if [[ "$ROW_CMD" == *"rm "* || "$ROW_CMD" == *"sudo "* || "$ROW_CMD" == *";"* ]]; then
-  echo "⚠️  [ccs] command contains rm/sudo/; — verify repos.yml: ${ROW_CMD}" >&2
-fi
+# Note: shell metachars in ROW_CMD are hard-rejected at config-load time by
+# bin/ccs-config.ts (SHELL_METACHARS regex covers `;&|<>$`"'\` + control chars).
+# The informational rm/sudo/; warning that used to live here was removed in
+# Phase 6 because the metachar rejection is now the authoritative guard.
 
 # ── cd ───────────────────────────────────────────────────────────────────────
 if ! cd "$ROW_CWD" 2>/dev/null; then

@@ -131,8 +131,10 @@ function isUnderHome(absPath: string): boolean {
   return resolved === home || resolved.startsWith(home + "/");
 }
 
-// Shell metacharacters forbidden in path/cwd to prevent injection through
-// fzf `execute(...)` bindings that interpolate row columns into bash.
+// Shell metacharacters forbidden in path/cwd/command to prevent injection
+// through fzf `execute(...)` bindings that interpolate row columns into bash,
+// and through the final direct invocation in bin/ccs.
+// \x00-\x1f covers TAB (0x09), NL (0x0a), CR (0x0d), and other control chars.
 const SHELL_METACHARS = /[;&|<>$`"'\\\n\r\x00-\x1f]/;
 
 function rejectShellMetachars(
@@ -328,6 +330,15 @@ function resolveRepoEntry(
   } else {
     command = envCommand() ?? "claude";
   }
+  // Reject shell metachars in resolved command (S1 hardening). The command
+  // string is re-executed unquoted by bin/ccs via `${ROW_CMD} ...`, so any
+  // metachar here would break the last line of defense. Error message uses
+  // "at index" phrasing (not reposYmlPath prefix) per Phase 6 spec.
+  if (SHELL_METACHARS.test(command)) {
+    throw new ConfigError(
+      `command for repo at index ${index} contains shell metacharacter(s): ${JSON.stringify(command)}`,
+    );
+  }
 
   // description
   const description =
@@ -356,6 +367,14 @@ function resolveRepoEntry(
     if (!isPlainObject(raw.custom)) {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].custom must be an object`,
+      );
+    }
+    // Reject bloated `custom` blobs before they reach downstream code.
+    // Size check only — downstream code re-serializes as needed.
+    const customJson = JSON.stringify(raw.custom);
+    if (customJson.length > 64_000) {
+      throw new ConfigError(
+        `custom for repo at index ${index} exceeds 64KB JSON size limit (got ${customJson.length} bytes)`,
       );
     }
     custom = { ...raw.custom };

@@ -543,4 +543,161 @@ repos:
       await sb.cleanup();
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 6-A regression tests: S1 command metachar rejection
+  // -------------------------------------------------------------------------
+
+  test("S1: rejects command with shell metacharacters", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: danger
+    path: ${sb.home}
+    command: "claude; rm -rf ~"
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /command.*shell metacharacter/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("S1: rejects command with backtick", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: danger
+    path: ${sb.home}
+    command: "claude \`whoami\`"
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /command.*shell metacharacter/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("S1: accepts command with spaces (e.g., 'opr claude')", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: wrapped
+    path: ${sb.home}
+    command: "opr claude"
+`,
+      );
+      const { loadConfig } = await freshImport();
+      const cfg = loadConfig();
+      assert.equal(cfg.repos[0].command, "opr claude");
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 6-A regression tests: custom 64KB size cap
+  // -------------------------------------------------------------------------
+
+  test("custom field rejected when JSON exceeds 64KB", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      // Build a YAML `custom:` block whose JSON-serialized form exceeds 64KB.
+      // ~700 keys × ~100 chars each ≈ 70KB of value material + key overhead.
+      const lines: string[] = [
+        "version: 1",
+        "repos:",
+        `  - name: bloat`,
+        `    path: ${sb.home}`,
+        `    custom:`,
+      ];
+      const filler = "x".repeat(100);
+      for (let i = 0; i < 700; i++) {
+        const key = `key_${String(i).padStart(4, "0")}`;
+        lines.push(`      ${key}: "${filler}"`);
+      }
+      await writeYml(sb.reposYml, lines.join("\n") + "\n");
+
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /64KB.*limit/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("custom field accepts small object", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: small
+    path: ${sb.home}
+    custom:
+      plane_project_id: "abc-123"
+      attio_workspace: "ils"
+`,
+      );
+      const { loadConfig } = await freshImport();
+      const cfg = loadConfig();
+      assert.equal(cfg.repos[0].custom.plane_project_id, "abc-123");
+      assert.equal(cfg.repos[0].custom.attio_workspace, "ils");
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
 });
