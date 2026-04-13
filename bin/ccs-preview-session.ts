@@ -7,35 +7,13 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { maskSecrets } from "./ccs-secrets.ts";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const MAX_PREVIEW_MESSAGES = 20;
 const MAX_MSG_LEN = 200;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB limit
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-// Mask known secret patterns in preview output
-const SECRET_PATTERNS: [RegExp, string][] = [
-  [/sk-[a-zA-Z0-9]{20,}/g, "sk-***"],
-  [/sk-ant-[a-zA-Z0-9-]{20,}/g, "sk-ant-***"],
-  [/op:\/\/[^\s"']+/g, "op://***"],
-  [/ghp_[a-zA-Z0-9]{36}/g, "ghp_***"],
-  [/gho_[a-zA-Z0-9]{36}/g, "gho_***"],
-  [/ghs_[a-zA-Z0-9]{36}/g, "ghs_***"],
-  [/xoxb-[a-zA-Z0-9-]+/g, "xoxb-***"],
-  [/xoxp-[a-zA-Z0-9-]+/g, "xoxp-***"],
-  [/Bearer\s+[a-zA-Z0-9._-]{20,}/g, "Bearer ***"],
-  [/AKIA[A-Z0-9]{16}/g, "AKIA***"],
-  [/AIza[a-zA-Z0-9_-]{35}/g, "AIza***"],
-];
-
-function maskSecrets(text: string): string {
-  let masked = text;
-  for (const [pattern, replacement] of SECRET_PATTERNS) {
-    masked = masked.replace(pattern, replacement);
-  }
-  return masked;
-}
 
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -61,17 +39,16 @@ function truncate(s: string, max: number): string {
   return oneLine.slice(0, max - 1) + "…";
 }
 
-function main() {
-  const sessionId = process.argv[2];
+export function renderSessionPreview(sessionId: string): void {
   if (!sessionId) {
     console.log("No session ID provided");
-    process.exit(1);
+    return;
   }
 
   // UUID validation (injection prevention)
   if (!UUID_RE.test(sessionId)) {
     console.log("Invalid session ID format");
-    process.exit(1);
+    return;
   }
 
   // Find session file
@@ -93,12 +70,12 @@ function main() {
     }
   } catch {
     console.log("Cannot read projects directory");
-    process.exit(1);
+    return;
   }
 
   if (!targetFile) {
     console.log("Session file not found");
-    process.exit(1);
+    return;
   }
 
   // File size check
@@ -106,11 +83,11 @@ function main() {
     const stats = statSync(targetFile);
     if (stats.size > MAX_FILE_SIZE) {
       console.log(`⚠️ File too large (${Math.round(stats.size / 1024 / 1024)}MB). Skipping preview.`);
-      process.exit(0);
+      return;
     }
   } catch {
     console.log("Cannot stat session file");
-    process.exit(1);
+    return;
   }
 
   const content = readFileSync(targetFile, "utf-8");
@@ -166,4 +143,8 @@ function main() {
   }
 }
 
-main();
+// CLI bootstrap: only run when invoked directly (not when imported)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const sessionId = process.argv[2];
+  renderSessionPreview(sessionId);
+}
