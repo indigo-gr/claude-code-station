@@ -103,6 +103,7 @@ repos:
 | `path` 存在チェック | `path not found: ~/pj/foo`（警告扱い、disabled 推奨） |
 | `path` は `$HOME` 配下必須 | `path outside $HOME: /etc/foo`（セキュリティ） |
 | `name` に `\t \n \\` 不可 | `invalid chars in name` |
+| `command` に shell metachar 不可 (`;&\|<>$\`"'\\` + 制御文字) | `command for repo at index 0 contains shell metacharacter(s): "claude;..."` |
 | `disabled: true` の場合 scan/command 無視 | — |
 
 ## 例1: シンプル
@@ -162,6 +163,8 @@ repos:
 **設計意図**: per-repo の明示的指定（`command:` フィールド）が常に最優先。`CCS_CMD` env は「全リポジトリ共通のラッパー（例: `opr claude`）を `defaults.command` 未指定時に注入したい」用途のフォールバックとして機能する。Strapi 起動のような特殊コマンドが env で踏み潰されるのを防ぐため、env を最弱に置く。
 
 ccr v0.1.3 の `CCR_CMD` は `CCS_CMD` にリネーム（移行ガイドで明記、CCR_CMD指定時は警告ログ + 暫定honor）。
+
+**Security note**: `CCS_CMD` / `CCR_CMD` env values are subject to the same shell metacharacter rejection as `command:` in YAML. If env-sourced value contains any forbidden character, `loadConfig()` throws `ConfigError` before launch.
 
 ## JSON Schema（抜粋）
 

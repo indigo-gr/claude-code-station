@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected `sqlite-schema.md` dependency note (removed misleading `npm install -g`)
 - `ccs-list.ts` uses `homedir()` instead of `process.env.HOME || ""` for tilde substitution
 
+### Fixed (Phase 7 — CR3 remediations)
+- `ccs-list.ts`: cold-start error (state.db not yet created) now prints friendly hint instead of raw stack trace
+- `ccs-scan.ts`: apply `maskSecrets` to `last_commit_subject` and `scan_error` before DB write and stderr log
+- `ccs-db.ts`: `DbHandle.close()` performs `wal_checkpoint(PASSIVE)` to keep WAL file from accumulating
+- `ccs-preview-session.ts`: switched remaining bare `"path"` / `"os"` imports to `node:` prefix
+- `docs/design/repos-yml-schema.md`: added `command` shell-metachar validation row to schema table
+
 ### Migration
 - Existing JSONL sessions under `~/.claude/projects/*/*.jsonl` are auto-discovered on first scan — nothing to migrate manually.
 - Remove old binaries: `rm ~/.claude/scripts/ccr*`.

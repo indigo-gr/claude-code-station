@@ -239,6 +239,16 @@ export function openDb(
   return {
     db,
     close() {
+      try {
+        // Passive checkpoint flushes WAL pages back to the main DB without
+        // blocking other readers. Safe to ignore errors (checkpoint is hygiene,
+        // not correctness). Readonly connections cannot checkpoint — skip.
+        if (!readOnly) {
+          db.pragma("wal_checkpoint(PASSIVE)");
+        }
+      } catch {
+        // ignore
+      }
       db.close();
     },
   };

@@ -5,8 +5,8 @@
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "path";
-import { homedir } from "os";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { maskSecrets } from "./ccs-secrets.ts";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
