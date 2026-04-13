@@ -207,7 +207,7 @@ function migrate(db: Database) {
 - ネイティブバインディング（高速）
 - macOS/Linux 両対応
 
-依存: `package.json` に追加、`install.sh` で `npm install -g better-sqlite3` を案内。
+依存: `package.json` に `better-sqlite3 ^11.3.0` を追加。`install.sh --with-deps` で `npm install`（プロジェクトローカル）を実行、または `npm install` を手動で。グローバルインストール（`-g`）は推奨しない。
 
 ## 想定サイズ
 

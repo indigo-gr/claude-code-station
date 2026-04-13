@@ -4,7 +4,7 @@
  * Args: sessionId
  */
 
-import { readdirSync, readFileSync, statSync } from "fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import { maskSecrets } from "./ccs-secrets.ts";
@@ -39,7 +39,7 @@ function truncate(s: string, max: number): string {
   return oneLine.slice(0, max - 1) + "…";
 }
 
-export function renderSessionPreview(sessionId: string): void {
+export async function renderSessionPreview(sessionId: string): Promise<void> {
   if (!sessionId) {
     console.log("No session ID provided");
     return;
@@ -54,11 +54,11 @@ export function renderSessionPreview(sessionId: string): void {
   // Find session file
   let targetFile = "";
   try {
-    const projDirs = readdirSync(PROJECTS_DIR);
+    const projDirs = await readdir(PROJECTS_DIR);
     for (const projDir of projDirs) {
       const projPath = join(PROJECTS_DIR, projDir);
       try {
-        const files = readdirSync(projPath);
+        const files = await readdir(projPath);
         const match = files.find((f) => f === `${sessionId}.jsonl`);
         if (match) {
           targetFile = join(projPath, match);
@@ -80,7 +80,7 @@ export function renderSessionPreview(sessionId: string): void {
 
   // File size check
   try {
-    const stats = statSync(targetFile);
+    const stats = await stat(targetFile);
     if (stats.size > MAX_FILE_SIZE) {
       console.log(`⚠️ File too large (${Math.round(stats.size / 1024 / 1024)}MB). Skipping preview.`);
       return;
@@ -90,7 +90,7 @@ export function renderSessionPreview(sessionId: string): void {
     return;
   }
 
-  const content = readFileSync(targetFile, "utf-8");
+  const content = await readFile(targetFile, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim());
 
   let cwd = "";
@@ -146,5 +146,12 @@ export function renderSessionPreview(sessionId: string): void {
 // CLI bootstrap: only run when invoked directly (not when imported)
 if (import.meta.url === `file://${process.argv[1]}`) {
   const sessionId = process.argv[2];
-  renderSessionPreview(sessionId);
+  if (!sessionId) {
+    console.log("Usage: ccs-preview-session.ts <session-uuid>");
+    process.exit(1);
+  }
+  renderSessionPreview(sessionId).catch((err) => {
+    console.error(`[ccs-preview-session] fatal: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
 }

@@ -10,8 +10,8 @@
  */
 
 import Database from "better-sqlite3";
-import { mkdirSync, chmodSync, existsSync } from "fs";
-import { dirname } from "path";
+import { mkdirSync, chmodSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 
 export const CURRENT_SCHEMA_VERSION = 1;
 
@@ -300,12 +300,18 @@ export function deleteReposNotIn(
   names: string[],
 ): number {
   if (names.length === 0) {
+    // Preserve existing semantic: empty array deletes all repos.
     const res = db.prepare(`DELETE FROM repos`).run();
     return res.changes;
   }
-  const placeholders = names.map(() => "?").join(",");
+  // Use json_each(JSON array) to avoid SQLite's 999-variable bind limit
+  // when syncing large numbers of repos. JSON1 is default-enabled since
+  // SQLite 3.38 (bundled with better-sqlite3).
   const res = db
-    .prepare(`DELETE FROM repos WHERE name NOT IN (${placeholders})`)
-    .run(...names);
+    .prepare(
+      `DELETE FROM repos
+       WHERE name NOT IN (SELECT value FROM json_each(?))`,
+    )
+    .run(JSON.stringify(names));
   return res.changes;
 }

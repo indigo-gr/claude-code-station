@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ccr-delete.sh - Delete a Claude Code session file with confirmation
+# ccs-delete.sh - Delete a Claude Code session file with confirmation
 # Args: sessionId
 
 set -euo pipefail

@@ -283,6 +283,33 @@ describe("getAllRepos / deleteReposNotIn", () => {
       await sb.cleanup();
     }
   });
+
+  test("deleteReposNotIn handles large name arrays (>999 elements) via json_each", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      // Insert 1200 repos
+      for (let i = 0; i < 1200; i++) {
+        upsertRepo(
+          h.db,
+          baseRepoInsert({
+            name: `repo_${i}`,
+            path: `/tmp/repo_${i}`,
+            config_hash: `hash_${i}`,
+          }),
+        );
+      }
+      // Keep only repo_0..repo_999 (1000 names) — above the classic SQLite
+      // 999-variable bind limit. The json_each() implementation must not trip.
+      const keep = Array.from({ length: 1000 }, (_, i) => `repo_${i}`);
+      const deleted = deleteReposNotIn(h.db, keep);
+      assert.equal(deleted, 200);
+      assert.equal(getAllRepos(h.db).length, 1000);
+    } finally {
+      await sb.cleanup();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

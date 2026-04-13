@@ -27,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config/cache directories created with mode `0700`; DB with `0600`.
 - `custom:` values documented as trusted user config; README warns against storing API keys.
 
+### Security (Phase 6 hardening)
+- Reject shell metacharacters in `command:` config field (S1/S2 — prevents injection via malicious repos.yml)
+- Cap `custom` field JSON size at 64KB to prevent local DoS
+- Apply `maskSecrets` to `sessions.topic` and `sessions.summary` columns (was only applied to handoff/pending first_line)
+- Expand secret patterns from 13 → 19: AWS STS (ASIA), Stripe live/test, Twilio, JWT, database URLs
+
+### Fixed (Phase 6 quality)
+- `ccs-list.ts` now opens SQLite in readonly mode with migrate skipped (regression of prior M4 fix)
+- `ccs-scan.ts` CLI bootstrap correctly exits non-zero on synchronous throws
+- `ccs-preview-session.ts` converted from sync fs to async fs/promises; CLI guards `undefined` session ID
+- `deleteReposNotIn` uses `json_each` to avoid SQLite 999-variable limit (supports 500+ repos)
+- Replaced unquoted `cut -f` result with `IFS`-based read for space-safe row parsing
+- Unified `node:` prefix on all fs/path imports
+- Fixed stale `ccr-delete.sh` header comment to `ccs-delete.sh`
+- Corrected `sqlite-schema.md` dependency note (removed misleading `npm install -g`)
+- `ccs-list.ts` uses `homedir()` instead of `process.env.HOME || ""` for tilde substitution
+
 ### Migration
 - Existing JSONL sessions under `~/.claude/projects/*/*.jsonl` are auto-discovered on first scan — nothing to migrate manually.
 - Remove old binaries: `rm ~/.claude/scripts/ccr*`.
