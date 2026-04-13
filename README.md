@@ -39,7 +39,7 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 ### Prerequisites / 前提条件
 
 - [Node.js](https://nodejs.org/) **20+**
-- [fzf](https://github.com/junegunn/fzf) — fuzzy finder
+- [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023)
 - [tsx](https://github.com/privatenumber/tsx) — TypeScript runner (`npm install -g tsx`)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
 - `better-sqlite3` and `yaml` npm packages (installed via `npm install`)
@@ -180,11 +180,15 @@ Notion:   ✅ abc123
 | Key | Action |
 |---|---|
 | Enter | Launch (NEW) or resume (RESUME) / 起動または再開 |
-| Ctrl-Y | Copy full `cd … && cmd [--resume …]` to clipboard / シェルコマンド全体をコピー |
-| Ctrl-I | Copy session UUID or repo path / セッションIDまたはパスをコピー |
+| Ctrl-Y | Copy `cd … && cmd [--resume …]` to clipboard; fzf stays open with a "📋 Copied" header / クリップボードコピー後もfzfは開いたまま、ヘッダーに📋通知 |
+| Ctrl-I | Copy session UUID or repo path; fzf stays open / コピー後も開いたまま |
 | Ctrl-R | Refresh DB and reload list / DB再走査してリロード |
-| Ctrl-D | Delete session (RESUME rows only) / セッション削除（再開行のみ） |
+| Ctrl-D | Delete session (RESUME rows only). To remove a repo, edit `~/.config/ccs/repos.yml` directly / セッション削除はRESUME行のみ。リポ削除は`repos.yml`を直接編集 |
 | Esc / Ctrl-C | Cancel / キャンセル |
+
+**Visual cues / 見た目のガイド:**
+- NEW rows and RESUME rows are separated by a dim `── Past Sessions ──` divider. Selecting the divider is a no-op.
+- RESUME sessions mapped to a registered repo show that repo's icon (e.g., `🔄 📁 ClaudeCode`). Unmapped sessions (cwd that isn't in `repos.yml`) show `❓` — a visual cue that the session was either a one-off or that the repo isn't registered yet.
 
 ### Workflows / 主な使い方
 

@@ -227,13 +227,14 @@ function sessionToRow(s: SessionRowFull): string {
   // Mapped sessions use the registered repo icon + name.
   // Unmapped sessions get ❓ as a visible reminder: either a one-off run
   // or a repo that hasn't been added to repos.yml yet.
-  const isMapped = !!s.repo_display;
-  const displayName = isMapped
-    ? s.repo_display!
+  // Ternary tests s.repo_display directly so TS narrows string|null → string
+  // without a non-null assertion.
+  const displayName = s.repo_display
+    ? s.repo_display
     : s.cwd
       ? s.cwd.replace(homedir(), "~")
       : "(unknown)";
-  const mapIcon = isMapped ? s.repo_icon || "📁" : "❓";
+  const mapIcon = s.repo_display ? s.repo_icon || "📁" : "❓";
   const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
   const desc = truncate(s.topic || "", DESC_MAX);
   const badges = `[${formatSessionStamp(s.last_activity_at)}]`;
@@ -309,7 +310,9 @@ function main(): number {
       // Insert a section separator between NEW repos and RESUME sessions
       // when both are present. The separator row uses KIND=separator so
       // bin/ccs recognises it and exits cleanly if the user selects it.
-      if (lines.length > 0 && sessionRows.length > 0) {
+      // Guard uses the explicit wantRepos flag (not lines.length) so future
+      // additions to `lines` before this block can't spuriously trigger it.
+      if (wantRepos && sessionRows.length > 0) {
         const bar = "─".repeat(20);
         const label = `\x1b[2m${bar}\x1b[0m \x1b[1;90m Past Sessions \x1b[0m\x1b[2m${bar}\x1b[0m`;
         lines.push([label, "", "", "separator:-", "", ""].join("\t"));

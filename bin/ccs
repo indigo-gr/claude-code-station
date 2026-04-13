@@ -163,7 +163,7 @@ DELETE_BIND=(--bind "ctrl-d:execute(
   kk={4};
   case \"\$kk\" in
     resume:*) bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
-    new:*)    echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r _ ;;
+    new:*)    echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r -n1 _ ;;
   esac
 )+reload(tsx '${CCS_LIST}'${LIST_ARGS_STR})")
 
@@ -174,7 +174,7 @@ REFRESH_BIND=(--bind "ctrl-r:execute(tsx '${CCS_SCAN}' --force --quiet)+reload(t
 # Note: ^D deletes SESSIONS only; repos are managed via ~/.config/ccs/repos.yml
 COLS=$(tput cols 2>/dev/null || echo 80)
 if (( COLS >= 80 )); then
-  HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: delete session (resume only — edit repos.yml to remove a repo) | Esc: cancel'
+  HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: del session (edit repos.yml to remove a repo) | Esc: cancel'
 else
   HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del[resume] Esc:quit'
 fi
@@ -205,13 +205,22 @@ SELECTED=$(tsx "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
 # (H6 fix). The three `_` placeholders skip columns 1-3.
 IFS=$'\t' read -r _ _ _ KIND_KEY ROW_CWD ROW_CMD <<< "$SELECTED"
 
-if [[ -z "$KIND_KEY" || -z "$ROW_CMD" ]]; then
+if [[ -z "$KIND_KEY" ]]; then
   echo "❌ Could not parse selection" >&2
   exit 1
 fi
 
 KIND="${KIND_KEY%%:*}"
 KEY="${KIND_KEY#*:}"
+
+# Separator row is a non-actionable divider (empty ROW_CWD/ROW_CMD by design).
+# Short-circuit here so the downstream ROW_CMD empty-check doesn't misfire.
+[[ "$KIND" == "separator" ]] && exit 0
+
+if [[ -z "$ROW_CMD" ]]; then
+  echo "❌ Could not parse selection" >&2
+  exit 1
+fi
 
 # ── Per-row command is authoritative ─────────────────────────────────────────
 # CCS_CMD env is resolved by ccs-config.ts as a fallback for repos without
@@ -233,7 +242,8 @@ case "$KIND" in
     fi
     ;;
   separator)
-    # Section separator row selected (user hit Enter on the divider). No-op exit.
+    # Defensive: separator should already be short-circuited above. Kept as
+    # a safety net in case row-parse order ever changes.
     exit 0
     ;;
   *)

@@ -31,7 +31,15 @@ if command -v node &>/dev/null; then
 else
   MISSING+=("node >= 20")
 fi
-command -v fzf    &>/dev/null || MISSING+=("fzf (brew install fzf / apt install fzf)")
+# fzf >= 0.42.0 required for the change-header binding used by Ctrl-Y/Ctrl-I toasts.
+if command -v fzf &>/dev/null; then
+  FZF_VER=$(fzf --version 2>/dev/null | awk '{print $1}')
+  if [[ -n "$FZF_VER" ]] && [[ "$(printf '%s\n0.42.0\n' "$FZF_VER" | sort -V | head -n1)" != "0.42.0" ]]; then
+    MISSING+=("fzf >= 0.42.0 (found $FZF_VER; 'change-header' binding requires 0.42+)")
+  fi
+else
+  MISSING+=("fzf >= 0.42.0 (brew install fzf / apt install fzf)")
+fi
 command -v tsx    &>/dev/null || MISSING+=("tsx (npm install -g tsx)")
 command -v claude &>/dev/null || MISSING+=("claude (Claude Code CLI)")
 

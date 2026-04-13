@@ -44,6 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected `sqlite-schema.md` dependency note (removed misleading `npm install -g`)
 - `ccs-list.ts` uses `homedir()` instead of `process.env.HOME || ""` for tilde substitution
 
+### Added (Phase 8 — UX polish)
+- `ccs-list.ts` emits a dim `── Past Sessions ──` divider between NEW repos and RESUME sessions when both are present. Selecting the divider is a no-op.
+- RESUME sessions not mapped to a registered repo now display `❓` as a visible "either one-off run or repo not registered yet" cue. Mapped sessions show the repo's icon (default `📁`).
+- `Ctrl-Y` / `Ctrl-I` no longer abort fzf after copying — they flash a `📋 Copied…` header and keep the picker open so you can launch or copy again without re-running `ccs`.
+- Label column now has a dim `│` separator between the repo/session name and the description for visual clarity even when the description is empty.
+
+### Fixed (Phase 8 — CR4 remediations)
+- `bin/ccs`: separator-row Enter no longer prints `❌ Could not parse selection` — the empty-`ROW_CMD` guard is now scoped to actionable rows only.
+- `bin/ccs`: narrow-terminal safety — header line 2 shortened from 81 → 63 chars so it no longer wraps at 80-column terminals.
+- `bin/ccs`: `read -r -n1 _` for the new-row Ctrl-D notice accepts any key (was waiting for Enter despite the "press any key" message).
+- `bin/ccs-list.ts`: removed an unnecessary non-null assertion in `sessionToRow` by testing `s.repo_display` directly for TS narrowing.
+- `bin/ccs-list.ts`: section-separator emit guard uses the explicit `wantRepos` flag instead of the indirect `lines.length > 0` so adding future preamble rows can't spuriously trigger it.
+- `install.sh`: checks `fzf >= 0.42.0` (required for the `change-header` binding used by the copy-toast).
+- `README.md`: pins `fzf ≥ 0.42.0`, documents the new `^Y`/`^I` copy-keep-open behavior, the `❓` unmapped-session icon, and the section divider.
+
 ### Fixed (Phase 7 — CR3 remediations)
 - `ccs-list.ts`: cold-start error (state.db not yet created) now prints friendly hint instead of raw stack trace
 - `ccs-scan.ts`: apply `maskSecrets` to `last_commit_subject` and `scan_error` before DB write and stderr log
