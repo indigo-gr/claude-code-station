@@ -94,7 +94,10 @@ function seed(db: Database.Database): void {
   );
 }
 
-function runList(sb: ListSandbox, args: string[]): { stdout: string; code: number } {
+function runList(
+  sb: ListSandbox,
+  args: string[],
+): { stdout: string; stderr: string; code: number } {
   const res = spawnSync("tsx", [LIST_TS, ...args], {
     env: {
       ...process.env,
@@ -104,7 +107,11 @@ function runList(sb: ListSandbox, args: string[]): { stdout: string; code: numbe
     },
     encoding: "utf-8",
   });
-  return { stdout: res.stdout ?? "", code: res.status ?? -1 };
+  return {
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    code: res.status ?? -1,
+  };
 }
 
 function tsxAvailable(): boolean {
@@ -134,6 +141,32 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       // alpha (repo) must appear; beta (disabled) must NOT
       assert.ok(lines.some((l) => l.includes("alpha")), "alpha expected");
       assert.ok(!lines.some((l) => l.includes("Beta (disabled)")), "beta must be excluded");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("cold start (state.db missing) prints friendly hint, not raw stack trace", async () => {
+    // Phase 7 CR3-A regression test: if state.db does not exist yet,
+    // ccs-list.ts must NOT leak a Node stack trace to stderr. It should
+    // print a one-line message pointing the user at `ccs --refresh`.
+    const sb = await makeListSandbox();
+    try {
+      // Do NOT create state.db — simulate cold start
+      await rm(sb.dbPath, { force: true });
+      const { stdout, stderr, code } = runList(sb, []);
+      // Either exit code 0 with hint on stderr, or non-zero — but NO raw
+      // stack trace. Friendly message mentions `ccs --refresh`.
+      const combined = stdout + stderr;
+      assert.ok(
+        /ccs --refresh|state\.db not found|cache/i.test(combined),
+        `expected friendly cold-start hint, got code=${code}, combined=${combined}`,
+      );
+      // Raw stack trace indicators must NOT appear
+      assert.ok(
+        !/at Database|SqliteError|unable to open database/.test(combined),
+        `raw error leak in output: ${combined}`,
+      );
     } finally {
       await sb.cleanup();
     }

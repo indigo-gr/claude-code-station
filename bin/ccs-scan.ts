@@ -315,7 +315,10 @@ async function scanOneRepo(
       if (log && log.stdout.trim()) {
         const [hash, subject, at] = log.stdout.trim().split("\t");
         stats.last_commit_hash = hash ?? null;
-        stats.last_commit_subject = subject ?? null;
+        // Mask before persisting: a developer could accidentally commit a
+        // secret in a commit message subject, and we must not replicate it
+        // into state.db (even though the file is mode 0600).
+        stats.last_commit_subject = subject ? maskSecrets(subject) : null;
         stats.last_commit_at = at ?? null;
       }
 
@@ -365,10 +368,13 @@ async function scanOneRepo(
     stats.session_count_total = sessRow?.cnt ?? 0;
     stats.session_last_at = sessRow?.last_at ?? null;
   } catch (err) {
-    stats.scan_error = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      `[ccs-scan] ${repo.name}: ${stats.scan_error}\n`,
-    );
+    // Mask before persisting AND before logging: git subprocess errors can
+    // contain remote URLs with embedded credentials
+    // (e.g. https://user:token@github.com/...).
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const maskedErr = maskSecrets(errMsg);
+    stats.scan_error = maskedErr;
+    process.stderr.write(`[ccs-scan] ${repo.name}: ${maskedErr}\n`);
   }
 
   stats.scan_duration_ms = Date.now() - start;

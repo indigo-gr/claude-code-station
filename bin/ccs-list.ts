@@ -245,8 +245,15 @@ function sessionToRow(s: SessionRowFull): string {
 function main(): number {
   const flags = parseArgs(process.argv.slice(2));
   const paths = getPaths();
-  const { db, close } = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
+  // openDb() is called INSIDE the try so that a cold-start failure (state.db
+  // missing before first scan) is caught and rendered as a friendly hint
+  // instead of leaking a raw stack trace to fzf.
+  let close: (() => void) | undefined;
   try {
+    const handle = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
+    const db = handle.db;
+    close = handle.close;
+
     const lines: string[] = [];
 
     const wantRepos = !flags.sessionsOnly && !flags.currentOnly;
@@ -293,12 +300,27 @@ function main(): number {
     process.stdout.write(lines.join("\n") + (lines.length > 0 ? "\n" : ""));
     return 0;
   } catch (err) {
-    process.stderr.write(
-      `[ccs-list] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    // Cold-start case: state.db not yet built by the scanner.
+    // better-sqlite3 surfaces ENOENT-style failures with "unable to open
+    // database file" or similar; also guard against explicit "does not exist"
+    // messaging that openDb() may raise in future.
+    const isMissing =
+      /unable to open database file/i.test(msg) ||
+      /database (file )?does not exist/i.test(msg) ||
+      /ENOENT/.test(msg);
+    if (isMissing) {
+      process.stderr.write(
+        "[ccs-list] state.db not found. Run `ccs --refresh` first to build the cache.\n",
+      );
+    } else {
+      process.stderr.write(`[ccs-list] fatal: ${msg}\n`);
+    }
     return 1;
   } finally {
-    close();
+    // close may be undefined if openDb() itself threw before the destructure
+    // completed, so guard against it.
+    close?.();
   }
 }
 
