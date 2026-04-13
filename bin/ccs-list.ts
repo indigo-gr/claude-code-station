@@ -190,8 +190,13 @@ function buildRepoBadges(r: RepoRowFull): string {
   return clipBadges(badges, BADGES_MAX);
 }
 
+// Dim vertical bar separator (ANSI 2 = faint) inserted between the label
+// column and the description column to visually distinguish them. fzf is
+// invoked with --ansi so these codes render as styling.
+const LABEL_SEP = " \x1b[2m│\x1b[0m";
+
 function repoToRow(r: RepoRowFull): string {
-  const label = `${r.icon || "📁"} ${r.name}`;
+  const label = `${r.icon || "📁"} ${r.name}${LABEL_SEP}`;
   const desc = truncate(r.description || "", DESC_MAX);
   const badges = buildRepoBadges(r);
   const cwd = r.cwd && r.cwd.length > 0 ? r.cwd : r.path;
@@ -219,12 +224,17 @@ interface SessionRowFull {
 }
 
 function sessionToRow(s: SessionRowFull): string {
-  const displayName =
-    s.repo_display ||
-    (s.cwd ? s.cwd.replace(homedir(), "~") : "(unknown)");
-  const icon = s.repo_icon || "🔄";
-  const iconPart = icon && icon !== "🔄" ? `${icon} ` : "";
-  const label = `🔄 ${iconPart}${displayName}`;
+  // Mapped sessions use the registered repo icon + name.
+  // Unmapped sessions get ❓ as a visible reminder: either a one-off run
+  // or a repo that hasn't been added to repos.yml yet.
+  const isMapped = !!s.repo_display;
+  const displayName = isMapped
+    ? s.repo_display!
+    : s.cwd
+      ? s.cwd.replace(homedir(), "~")
+      : "(unknown)";
+  const mapIcon = isMapped ? s.repo_icon || "📁" : "❓";
+  const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
   const desc = truncate(s.topic || "", DESC_MAX);
   const badges = `[${formatSessionStamp(s.last_activity_at)}]`;
   const command = s.repo_command || "claude";
@@ -289,12 +299,22 @@ function main(): number {
             ORDER BY s.last_activity_at DESC`,
         )
         .all() as SessionRowFull[];
+      const sessionRows: string[] = [];
       for (const s of rows) {
         if (filterCwd && !(s.cwd === filterCwd || s.cwd.startsWith(filterCwd + "/"))) {
           continue;
         }
-        lines.push(sessionToRow(s));
+        sessionRows.push(sessionToRow(s));
       }
+      // Insert a section separator between NEW repos and RESUME sessions
+      // when both are present. The separator row uses KIND=separator so
+      // bin/ccs recognises it and exits cleanly if the user selects it.
+      if (lines.length > 0 && sessionRows.length > 0) {
+        const bar = "─".repeat(20);
+        const label = `\x1b[2m${bar}\x1b[0m \x1b[1;90m Past Sessions \x1b[0m\x1b[2m${bar}\x1b[0m`;
+        lines.push([label, "", "", "separator:-", "", ""].join("\t"));
+      }
+      lines.push(...sessionRows);
     }
 
     process.stdout.write(lines.join("\n") + (lines.length > 0 ? "\n" : ""));
