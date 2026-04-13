@@ -139,13 +139,14 @@ done
 CLIP_BINDS=()
 if [[ -n "$CLIP_CMD" ]]; then
   # ctrl-y: build "cd CWD && COMMAND [--resume UUID]" depending on kind ({4})
+  # Keep fzf open (no +abort) and briefly flash a header confirming the copy.
   CLIP_BINDS+=(--bind "ctrl-y:execute-silent(
     kk={4}; cwd={5}; cmd={6};
     case \"\$kk\" in
       resume:*) uuid=\${kk#resume:}; printf 'cd %s && %s --resume %s' \"\$cwd\" \"\$cmd\" \"\$uuid\" | ${CLIP_CMD} ;;
       new:*)    printf 'cd %s && %s' \"\$cwd\" \"\$cmd\" | ${CLIP_CMD} ;;
     esac
-  )+abort")
+  )+change-header(📋 Copied command to clipboard — ⏎: launch | ^Y: copy again)")
   # ctrl-i: copy UUID (resume) or repo path (new)
   CLIP_BINDS+=(--bind "ctrl-i:execute-silent(
     kk={4};
@@ -153,15 +154,16 @@ if [[ -n "$CLIP_CMD" ]]; then
       resume:*) printf '%s' \"\${kk#resume:}\" | ${CLIP_CMD} ;;
       new:*)    printf '%s' {5} | ${CLIP_CMD} ;;
     esac
-  )+abort")
+  )+change-header(📋 Copied ID/path to clipboard — ⏎: launch | ^I: copy again)")
 fi
 
-# ctrl-d: delete session (resume only); on new rows show a harmless message
+# ctrl-d: delete session (resume only). Repo (new) rows cannot be deleted
+# from ccs — repos.yml is the source of truth; edit it directly to remove.
 DELETE_BIND=(--bind "ctrl-d:execute(
   kk={4};
   case \"\$kk\" in
     resume:*) bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
-    new:*)    echo '[ccs] ctrl-d only applies to resume rows (press any key)'; read -r _ ;;
+    new:*)    echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r _ ;;
   esac
 )+reload(tsx '${CCS_LIST}'${LIST_ARGS_STR})")
 
@@ -169,11 +171,12 @@ DELETE_BIND=(--bind "ctrl-d:execute(
 REFRESH_BIND=(--bind "ctrl-r:execute(tsx '${CCS_SCAN}' --force --quiet)+reload(tsx '${CCS_LIST}'${LIST_ARGS_STR})")
 
 # ── Header (adaptive to terminal width) ──────────────────────────────────────
+# Note: ^D deletes SESSIONS only; repos are managed via ~/.config/ccs/repos.yml
 COLS=$(tput cols 2>/dev/null || echo 80)
 if (( COLS >= 80 )); then
-  HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: delete session | Esc: cancel'
+  HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: delete session (resume only — edit repos.yml to remove a repo) | Esc: cancel'
 else
-  HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del Esc:quit'
+  HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del[resume] Esc:quit'
 fi
 
 # ── Launch fzf ───────────────────────────────────────────────────────────────
@@ -228,6 +231,10 @@ case "$KIND" in
       echo "❌ Invalid repo name (shell metacharacters): ${KEY}" >&2
       exit 1
     fi
+    ;;
+  separator)
+    # Section separator row selected (user hit Enter on the divider). No-op exit.
+    exit 0
     ;;
   *)
     echo "❌ Unknown row kind: ${KIND}" >&2
