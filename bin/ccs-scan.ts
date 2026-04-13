@@ -591,14 +591,16 @@ async function parseSessionJsonl(
   }
 
   // summary: search whole content
+  // Apply maskSecrets BEFORE truncation so a secret token straddling the
+  // MAX_SUMMARY_LEN/MAX_TOPIC_LEN boundary is still redacted intact.
   let summary: string | null = null;
   const summaryMatch = SUMMARY_RE.exec(content);
   if (summaryMatch) {
-    summary = summaryMatch[1].trim().slice(0, MAX_SUMMARY_LEN);
+    summary = maskSecrets(summaryMatch[1].trim()).slice(0, MAX_SUMMARY_LEN);
   }
 
   const topic = firstUserMsg
-    ? firstUserMsg.slice(0, MAX_TOPIC_LEN)
+    ? maskSecrets(firstUserMsg).slice(0, MAX_TOPIC_LEN)
     : null;
 
   return {
@@ -846,5 +848,13 @@ async function main(): Promise<number> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().then((code) => process.exit(code));
+  main().then(
+    (code) => process.exit(code),
+    (err) => {
+      process.stderr.write(
+        `[ccs-scan] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    },
+  );
 }
