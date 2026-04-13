@@ -12,6 +12,7 @@
  *   (default)         NEW first (alpha), then RESUME (last_activity_at DESC)
  */
 
+import { homedir } from "node:os";
 import { openDb } from "./ccs-db.ts";
 import { getPaths } from "./ccs-config.ts";
 
@@ -220,7 +221,7 @@ interface SessionRowFull {
 function sessionToRow(s: SessionRowFull): string {
   const displayName =
     s.repo_display ||
-    (s.cwd ? s.cwd.replace(process.env.HOME || "", "~") : "(unknown)");
+    (s.cwd ? s.cwd.replace(homedir(), "~") : "(unknown)");
   const icon = s.repo_icon || "🔄";
   const iconPart = icon && icon !== "🔄" ? `${icon} ` : "";
   const label = `🔄 ${iconPart}${displayName}`;
@@ -244,9 +245,8 @@ function sessionToRow(s: SessionRowFull): string {
 function main(): number {
   const flags = parseArgs(process.argv.slice(2));
   const paths = getPaths();
-  const handle = openDb(paths.stateDb);
+  const { db, close } = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
   try {
-    const db = handle.db;
     const lines: string[] = [];
 
     const wantRepos = !flags.sessionsOnly && !flags.currentOnly;
@@ -298,7 +298,7 @@ function main(): number {
     );
     return 1;
   } finally {
-    handle.close();
+    close();
   }
 }
 
