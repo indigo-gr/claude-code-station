@@ -350,7 +350,7 @@ function renderRepoPreview(name: string, cwd: string): void {
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
-function main(): void {
+async function main(): Promise<void> {
   const kindKey = process.argv[2] || "";
   const cwd = process.argv[3] || "";
 
@@ -369,9 +369,12 @@ function main(): void {
 
   try {
     if (kind === "resume") {
-      renderSessionPreview(key);
+      await renderSessionPreview(key);
     } else if (kind === "new") {
       renderRepoPreview(key, cwd);
+    } else if (kind === "separator") {
+      // Divider row — intentionally blank preview.
+      return;
     } else {
       console.log(`Unknown kind: ${kind}`);
     }
@@ -381,4 +384,9 @@ function main(): void {
   }
 }
 
-main();
+main().catch((err) => {
+  console.log(
+    `Preview fatal: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(0);
+});

@@ -8,7 +8,7 @@ VERSION="0.2.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CCS_LIST="${SCRIPT_DIR}/ccs-list.ts"
 CCS_SCAN="${SCRIPT_DIR}/ccs-scan.ts"
-CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview-session.ts"
+CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.ts"
 CCS_DELETE="${SCRIPT_DIR}/ccs-delete.sh"
 
 # ── CCR_CMD -> CCS_CMD migration shim ────────────────────────────────────────
