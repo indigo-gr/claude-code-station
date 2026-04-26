@@ -45,6 +45,13 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   if [[ -d "$SUBAGENT_DIR" ]]; then
     rm -rf "$SUBAGENT_DIR"
   fi
+  # Remove the stale row from the SQLite cache so the session disappears
+  # from the fzf list immediately on reload (Ctrl-D → +reload).
+  CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ccs"
+  DB_FILE="${CACHE_DIR}/state.db"
+  if [[ -f "$DB_FILE" ]] && command -v sqlite3 &>/dev/null; then
+    sqlite3 "$DB_FILE" "DELETE FROM sessions WHERE uuid = '${SESSION_ID}';" 2>/dev/null || true
+  fi
   echo "✅ Deleted"
 else
   echo "Cancelled"
