@@ -1,144 +1,294 @@
-# Claude Code Recall - ccr
+# Claude Code Station — ccs
 
-A fast, fzf-powered session picker for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Search, preview, and resume any past conversation from any directory.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node 20+](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 
-fzfを使ったClaude Codeセッションピッカー。全プロジェクトの過去の会話を検索・プレビュー・再開できます。
+A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Pick a project to launch fresh **or** resume any past session — all from a single fuzzy finder, across every repo you own.
+
+複数プロジェクトを横断するClaude Code用のfzf起動＆セッション再開ランチャー。新規起動も過去セッション再開も、同じfzfから一発で。
+
+---
+
+## What's new in v0.2.0 / v0.2.0 の新機能
+
+- **Mixed-mode launcher** — NEW repos **and** RESUME sessions in a single fzf list / 新規リポジトリ起動と過去セッション再開を同じfzfで混在表示
+- **Repository state badges** — git status, handoff/, pendings/, integration links at a glance / リポジトリの状態（git・handoff・pendings・連携先）をバッジで一目把握
+- **SQLite-backed state cache** — `~/.cache/ccs/state.db` keeps multi-repo overview fast / マルチリポ状態キャッシュ（SQLite）で高速起動
+- **Per-repo custom integration fields** — Plane, Attio, Notion, Linear, Slack, GitHub, Figma (and any custom key) / リポジトリごとの連携情報（Plane/Attio/Notion/Linear/Slack/GitHub/Figma ほか任意のカスタムキー）
+- **Renamed**: `claude-code-recall` (ccr) → `claude-code-station` (ccs). See the [migration section](#migration-from-ccr-v01x--ccr-v01x-からの移行) below. / `claude-code-recall` (ccr) から改名。移行は下記セクション参照。
+
+---
 
 ## Why? / なぜ？
 
-`claude --resume` only shows sessions from the current directory and provides no search. With dozens of projects and sessions, finding the right one is painful.
+`claude --resume` only shows sessions from the current directory and provides no search. And when you have a dozen active projects, you also want to **launch a fresh session** in the right repo without `cd`-ing around.
 
-`claude --resume` はカレントディレクトリのセッションしか表示せず、検索もできません。プロジェクトやセッションが増えると、目的の会話を探すのが大変です。
+`claude --resume` はカレントディレクトリのセッションしか出さず、検索もできない。プロジェクトが増えると「新規起動したいリポ」も「続きをやりたいセッション」も、どちらを探すのも手間。
 
-**ccr** solves this: / **ccr** はこれを解決します：
+**ccs** solves both / **ccs** が両方まとめて解決：
 
-- Fuzzy search across all projects by name, timestamp, or conversation content / 全プロジェクト横断のファジー検索（名前・日時・会話内容）
-- Live preview of conversation history in the side pane / サイドペインで会話履歴をリアルタイムプレビュー
-- Resume with a single Enter key — in the correct directory / Enterキー1つで正しいディレクトリに移動して再開
-- Cross-platform clipboard support (macOS, Linux X11, Wayland) / クロスプラットフォームのクリップボード対応
+- Fuzzy search across all projects (repo name, session title, timestamp, content) / 全プロジェクトのファジー検索
+- Mixed list: `NEW` repo rows + `RESUME` session rows side by side / 新規起動行と再開行を同じリストに
+- Live preview — git status, handoff/pendings summary, integration badges, conversation head / ライブプレビュー（git状態・handoff/pendings・連携バッジ・会話冒頭）
+- Enter once, launched in the correct cwd with the correct command / Enter一回で正しいcwd・正しいコマンドで起動
 
-## Demo
-
-```
-$ ccr
-ccr> learning                          ┃ ━━━ Session Info ━━━
-                                       ┃ 📁 ~/Workspace/LEARNING_SERIES
-  ~/Workspace/LEARNING_SERIES  1h ago  ┃ 🌿 feature/auth
-    Implement the auth module...       ┃ 📌 Claude 2.1.72
-  ~/Workspace/LEARNING_SERIES  4h ago  ┃ 💬 24 messages
-    Fix the client complaints...       ┃ ━━━ Conversation ━━━
-  ~/Workspace/LEARNING_SERIES  1d ago  ┃
-    Review the API design...           ┃ 👤 Fix the client complaints...
-> ~/Workspace/LEARNING_SERIES  2d ago  ┃ 🤖 Let me check the issue...
-    Set up the project structure...    ┃
-```
+---
 
 ## Install / インストール
 
 ### Prerequisites / 前提条件
 
-- [fzf](https://github.com/junegunn/fzf) - fuzzy finder / ファジーファインダー
-- [tsx](https://github.com/privatenumber/tsx) - TypeScript runner / TypeScript実行環境 (`npm install -g tsx`)
-- [Node.js](https://nodejs.org/) 18+
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
+- [Node.js](https://nodejs.org/) **20+**
+- [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023)
+- [tsx](https://github.com/privatenumber/tsx) — TypeScript runner (`npm install -g tsx`)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
+- `better-sqlite3` and `yaml` npm packages (installed via `npm install`)
 
 ### Quick install / クイックインストール
 
 ```bash
-git clone https://github.com/indigo-gr/claude-code-recall.git
-cd claude-code-recall
-bash install.sh
+git clone https://github.com/indigo-gr/claude-code-station.git
+cd claude-code-station
+npm install
+./install.sh
 ```
 
-This copies the scripts to `~/.claude/scripts/` and guides you through PATH setup.
-
-スクリプトを `~/.claude/scripts/` にコピーし、PATHの設定をガイドします。
+`install.sh --with-deps` で `npm install` も install.sh に任せられる。
 
 ### Manual install / 手動インストール
 
 ```bash
-# Copy files / ファイルをコピー
-cp bin/* ~/.claude/scripts/
-chmod +x ~/.claude/scripts/ccr ~/.claude/scripts/ccr-delete.sh
+npm install
+cp bin/ccs bin/ccs-*.ts bin/ccs-*.sh ~/.claude/scripts/
+chmod +x ~/.claude/scripts/ccs ~/.claude/scripts/ccs-delete.sh
 
-# Add to PATH (in ~/.zshrc or ~/.bashrc)
-# PATHに追加（~/.zshrc または ~/.bashrc に記述）
+# Add to ~/.zshrc or ~/.bashrc
 export PATH="$HOME/.claude/scripts:$PATH"
 ```
 
+---
+
+## Quick start / クイックスタート
+
+1. Run `ccs` once — it creates `~/.config/ccs/repos.yml` template and a `README.md` next to it. / 初回実行で `~/.config/ccs/repos.yml` のテンプレートと README を生成
+2. Edit `repos.yml` to add your projects (see [Configuration](#configuration--設定)) / プロジェクトを追記
+3. Run `ccs` again — fzf opens with your repos + past sessions. / 再実行でfzfが起動
+
+```
+$ ccs
+ccs> ils                                ┃ ━━━ Repo ━━━
+                                        ┃ 📁 ~/pj/ILS
+  NEW   ClaudeCode                      ┃ 🌿 main (clean)
+        Claude Code設定                 ┃ 📨 handoff: 2 files
+> NEW   ILS事業部                       ┃ 📌 pendings: 1
+        ILS本番リポジトリ               ┃ ━━━ Integrations ━━━
+  RESUME ~/pj/ILS  2h ago               ┃ Plane:  ed1ec22d-…
+         Fix the billing webhook…       ┃ Slack:  #ils-dev
+  RESUME ~/pj/ILS  1d ago               ┃ GitHub: indigo-gr/ils
+         Plane work item sync…          ┃
+```
+
+---
+
+## Configuration / 設定
+
+Full schema: [`docs/design/repos-yml-schema.md`](docs/design/repos-yml-schema.md)
+
+### Minimal / 最小構成
+
+```yaml
+version: 1
+repos:
+  - name: ClaudeCode
+    path: ~/.claude
+  - name: ILS
+    path: ~/pj/ILS
+    description: ILS本番リポジトリ
+    tags: [work]
+```
+
+### With integrations / 連携情報付き
+
+```yaml
+version: 1
+repos:
+  - name: ILS事業部
+    path: ~/pj/ILS
+    description: ILS本番リポジトリ
+    tags: [work]
+    custom:
+      plane_project_id: "ed1ec22d-xxxx"
+      plane_url: "https://plane.example.com/ils"
+      slack_channel: "#ils-dev"
+      github_repo: "indigo-gr/ils"
+      notion_db: "abc123"
+```
+
+Known keys: `plane_project_id`, `plane_url`, `attio_workspace`, `notion_db`, `linear_team`, `slack_channel`, `github_repo`, `figma_file`. Unknown keys are rendered verbatim under "Other Integrations". / 未知キーは "Other Integrations" にそのまま表示。
+
+### Special command (Strapi dev server) / 特殊コマンド
+
+```yaml
+version: 1
+defaults:
+  command: "claude"
+repos:
+  - name: Strapi CMS
+    path: ~/Website/strapi-cms
+    command: "npm run develop"   # overrides claude entirely
+    icon: "🚀"
+    scan: false                  # not a Claude repo — skip state scan
+    tags: [dev-server]
+```
+
+Precedence: `repos[].command` > `defaults.command` > `$CCS_CMD` > `"claude"`.
+
+### Preview pane sample / プレビュー表示例
+
+```
+━━━ Repo: ILS事業部 ━━━
+📁 ~/pj/ILS           🌿 main (2 modified)
+📨 handoff: 2 files   📌 pendings: 1
+
+━━━ Integrations ━━━
+Plane:    ✅ ed1ec22d-xxxx → https://plane.example.com/ils
+Slack:    ✅ #ils-dev
+GitHub:   ✅ indigo-gr/ils
+Notion:   ✅ abc123
+```
+
+---
+
 ## Usage / 使い方
 
-```bash
-ccr                    # Search all sessions across all projects / 全セッションを検索
-ccr .                  # Only sessions from current directory / カレントディレクトリのみ
-ccr --model opus       # Pass options through to claude / claudeにオプションを渡す
-```
+### Flags / フラグ
 
-### Keyboard Controls / キーボード操作
-
-| Key / キー | Action / 動作 |
+| Flag | Action |
 |---|---|
-| Enter | Resume selected session / 選択したセッションを再開 |
-| Ctrl-Y | Copy full resume command to clipboard / resumeコマンド全体をクリップボードにコピー |
-| Ctrl-I | Copy session ID only / セッションIDのみコピー |
-| Ctrl-D | Delete session (with confirmation) / セッションを削除（確認あり） |
+| (none) | Mixed list: NEW repos + RESUME sessions / 混在表示 |
+| `.` | Only sessions whose cwd is under current dir / カレント配下のセッションのみ |
+| `--new` | Only NEW repo entries / 新規起動行のみ |
+| `--resume` | Only past sessions / 再開行のみ |
+| `--refresh` | Force DB rebuild before showing list / 走査を強制してから表示 |
+| `--no-scan` | Skip implicit pre-scan (use stale DB) / 事前走査をスキップ |
+| `--help` / `-h` | Help / ヘルプ |
+| `--version` / `-v` | Version / バージョン |
+| _anything else_ | Passed through to the launched command / 起動コマンドへパススルー |
+
+### Keyboard / キーボード
+
+| Key | Action |
+|---|---|
+| Enter | Launch (NEW) or resume (RESUME) / 起動または再開 |
+| Ctrl-Y | Copy `cd … && cmd [--resume …]` to clipboard; fzf stays open with a "📋 Copied" header / クリップボードコピー後もfzfは開いたまま、ヘッダーに📋通知 |
+| Ctrl-I | Copy session UUID or repo path; fzf stays open / コピー後も開いたまま |
+| Ctrl-R | Refresh DB and reload list / DB再走査してリロード |
+| Ctrl-D | Delete session (RESUME rows only). To remove a repo, edit `~/.config/ccs/repos.yml` directly / セッション削除はRESUME行のみ。リポ削除は`repos.yml`を直接編集 |
 | Esc / Ctrl-C | Cancel / キャンセル |
 
-### Environment Variables / 環境変数
+**Visual cues / 見た目のガイド:**
+- NEW rows and RESUME rows are separated by a dim `── Past Sessions ──` divider. Selecting the divider is a no-op.
+- RESUME sessions mapped to a registered repo show that repo's icon (e.g., `🔄 📁 ClaudeCode`). Unmapped sessions (cwd that isn't in `repos.yml`) show `❓` — a visual cue that the session was either a one-off or that the repo isn't registered yet.
 
-| Variable / 変数 | Default / デフォルト | Description / 説明 |
-|---|---|---|
-| `CCR_CMD` | `claude` | Command to run Claude Code. Set to your wrapper if needed. / Claude Codeの実行コマンド。ラッパーを使う場合に設定。 |
+### Workflows / 主な使い方
 
-#### Example: 1Password integration / 例：1Password連携
-
-If you use 1Password CLI to inject secrets: / 1Password CLIでシークレットを注入する場合：
+**1. Launch a project fresh / プロジェクトを新規起動**
 
 ```bash
-# In ~/.zshrc
-export CCR_CMD="opr claude"
+ccs --new
+# pick repo → Enter → claude starts in repo cwd
 ```
 
-> **Note / 注意**: Only set `CCR_CMD` to commands you trust. The value is split by whitespace and executed directly. / `CCR_CMD`には信頼できるコマンドのみ設定してください。値はスペースで分割されそのまま実行されます。
+**2. Resume yesterday's work / 昨日の続き**
 
-## How it works / 仕組み
-
-```
-ccr (shell) ──> ccr-parse.ts ──> fzf ──> claude --resume <id>
-                     │                      │
-                     │                      ├── ccr-preview.ts (side pane)
-                     │                      └── ccr-delete.sh  (Ctrl-D)
-                     │
-                     └── reads ~/.claude/projects/*/*.jsonl
+```bash
+ccs --resume
+# fuzzy search by content → Enter → cd + claude --resume <id>
 ```
 
-1. **ccr-parse.ts** scans `~/.claude/projects/` for session files, extracts metadata (project, timestamp, first message), and outputs fzf-compatible tab-separated lines / `~/.claude/projects/` のセッションファイルをスキャンし、メタデータを抽出してfzf用のタブ区切り行を出力
-2. **fzf** provides fuzzy search, preview pane, and keyboard bindings / ファジー検索、プレビューペイン、キーバインドを提供
-3. **ccr-preview.ts** renders conversation history for the selected session / 選択されたセッションの会話履歴を表示
-4. On Enter, **ccr** changes to the session's working directory and runs `claude --resume` / Enterで作業ディレクトリに移動し `claude --resume` を実行
+**3. Resume in current directory / カレントディレクトリで再開**
+
+```bash
+cd ~/pj/ILS
+ccs .
+```
+
+---
+
+## State cache / 状態キャッシュ
+
+ccs keeps a SQLite cache at `~/.cache/ccs/state.db` (or `$XDG_CACHE_HOME/ccs/state.db`) with repo metadata, git state badges, session summaries, and handoff/pending file lists.
+
+`~/.cache/ccs/state.db` にリポジトリ情報・git状態・セッション要約などをキャッシュ。
+
+- Auto-refresh on every `ccs` run (cheap — 10s TTL per repo) / 毎回の起動で自動走査（リポジトリ単位で10秒TTL）
+- Manual force: `ccs --refresh` or press `Ctrl-R` in fzf / 手動強制: `--refresh` または fzf 内で `Ctrl-R`
+- Reset: `rm ~/.cache/ccs/state.db` — next `ccs` run rebuilds it / リセットは DB を削除するだけ（設定 `repos.yml` は無事）
+
+Schema details: [`docs/design/sqlite-schema.md`](docs/design/sqlite-schema.md).
+
+---
+
+## Migration from ccr v0.1.x / ccr v0.1.x からの移行
+
+Existing sessions are stored under `~/.claude/projects/*/*.jsonl` — **nothing to migrate manually**. ccs auto-discovers them on first scan.
+
+既存の JSONL セッション（`~/.claude/projects/*/*.jsonl`）は初回走査で自動発見される。**手動移行不要**。
+
+### Command & env rename / コマンド・環境変数のリネーム
+
+| Before (ccr v0.1.x) | After (ccs v0.2.0) |
+|---|---|
+| `ccr` | `ccs` |
+| `CCR_CMD` env | `CCS_CMD` env |
+| GitHub: `indigo-gr/claude-code-recall` | `indigo-gr/claude-code-station` |
+
+`CCR_CMD` is still honored for now (with a deprecation warning to stderr). Rename it in your shell rc at your earliest convenience. / `CCR_CMD` は当面 deprecation warning 付きで尊重。なるべく早めに `CCS_CMD` にリネームを。
+
+### Uninstall old ccr / 旧 ccr のアンインストール
+
+```bash
+rm -f ~/.claude/scripts/ccr ~/.claude/scripts/ccr-*.ts ~/.claude/scripts/ccr-*.sh
+# Remove any `export CCR_CMD=...` from ~/.zshrc or ~/.bashrc
+```
+
+---
+
+## Architecture / 設計
+
+```
+ccs (bash)
+ ├─ ccs-scan.ts     → writes ~/.cache/ccs/state.db
+ ├─ ccs-list.ts     → reads DB, emits fzf rows (NEW + RESUME)
+ ├─ ccs-preview.ts  → preview pane (repo badges / session head)
+ ├─ ccs-config.ts   → loads ~/.config/ccs/repos.yml
+ ├─ ccs-db.ts       → better-sqlite3 wrapper (WAL, FK on)
+ └─ ccs-delete.sh   → Ctrl-D handler
+```
+
+Design docs: [`docs/design/`](docs/design/).
+
+---
 
 ## Security / セキュリティ
 
-- Session IDs are validated as UUID format before any shell execution / セッションIDはシェル実行前にUUID形式を検証
-- Working directory paths are validated to be under `$HOME` / 作業ディレクトリは `$HOME` 配下であることを検証
-- Known secret patterns (API keys, tokens) are masked in preview output / 既知のシークレットパターン（APIキー・トークン等）をプレビューでマスク
-- No `eval` usage — all commands are executed directly / `eval` 不使用 — 全コマンドを直接実行
-- File size limits (50MB) prevent memory exhaustion / ファイルサイズ制限（50MB）でメモリ枯渇を防止
+- Session IDs validated as UUID before shell execution / セッションIDはUUID形式を検証してからシェル実行
+- `$HOME`-rooted path validation for every `cwd` / 全cwdが`$HOME`配下であることを検証
+- Known secret patterns (API keys, tokens) masked in preview / プレビュー内の既知シークレットパターンはマスク
+- SQLite DB created with `0600` permissions; config/cache dirs `0700` / DBは0600、設定/キャッシュディレクトリは0700
+- No `eval`; all invocations are direct / `eval`不使用
+- Prepared statements only for SQLite; foreign keys enforced / SQLiteはprepared statementsのみ、FK有効
+- 50MB per-file cap when parsing JSONL sessions / JSONLパーサは1ファイル50MB上限
 
-## Platform Support / プラットフォーム対応
+> **Trust note / 注意**: the `command:` field in `repos.yml` is executed as-is. It's your config — don't paste anything you wouldn't type into a shell. / `repos.yml` の `command:` はそのまま実行される。自分の設定ファイルなので信頼されるが、シェルに打ちたくない文字列は書かないこと。
 
-| Platform / 環境 | Clipboard / クリップボード | Status / 状態 |
-|---|---|---|
-| macOS | pbcopy | Fully supported / 完全対応 |
-| Linux (X11) | xclip / xsel | Supported / 対応 |
-| Linux (Wayland) | wl-copy | Supported / 対応 |
-| Linux (no display) | — | Works without clipboard features / クリップボード以外は動作 |
+---
 
-## Inspired by / インスパイア元
+## Contributing / コントリビュート
 
-- [ccresume](https://github.com/sasazame/ccresume) by @sasazame — React Ink-based session picker
-- [ccraw](https://github.com/hiragram/ccraw) by @hiragram — conversation log viewer
-- [ccusage](https://github.com/ryoppippi/ccusage) by @ryoppippi — usage tracker
+Issues and PRs welcome. See [`REVIEW.md`](REVIEW.md) for review standards and [`CHANGELOG.md`](CHANGELOG.md) for release history.
+
+---
 
 ## License / ライセンス
 
