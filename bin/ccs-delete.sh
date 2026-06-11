@@ -5,6 +5,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Same package-local tsx preference as bin/ccs (npm / copy install layouts);
+# this script is invoked by path (never symlinked), so no $0 resolution here.
+if [[ -x "${SCRIPT_DIR}/../node_modules/.bin/tsx" ]]; then
+  TSX="${SCRIPT_DIR}/../node_modules/.bin/tsx"
+elif [[ -x "${SCRIPT_DIR}/node_modules/.bin/tsx" ]]; then
+  TSX="${SCRIPT_DIR}/node_modules/.bin/tsx"
+else
+  TSX="tsx"
+fi
+
 SESSION_ID="${1:-}"
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
@@ -74,8 +85,8 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # from the fzf list immediately on reload (Ctrl-D → +reload). Uses a bound
   # parameter via better-sqlite3 (audit M-3) and reports failures instead of
   # swallowing them (audit L-3).
-  if command -v tsx &>/dev/null; then
-    if ! tsx "${SCRIPT_DIR}/ccs-delete-session.ts" "$SESSION_ID"; then
+  if [[ "$TSX" != "tsx" ]] || command -v tsx &>/dev/null; then
+    if ! "${TSX}" "${SCRIPT_DIR}/ccs-delete-session.ts" "$SESSION_ID"; then
       echo "[ccs] warning: cache row cleanup failed — a stale row may remain until the next refresh" >&2
     fi
   else
