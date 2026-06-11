@@ -160,7 +160,11 @@ export function appendReposToYaml(
   for (const c of candidates) {
     repos.add(doc.createNode({ name: c.name, path: c.path }));
   }
-  return doc.toString();
+  // lineWidth: 0 — never re-fold long lines the user wrote on one line;
+  // flowCollectionPadding: false — keep `tags: [work]`, not `[ work ]`.
+  // Without these, toString() normalizes UNTOUCHED lines (observed on a real
+  // config: every tags entry repadded + a long description folded in two).
+  return doc.toString({ lineWidth: 0, flowCollectionPadding: false });
 }
 
 /**

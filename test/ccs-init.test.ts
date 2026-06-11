@@ -216,6 +216,30 @@ repos:
       /repos.*sequence not found/,
     );
   });
+
+  test("untouched lines stay byte-identical — no reflow or flow-seq repadding", () => {
+    // Regression from the first real-world run: default toString() repadded
+    // every `tags: [x]` to `[ x ]` and folded a >80-char description line.
+    const longDesc = "World Monitor Pro - " + "地政学・経済・インフラ".repeat(8);
+    const source = [
+      "version: 1",
+      "repos:",
+      "  - name: styled",
+      "    path: ~/styled",
+      `    description: ${longDesc}`,
+      "    tags: [dev, tool]",
+      "",
+    ].join("\n");
+    const out = appendReposToYaml(source, [{ name: "n", path: "~/n" }]);
+    assert.ok(
+      out.includes(`    description: ${longDesc}\n`),
+      "long description must not be folded across lines",
+    );
+    assert.ok(
+      out.includes("    tags: [dev, tool]\n"),
+      "flow sequence must keep its original [x, y] padding style",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
