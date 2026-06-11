@@ -5,11 +5,35 @@
 set -euo pipefail
 
 VERSION="0.2.0"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve $0 through symlinks before taking dirname: `npm install -g
+# github:indigo-gr/claude-code-station` links this script into the global
+# bin dir, and the SYMLINK's dirname has none of the sibling .ts modules.
+SOURCE="$0"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  if [[ "$SOURCE" != /* ]]; then SOURCE="${DIR}/${SOURCE}"; fi
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Prefer a package-local tsx over the PATH one: the npm install brings tsx
+# as a dependency (../node_modules from the package's bin/), and the copy
+# install (install.sh) symlinks node_modules next to the scripts. Fall back
+# to a globally installed tsx for the bare-checkout workflow.
+if [[ -x "${SCRIPT_DIR}/../node_modules/.bin/tsx" ]]; then
+  TSX="${SCRIPT_DIR}/../node_modules/.bin/tsx"
+elif [[ -x "${SCRIPT_DIR}/node_modules/.bin/tsx" ]]; then
+  TSX="${SCRIPT_DIR}/node_modules/.bin/tsx"
+else
+  TSX="tsx"
+fi
+
 CCS_LIST="${SCRIPT_DIR}/ccs-list.ts"
 CCS_SCAN="${SCRIPT_DIR}/ccs-scan.ts"
 CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.ts"
 CCS_DELETE="${SCRIPT_DIR}/ccs-delete.sh"
+CCS_INIT="${SCRIPT_DIR}/ccs-init.ts"
 
 # ── CCR_CMD -> CCS_CMD migration shim ────────────────────────────────────────
 if [[ -n "${CCR_CMD:-}" && -z "${CCS_CMD:-}" ]]; then
@@ -37,7 +61,11 @@ CLIP_CMD=$(clipboard_cmd)
 check_deps() {
   local missing=()
   command -v fzf &>/dev/null   || missing+=("fzf")
-  command -v tsx &>/dev/null   || missing+=("tsx (npm install -g tsx)")
+  # tsx: a resolved package-local binary counts; only require a PATH tsx
+  # when no local one was found.
+  if [[ "$TSX" == "tsx" ]]; then
+    command -v tsx &>/dev/null || missing+=("tsx (npm install -g tsx)")
+  fi
   command -v node &>/dev/null  || missing+=("node")
   command -v claude &>/dev/null || missing+=("claude (Claude Code CLI)")
   command -v tput &>/dev/null  || missing+=("tput")
@@ -67,6 +95,10 @@ Usage:
   ccs --resume        Only past sessions
   ccs --refresh       Force pre-scan before showing list
   ccs --no-scan       Skip implicit pre-scan (use stale DB)
+  ccs init            Create ~/.config/ccs/repos.yml from the template
+  ccs init --auto-discover [--depth N]
+                      Scan \$HOME for git repos (default depth 5) and pick
+                      which to add to repos.yml via fzf multi-select
   ccs [options]       Unknown options pass through to launched command
 
 Controls:
@@ -95,6 +127,57 @@ Cache:  ~/.cache/ccs/state.db
 HELP
 }
 
+# ── init subcommand ──────────────────────────────────────────────────────────
+# `ccs init` scaffolds the config; `ccs init --auto-discover [--depth N]`
+# scans $HOME for git repos and appends fzf-selected ones to repos.yml.
+# Handled before the launcher arg loop — init never opens the main list.
+if [[ "${1:-}" == "init" ]]; then
+  shift
+  AUTO=0
+  INIT_ARGS=()
+  for a in "$@"; do
+    case "$a" in
+      --auto-discover) AUTO=1 ;;
+      *) INIT_ARGS+=("$a") ;;
+    esac
+  done
+
+  if [[ "$TSX" == "tsx" ]] && ! command -v tsx &>/dev/null; then
+    echo "❌ tsx not found (npm install -g tsx)" >&2
+    exit 1
+  fi
+
+  if (( ! AUTO )); then
+    "${TSX}" "${CCS_INIT}" scaffold
+    exit $?
+  fi
+
+  check_deps
+  echo "🔍 Scanning \$HOME for git repositories..." >&2
+  CANDIDATES="$("${TSX}" "${CCS_INIT}" discover ${INIT_ARGS[@]+"${INIT_ARGS[@]}"})" || exit 1
+  if [[ -z "$CANDIDATES" ]]; then
+    echo "No new git repositories found (everything within depth is already registered)." >&2
+    exit 0
+  fi
+  SELECTED=$(printf '%s\n' "$CANDIDATES" | fzf \
+    --multi \
+    --delimiter=$'\t' \
+    --header=$'TAB: toggle | Enter: add selected to repos.yml | Esc: cancel' \
+    --prompt='ccs init> ' \
+    --height='80%' \
+    --layout=reverse \
+    --border \
+    --tabstop=4 \
+  ) || exit 0
+  [[ -z "$SELECTED" ]] && exit 0
+  printf '%s\n' "$SELECTED" | "${TSX}" "${CCS_INIT}" append || exit 1
+  # Index the new repos right away so the next `ccs` shows them with stats.
+  "${TSX}" "${CCS_SCAN}" --force --quiet || {
+    echo "[ccs] scan failed — run \`ccs --refresh\` to index the new repos" >&2
+  }
+  exit 0
+fi
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 LIST_FLAGS=()
 PASS_ARGS=()
@@ -118,11 +201,11 @@ check_deps
 
 # ── Pre-scan ─────────────────────────────────────────────────────────────────
 if (( DO_REFRESH )); then
-  tsx "${CCS_SCAN}" --force --quiet || {
+  "${TSX}" "${CCS_SCAN}" --force --quiet || {
     echo "[ccs] refresh failed, continuing with stale DB" >&2
   }
 elif (( ! NO_SCAN )); then
-  tsx "${CCS_SCAN}" --quiet || {
+  "${TSX}" "${CCS_SCAN}" --quiet || {
     echo "[ccs] scan failed, continuing with stale DB" >&2
   }
 fi
@@ -168,10 +251,10 @@ DELETE_BIND=(--bind "ctrl-d:execute(
     resume:*) bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
     new:*)    echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r -n1 _ ;;
   esac
-)+reload(tsx '${CCS_LIST}'${LIST_ARGS_STR})")
+)+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
 # ctrl-r: force refresh
-REFRESH_BIND=(--bind "ctrl-r:execute(tsx '${CCS_SCAN}' --force --quiet)+reload(tsx '${CCS_LIST}'${LIST_ARGS_STR})")
+REFRESH_BIND=(--bind "ctrl-r:execute('${TSX}' '${CCS_SCAN}' --force --quiet)+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
 # ── Header (adaptive to terminal width) ──────────────────────────────────────
 # Note: ^D deletes SESSIONS only; repos are managed via ~/.config/ccs/repos.yml
@@ -183,12 +266,12 @@ else
 fi
 
 # ── Launch fzf ───────────────────────────────────────────────────────────────
-SELECTED=$(tsx "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
+SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   --ansi \
   --delimiter=$'\t' \
   --with-nth=1..3 \
   --header="${HEADER}" \
-  --preview="tsx '${CCS_PREVIEW}' {4} {5}" \
+  --preview="'${TSX}' '${CCS_PREVIEW}' {4} {5}" \
   --preview-window='right:55%:wrap' \
   "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
   "${DELETE_BIND[@]}" \

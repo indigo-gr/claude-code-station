@@ -99,6 +99,61 @@ describe("bin/ccs (non-interactive)", () => {
     assert.equal(res.status, 0);
     assert.match(res.stdout, /Usage:/);
     assert.match(res.stdout, /CCS_CMD/);
+    assert.match(res.stdout, /--auto-discover/);
+  });
+
+  test("works when invoked through a symlink (npm global-install layout)", async () => {
+    // `npm install -g github:...` puts a SYMLINK to bin/ccs on PATH; the
+    // script must resolve $0 back to the package bin/ to find its sibling
+    // .ts modules and the package-local tsx.
+    const sb = await makeShellSandbox();
+    try {
+      const linkDir = join(sb.root, "fake-global-bin");
+      await mkdir(linkDir, { recursive: true });
+      const link = join(linkDir, "ccs");
+      const { symlink } = await import("node:fs/promises");
+      await symlink(CCS_BIN, link);
+
+      const res = spawnSync("bash", [link, "init"], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: sb.home,
+          XDG_CONFIG_HOME: join(sb.home, ".config"),
+          XDG_CACHE_HOME: join(sb.home, ".cache"),
+        },
+      });
+      // `init` exercises the resolved SCRIPT_DIR (tsx + ccs-init.ts path) —
+      // a broken symlink resolution fails here with "No such file".
+      assert.equal(res.status, 0, `symlinked init failed: ${res.stdout}${res.stderr}`);
+      assert.match(res.stdout, /Config ready:/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("init (no flag) scaffolds the config template in a fresh HOME", async () => {
+    const sb = await makeShellSandbox();
+    try {
+      const res = spawnSync("bash", [CCS_BIN, "init"], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: sb.home,
+          XDG_CONFIG_HOME: join(sb.home, ".config"),
+          XDG_CACHE_HOME: join(sb.home, ".cache"),
+        },
+      });
+      assert.equal(res.status, 0, `init failed: ${res.stdout}${res.stderr}`);
+      assert.match(res.stdout, /Config ready:/);
+      assert.equal(
+        await exists(join(sb.home, ".config", "ccs", "repos.yml")),
+        true,
+        "repos.yml template must be created",
+      );
+    } finally {
+      await sb.cleanup();
+    }
   });
 });
 
