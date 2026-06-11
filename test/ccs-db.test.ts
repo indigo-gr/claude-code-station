@@ -18,6 +18,8 @@ import {
   upsertRepo,
   getAllRepos,
   deleteReposNotIn,
+  setMeta,
+  getMeta,
   CURRENT_SCHEMA_VERSION,
   type DbHandle,
 } from "../bin/ccs-db.ts";
@@ -129,12 +131,13 @@ describe("migrate()", () => {
       const h = openDb(sb.dbPath); // migrates once
       openHandles.push(h);
       assert.equal(getCurrentSchemaVersion(h.db), CURRENT_SCHEMA_VERSION);
-      // Second call must not throw and must not re-apply.
+      // Second call must not throw and must not re-apply. One schema_version
+      // row per applied migration.
       migrate(h.db);
       const rows = h.db
         .prepare(`SELECT COUNT(*) AS c FROM schema_version`)
         .get() as { c: number };
-      assert.equal(rows.c, 1);
+      assert.equal(rows.c, CURRENT_SCHEMA_VERSION);
     } finally {
       await sb.cleanup();
     }
@@ -154,7 +157,7 @@ describe("migrate()", () => {
     }
   });
 
-  test("all 6 tables exist after migrate", async () => {
+  test("all 7 tables exist after migrate", async () => {
     const sb = await makeDbSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -166,6 +169,7 @@ describe("migrate()", () => {
         "sessions",
         "handoff_files",
         "pending_items",
+        "meta",
       ];
       const rows = h.db
         .prepare(
@@ -176,6 +180,64 @@ describe("migrate()", () => {
       for (const t of expected) {
         assert.ok(names.has(t), `missing table: ${t}`);
       }
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// meta table (migration v2 — review A-8)
+// ---------------------------------------------------------------------------
+
+describe("setMeta / getMeta", () => {
+  test("round-trips a key and overwrites on conflict", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      assert.equal(getMeta(h.db, "defaults_command"), null);
+      setMeta(h.db, "defaults_command", "claude");
+      assert.equal(getMeta(h.db, "defaults_command"), "claude");
+      setMeta(h.db, "defaults_command", "opr claude");
+      assert.equal(getMeta(h.db, "defaults_command"), "opr claude");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("getMeta returns null (not throw) when the meta table is absent", async () => {
+    // ccs-list opens readonly+skipMigrate and can hit a schema-v1 cache that
+    // predates migration v2 — a missing table must degrade, not crash.
+    const sb = await makeDbSandbox();
+    try {
+      const { default: Database } = await import("better-sqlite3");
+      const { mkdir } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      await mkdir(dirname(sb.dbPath), { recursive: true });
+      const raw = new Database(sb.dbPath); // no migrations applied
+      try {
+        assert.equal(getMeta(raw, "defaults_command"), null);
+      } finally {
+        raw.close();
+      }
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("migrating a v1 database up to v2 adds the meta table", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      // Simulate a v1-era cache: drop the v2 artifacts, rewind the version.
+      h.db.exec(`DROP TABLE meta; DELETE FROM schema_version WHERE version = 2;`);
+      assert.equal(getCurrentSchemaVersion(h.db), 1);
+      migrate(h.db);
+      assert.equal(getCurrentSchemaVersion(h.db), CURRENT_SCHEMA_VERSION);
+      setMeta(h.db, "k", "v");
+      assert.equal(getMeta(h.db, "k"), "v");
     } finally {
       await sb.cleanup();
     }
