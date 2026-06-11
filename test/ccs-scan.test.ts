@@ -19,6 +19,7 @@ import {
   mkdir,
   symlink,
   truncate as ftruncate,
+  utimes,
 } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -739,6 +740,48 @@ describe("scan() — 2026-06-12 review regressions", () => {
       } finally {
         db.close();
       }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});
+
+describe("scan() — advisory lock", () => {
+  test("a fresh scan.lock makes the scan skip; a stale one is taken over", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "lock-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: lock\n    path: ${repoDir}\n`,
+    );
+    const cacheCcs = join(sb.xdgCache, "ccs");
+    await mkdir(cacheCcs, { recursive: true });
+    const lockPath = join(cacheCcs, "scan.lock");
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+
+      // Fresh lock (another scan "in progress") → skip, nothing scanned.
+      await writeFile(lockPath, "99999 held\n");
+      const held = await scan({ force: true, scanSessions: true });
+      assert.equal(held.lockSkipped, true);
+      assert.equal(held.reposScanned, 0);
+
+      // Stale lock (crashed scan >5min ago) → taken over, scan proceeds,
+      // and the lock is released afterwards.
+      const oldSec = (Date.now() - 10 * 60 * 1000) / 1000;
+      await utimes(lockPath, oldSec, oldSec);
+      const taken = await scan({ force: true, scanSessions: true });
+      assert.equal(taken.lockSkipped ?? false, false);
+      assert.equal(taken.reposScanned, 1);
+      const { existsSync } = await import("node:fs");
+      assert.equal(existsSync(lockPath), false, "lock must be released");
     } finally {
       restore();
       await sb.cleanup();

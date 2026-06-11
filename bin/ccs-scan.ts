@@ -16,7 +16,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { open, readdir, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 
@@ -54,6 +61,8 @@ export interface ScanResult {
   sessionsIndexed: number;
   sessionsSkipped: number;
   durationMs: number;
+  /** True when another scan held the advisory lock and this run did nothing. */
+  lockSkipped?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,13 +397,31 @@ async function scanOneRepo(
     const room = await getClaudeRoomLatest(join(repo.path, "claude-room"));
     stats.claude_room_latest = room.path;
     stats.claude_room_latest_at = room.mtime;
+  } catch (err) {
+    // Mask before persisting AND before logging: git subprocess errors can
+    // contain remote URLs with embedded credentials
+    // (e.g. https://user:token@github.com/...).
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const maskedErr = maskSecrets(errMsg);
+    stats.scan_error = maskedErr;
+    process.stderr.write(`[ccs-scan] ${repo.name}: ${maskedErr}\n`);
+  }
 
-    // --- Sessions aggregation ---
+  stats.scan_duration_ms = Date.now() - start;
+
+  // --- Single transaction: aggregate sessions + upsert stats + previews ---
+  const tx = db.transaction(() => {
+    // Sessions aggregation INSIDE the write transaction (backlog: COUNT(*)
+    // outside tx): a concurrent ccs process committing session changes
+    // between this read and the upsert below would persist a stale count.
+    // better-sqlite3 statements are synchronous, so the read is atomic with
+    // the write here.
+    //
     // When this scan skipped the sessions pass (--no-sessions), the sessions
     // table may be stale or empty; recomputing from it would rewind the
     // aggregates (audit logic H-1). Carry the previous repo_stats values
     // forward instead. scan() runs scanSessions BEFORE this point in the
-    // normal path (audit C-1), so the recompute below sees fresh data.
+    // normal path (audit C-1), so the recompute sees fresh data.
     if (opts.preserveSessionAgg) {
       const prev = db
         .prepare(
@@ -416,20 +443,7 @@ async function scanOneRepo(
       stats.session_count_total = sessRow?.cnt ?? 0;
       stats.session_last_at = sessRow?.last_at ?? null;
     }
-  } catch (err) {
-    // Mask before persisting AND before logging: git subprocess errors can
-    // contain remote URLs with embedded credentials
-    // (e.g. https://user:token@github.com/...).
-    const errMsg = err instanceof Error ? err.message : String(err);
-    const maskedErr = maskSecrets(errMsg);
-    stats.scan_error = maskedErr;
-    process.stderr.write(`[ccs-scan] ${repo.name}: ${maskedErr}\n`);
-  }
 
-  stats.scan_duration_ms = Date.now() - start;
-
-  // --- Single transaction: upsert stats + refresh preview tables ---
-  const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO repo_stats (
          name, is_git, branch, last_commit_hash, last_commit_subject,
@@ -553,6 +567,47 @@ async function scanAllRepos(
 }
 
 // ---------------------------------------------------------------------------
+// Advisory scan lock
+// ---------------------------------------------------------------------------
+
+// Two concurrent scans (Ctrl-R right after `ccs --refresh`, or two terminals)
+// can race on the sessions DELETE-not-in cleanup and the repo_stats writes
+// (backlog: concurrent scan race / original H3). WAL keeps the DB consistent,
+// but the UX race ("session disappears for one reload") is real — so a second
+// scan simply skips while the first holds the lock.
+const LOCK_STALE_MS = 5 * 60 * 1000; // scans run in seconds; 5min = crashed
+
+function acquireScanLock(cacheDir: string): (() => void) | null {
+  const lockPath = join(cacheDir, "scan.lock");
+  // Two attempts: the second runs only after removing a stale lock. If yet
+  // another process wins the recreate race in between, its lock is fresh and
+  // we correctly yield.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath, "wx"); // O_EXCL — fails when held
+      writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+      closeSync(fd);
+      return () => {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // already gone (stale takeover by a later process) — nothing to do
+        }
+      };
+    } catch {
+      try {
+        const st = statSync(lockPath);
+        if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return null; // held
+        unlinkSync(lockPath); // stale (crashed scan) — take over
+      } catch {
+        // lock vanished between open and stat — loop and retry the create
+      }
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Public entrypoint
 // ---------------------------------------------------------------------------
 
@@ -563,8 +618,26 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const parallelism = opts.parallelism ?? DEFAULT_PARALLELISM;
   const scanSessionsFlag = opts.scanSessions ?? true;
 
+  // loadConfig() runs ensureConfigDir(), so cacheDir exists before the lock.
   const config = loadConfig();
   const paths = getPaths();
+
+  const releaseLock = acquireScanLock(paths.cacheDir);
+  if (!releaseLock) {
+    process.stderr.write(
+      "[ccs-scan] another scan is in progress — skipping (stale DB is fine, it self-heals on the next refresh)\n",
+    );
+    return {
+      reposScanned: 0,
+      reposSkipped: 0,
+      reposErrored: 0,
+      sessionsIndexed: 0,
+      sessionsSkipped: 0,
+      durationMs: Date.now() - started,
+      lockSkipped: true,
+    };
+  }
+
   const handle = openDb(paths.stateDb);
 
   try {
@@ -603,6 +676,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     };
   } finally {
     handle.close();
+    releaseLock();
   }
 }
 

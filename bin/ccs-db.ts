@@ -233,6 +233,13 @@ export function openDb(
   if (!readOnly) {
     db.pragma("journal_mode = WAL");
     db.pragma("synchronous = NORMAL");
+    // Scan-workload throughput pragmas (backlog: PRAGMA tuning). Negative
+    // cache_size is KiB (≈8MB page cache); temp_store=MEMORY keeps sort/temp
+    // b-trees off disk; mmap_size lets reads go through the page cache
+    // mapping (64MB ≫ any ccs-sized DB). All session-scoped, write path only.
+    db.pragma("cache_size = -8000");
+    db.pragma("temp_store = MEMORY");
+    db.pragma("mmap_size = 67108864");
   }
   db.pragma("foreign_keys = ON");
   // WAL allows one writer at a time; concurrent `--force` scans (Ctrl-R right
