@@ -14,6 +14,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  open,
   readdir,
   readFile,
   stat,
@@ -32,6 +33,7 @@ import {
   type RepoRow,
 } from "./ccs-db.ts";
 import { maskSecrets } from "./ccs-secrets.ts";
+import { sanitizeSessionCwd, stripControlChars } from "./ccs-sanitize.ts";
 
 const execFileP = promisify(execFile);
 
@@ -188,6 +190,29 @@ interface RepoStatsRow {
   scan_error: string | null;
 }
 
+// Only the first line is ever displayed, so reading whole files (which can be
+// large walkthrough docs) is wasted I/O — read just the head of the file.
+const FIRST_LINE_READ_BYTES = 4096;
+
+async function readFirstLine(filePath: string): Promise<string | null> {
+  let fh;
+  try {
+    fh = await open(filePath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(FIRST_LINE_READ_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, FIRST_LINE_READ_BYTES, 0);
+    const text = buf.subarray(0, bytesRead).toString("utf-8");
+    return text.split("\n", 1)[0] ?? "";
+  } catch {
+    return null;
+  } finally {
+    await fh.close();
+  }
+}
+
 async function listDirPreview(
   dirPath: string,
 ): Promise<{ count: number; previews: PreviewFile[] }> {
@@ -200,30 +225,29 @@ async function listDirPreview(
   }
   const visible = entries.filter((n) => !n.startsWith("."));
 
-  const statted: PreviewFile[] = [];
-  for (const name of visible) {
-    const full = join(dirPath, name);
-    try {
-      const st = await stat(full);
-      if (!st.isFile()) continue;
-      let firstLine: string | null = null;
+  const results = await Promise.all(
+    visible.map(async (name): Promise<PreviewFile | null> => {
+      const full = join(dirPath, name);
       try {
-        const buf = await readFile(full, { encoding: "utf-8" });
-        const line = buf.split("\n", 1)[0] ?? "";
-        firstLine = maskSecrets(line).slice(0, MAX_FIRST_LINE_LEN);
+        const st = await stat(full);
+        if (!st.isFile()) return null;
+        const line = await readFirstLine(full);
+        const firstLine =
+          line === null
+            ? null
+            : stripControlChars(maskSecrets(line)).slice(0, MAX_FIRST_LINE_LEN);
+        return {
+          filename: name,
+          size: st.size,
+          mtime: new Date(st.mtimeMs).toISOString(),
+          first_line: firstLine,
+        };
       } catch {
-        // binary or unreadable; leave null
+        return null;
       }
-      statted.push({
-        filename: name,
-        size: st.size,
-        mtime: new Date(st.mtimeMs).toISOString(),
-        first_line: firstLine,
-      });
-    } catch {
-      // skip
-    }
-  }
+    }),
+  );
+  const statted = results.filter((p): p is PreviewFile => p !== null);
 
   statted.sort((a, b) => (a.mtime < b.mtime ? 1 : -1));
   return {
@@ -265,6 +289,7 @@ async function getClaudeRoomLatest(
 async function scanOneRepo(
   db: Database.Database,
   repo: RepoRow,
+  opts: { preserveSessionAgg: boolean },
 ): Promise<void> {
   const start = Date.now();
   const stats: RepoStatsRow = {
@@ -305,7 +330,9 @@ async function scanOneRepo(
       stats.is_git = 1;
 
       const branch = await runGit(repo.path, ["branch", "--show-current"]);
-      if (branch) stats.branch = branch.stdout.trim() || null;
+      // Branch names land in fzf badges (--ansi) — strip control chars so a
+      // hostile branch name cannot smuggle terminal escapes (audit NEW-1).
+      if (branch) stats.branch = stripControlChars(branch.stdout.trim()) || null;
 
       const log = await runGit(repo.path, [
         "log",
@@ -317,8 +344,11 @@ async function scanOneRepo(
         stats.last_commit_hash = hash ?? null;
         // Mask before persisting: a developer could accidentally commit a
         // secret in a commit message subject, and we must not replicate it
-        // into state.db (even though the file is mode 0600).
-        stats.last_commit_subject = subject ? maskSecrets(subject) : null;
+        // into state.db (even though the file is mode 0600). Control chars
+        // are stripped because the subject is rendered in the preview pane.
+        stats.last_commit_subject = subject
+          ? stripControlChars(maskSecrets(subject))
+          : null;
         stats.last_commit_at = at ?? null;
       }
 
@@ -340,8 +370,16 @@ async function scanOneRepo(
         const text = shortstat.stdout;
         const ins = /(\d+) insertion/.exec(text);
         const del = /(\d+) deletion/.exec(text);
-        if (ins) stats.uncommitted_insertions = parseInt(ins[1], 10);
-        if (del) stats.uncommitted_deletions = parseInt(del[1], 10);
+        // \d+ guarantees a numeric capture today; Number.isFinite guards the
+        // DB write in case the regex is ever loosened (audit logic L-1).
+        if (ins) {
+          const n = parseInt(ins[1], 10);
+          if (Number.isFinite(n)) stats.uncommitted_insertions = n;
+        }
+        if (del) {
+          const n = parseInt(del[1], 10);
+          if (Number.isFinite(n)) stats.uncommitted_deletions = n;
+        }
       }
     }
 
@@ -359,14 +397,32 @@ async function scanOneRepo(
     stats.claude_room_latest_at = room.mtime;
 
     // --- Sessions aggregation ---
-    const sessRow = db
-      .prepare(
-        `SELECT COUNT(*) AS cnt, MAX(last_activity_at) AS last_at
-         FROM sessions WHERE repo_name = ?`,
-      )
-      .get(repo.name) as { cnt: number; last_at: string | null };
-    stats.session_count_total = sessRow?.cnt ?? 0;
-    stats.session_last_at = sessRow?.last_at ?? null;
+    // When this scan skipped the sessions pass (--no-sessions), the sessions
+    // table may be stale or empty; recomputing from it would rewind the
+    // aggregates (audit logic H-1). Carry the previous repo_stats values
+    // forward instead. scan() runs scanSessions BEFORE this point in the
+    // normal path (audit C-1), so the recompute below sees fresh data.
+    if (opts.preserveSessionAgg) {
+      const prev = db
+        .prepare(
+          `SELECT session_count_total, session_last_at
+           FROM repo_stats WHERE name = ?`,
+        )
+        .get(repo.name) as
+        | { session_count_total: number; session_last_at: string | null }
+        | undefined;
+      stats.session_count_total = prev?.session_count_total ?? 0;
+      stats.session_last_at = prev?.session_last_at ?? null;
+    } else {
+      const sessRow = db
+        .prepare(
+          `SELECT COUNT(*) AS cnt, MAX(last_activity_at) AS last_at
+           FROM sessions WHERE repo_name = ?`,
+        )
+        .get(repo.name) as { cnt: number; last_at: string | null };
+      stats.session_count_total = sessRow?.cnt ?? 0;
+      stats.session_last_at = sessRow?.last_at ?? null;
+    }
   } catch (err) {
     // Mask before persisting AND before logging: git subprocess errors can
     // contain remote URLs with embedded credentials
@@ -454,6 +510,7 @@ async function scanAllRepos(
     force: boolean;
     ttlSeconds: number;
     parallelism: number;
+    preserveSessionAgg: boolean;
   },
 ): Promise<ReposScanSummary> {
   const allRepos = getAllRepos(db).filter(
@@ -478,7 +535,11 @@ async function scanAllRepos(
   const limit = makeLimiter(opts.parallelism);
 
   const results = await Promise.allSettled(
-    toScan.map((r) => limit(() => scanOneRepo(db, r))),
+    toScan.map((r) =>
+      limit(() =>
+        scanOneRepo(db, r, { preserveSessionAgg: opts.preserveSessionAgg }),
+      ),
+    ),
   );
 
   let errored = 0;
@@ -519,6 +580,11 @@ interface SessionParseResult {
 function extractUserText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
+    // Join ALL text blocks (audit logic M-5): user messages can carry the
+    // real prompt in a later block (e.g. after a system-reminder block), and
+    // ccs-preview-session.ts joins blocks the same way — topic extraction
+    // must agree with what the preview shows.
+    const texts: string[] = [];
     for (const block of content) {
       if (
         block &&
@@ -526,9 +592,10 @@ function extractUserText(content: unknown): string {
         (block as { type?: string }).type === "text" &&
         typeof (block as { text?: unknown }).text === "string"
       ) {
-        return (block as { text: string }).text;
+        texts.push((block as { text: string }).text);
       }
     }
+    return texts.join(" ");
   }
   return "";
 }
@@ -567,15 +634,21 @@ async function parseSessionJsonl(
     } catch {
       continue;
     }
-    msgCount++;
+    // message_count means CONVERSATION messages (audit logic H-4) — JSONL
+    // also carries summary/meta/tool rows which must not inflate the count.
+    // Keep in sync with ccs-preview-session.ts, which counts the same way.
+    if (entry.type === "user" || entry.type === "assistant") msgCount++;
     if (!cwd && typeof entry.cwd === "string") cwd = entry.cwd;
     if (!branch && typeof entry.gitBranch === "string") {
       branch = entry.gitBranch || null;
     }
     const ts = typeof entry.timestamp === "string" ? entry.timestamp : "";
     if (ts) {
-      if (!firstTs) firstTs = ts;
-      lastTs = ts;
+      // min/max by value, not by line order (audit logic M-6): sidechain rows
+      // can be appended out of chronological order. ISO 8601 (always Z here)
+      // sorts lexicographically, so string comparison is safe.
+      if (!firstTs || ts < firstTs) firstTs = ts;
+      if (!lastTs || ts > lastTs) lastTs = ts;
     }
     if (
       !firstUserMsg &&
@@ -597,23 +670,36 @@ async function parseSessionJsonl(
   }
 
   // summary: search whole content
-  // Apply maskSecrets BEFORE truncation so a secret token straddling the
+  // Pipeline order matters: strip control chars first so secret patterns see
+  // clean text, mask BEFORE truncation so a token straddling the
   // MAX_SUMMARY_LEN/MAX_TOPIC_LEN boundary is still redacted intact.
   let summary: string | null = null;
   const summaryMatch = SUMMARY_RE.exec(content);
   if (summaryMatch) {
-    summary = maskSecrets(summaryMatch[1].trim()).slice(0, MAX_SUMMARY_LEN);
+    summary = maskSecrets(stripControlChars(summaryMatch[1].trim())).slice(
+      0,
+      MAX_SUMMARY_LEN,
+    );
   }
 
   const topic = firstUserMsg
-    ? maskSecrets(firstUserMsg).slice(0, MAX_TOPIC_LEN)
+    ? maskSecrets(stripControlChars(firstUserMsg)).slice(0, MAX_TOPIC_LEN)
     : null;
+
+  // Trust boundary (audit H-1/M-2/NEW-1): the JSONL cwd field is attacker
+  // controllable and later reaches the fzf row, the Ctrl-Y clipboard command
+  // and a shell `cd`. Gate on the RAW value first — reject any shell
+  // metacharacter / control char (a rejected cwd degrades to the "unknown"
+  // sentinel, which bin/ccs treats as non-launchable) — then mask any secret
+  // embedded in an otherwise-clean path before it is stored/displayed (M-2).
+  const cleanCwd = cwd ? sanitizeSessionCwd(cwd) : null;
+  const safeCwd = cleanCwd ? maskSecrets(cleanCwd) : null;
 
   return {
     uuid: fileBase,
     project_dir: projectDir,
-    cwd: cwd || "unknown",
-    branch,
+    cwd: safeCwd ?? "unknown",
+    branch: branch ? stripControlChars(branch) || null : null,
     started_at: firstTs || mtimeIso,
     last_activity_at: lastTs || mtimeIso,
     message_count: msgCount,
@@ -624,19 +710,39 @@ async function parseSessionJsonl(
   };
 }
 
+/**
+ * Resolve a session cwd to a registered repo by LONGEST prefix match
+ * (audit logic M-4): a session started in ~/Workspace/foo/packages/bar must
+ * map to the repo registered at ~/Workspace/foo, and when repos nest, the
+ * deepest path wins. Exact matches naturally win via longest-first ordering.
+ */
+function buildRepoResolver(
+  repos: RepoRow[],
+): (cwd: string) => string | null {
+  const roots: Array<{ path: string; name: string }> = [];
+  for (const r of repos) {
+    roots.push({ path: r.path, name: r.name });
+    if (r.cwd) roots.push({ path: r.cwd, name: r.name });
+  }
+  roots.sort((a, b) => b.path.length - a.path.length);
+  return (cwd: string) => {
+    for (const root of roots) {
+      if (cwd === root.path || cwd.startsWith(root.path + "/")) {
+        return root.name;
+      }
+    }
+    return null;
+  };
+}
+
 async function scanSessions(
   db: Database.Database,
 ): Promise<{ indexed: number; skipped: number }> {
   const projectsDir = join(homedir(), ".claude", "projects");
   if (!existsSync(projectsDir)) return { indexed: 0, skipped: 0 };
 
-  // Build lookup: cwd -> repo_name
   const repos = getAllRepos(db);
-  const cwdToName = new Map<string, string>();
-  for (const r of repos) {
-    cwdToName.set(r.path, r.name);
-    if (r.cwd) cwdToName.set(r.cwd, r.name);
-  }
+  const resolveRepoName = buildRepoResolver(repos);
 
   // Existing session mtimes
   const existing = new Map<string, string>();
@@ -657,6 +763,9 @@ async function scanSessions(
     return { indexed: 0, skipped: 0 };
   }
 
+  // indexed_at is written as an explicit ISO 8601 value rather than
+  // SQLite's naive `datetime('now')` so all timestamps in state.db share one
+  // format (audit logic M-1).
   const upsertStmt = db.prepare(
     `INSERT INTO sessions (
        uuid, repo_name, project_dir, cwd, branch,
@@ -665,7 +774,7 @@ async function scanSessions(
      ) VALUES (
        @uuid, @repo_name, @project_dir, @cwd, @branch,
        @started_at, @last_activity_at, @message_count,
-       @topic, @summary, @jsonl_size, @jsonl_mtime, datetime('now')
+       @topic, @summary, @jsonl_size, @jsonl_mtime, @indexed_at
      )
      ON CONFLICT(uuid) DO UPDATE SET
        repo_name = excluded.repo_name,
@@ -679,7 +788,7 @@ async function scanSessions(
        summary = excluded.summary,
        jsonl_size = excluded.jsonl_size,
        jsonl_mtime = excluded.jsonl_mtime,
-       indexed_at = datetime('now')`,
+       indexed_at = excluded.indexed_at`,
   );
 
   for (const projName of projectDirs) {
@@ -730,7 +839,7 @@ async function scanSessions(
           skipped++;
           continue;
         }
-        const repoName = cwdToName.get(parsed.cwd) ?? null;
+        const repoName = resolveRepoName(parsed.cwd);
         upsertStmt.run({
           uuid: parsed.uuid,
           repo_name: repoName,
@@ -744,6 +853,7 @@ async function scanSessions(
           summary: parsed.summary,
           jsonl_size: parsed.jsonl_size,
           jsonl_mtime: parsed.jsonl_mtime,
+          indexed_at: nowIso(),
         });
         indexed++;
       } catch (err) {
@@ -763,6 +873,24 @@ async function scanSessions(
     const ph = chunk.map(() => "?").join(",");
     db.prepare(`DELETE FROM sessions WHERE uuid IN (${ph})`).run(...chunk);
   }
+
+  // Re-resolve unmapped sessions (audit logic M-3): mtime-skipped rows keep
+  // the repo_name decided when they were first indexed, so a repo added to
+  // repos.yml afterwards would never claim its past sessions. Cheap pass —
+  // only rows still NULL are reconsidered.
+  const remapTx = db.transaction(() => {
+    const nullRows = db
+      .prepare(`SELECT uuid, cwd FROM sessions WHERE repo_name IS NULL`)
+      .all() as Array<{ uuid: string; cwd: string }>;
+    const updStmt = db.prepare(
+      `UPDATE sessions SET repo_name = ? WHERE uuid = ?`,
+    );
+    for (const row of nullRows) {
+      const name = resolveRepoName(row.cwd);
+      if (name) updStmt.run(name, row.uuid);
+    }
+  });
+  remapTx();
 
   return { indexed, skipped };
 }
@@ -785,12 +913,10 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   try {
     syncReposToDb(handle.db, config.repos);
 
-    const repoSummary = await scanAllRepos(handle.db, {
-      force,
-      ttlSeconds,
-      parallelism,
-    });
-
+    // Order matters (audit C-1): scanOneRepo aggregates session counts FROM
+    // the sessions table, so sessions must be refreshed first — otherwise
+    // repo_stats lags one full scan behind (all repos showed "💤 未使用" on a
+    // fresh DB until the second --refresh).
     let sessionsIndexed = 0;
     let sessionsSkipped = 0;
     if (scanSessionsFlag) {
@@ -798,6 +924,13 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsIndexed = s.indexed;
       sessionsSkipped = s.skipped;
     }
+
+    const repoSummary = await scanAllRepos(handle.db, {
+      force,
+      ttlSeconds,
+      parallelism,
+      preserveSessionAgg: !scanSessionsFlag,
+    });
 
     return {
       reposScanned: repoSummary.scanned,
