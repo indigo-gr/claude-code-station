@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v0.2.1 features)
+- **`ccs init --auto-discover [--depth N]`** — scans `$HOME` (depth 5 default) for git checkout roots, excludes noise dirs (`node_modules`, `Library`, hidden dirs, ...), stops at repo roots, skips symlinks, subtracts repos already in `repos.yml`, and presents the rest in an fzf multi-select. Selections are appended to `repos.yml` comment/format-preservingly (yaml `parseDocument`) with a `.bak` backup and a full-validation rollback, then indexed immediately. Plain `ccs init` scaffolds the config template.
+- **Account-free npm install** — `npm install -g github:indigo-gr/claude-code-station` now works end-to-end: `bin/ccs` resolves `$0` through npm's global-bin symlink to find its sibling modules, `tsx` ships as a runtime dependency and the package-local copy is preferred over PATH (a global tsx is only needed for bare-checkout use), and the `files` field keeps the tarball lean. Verified via `npm pack` + sandbox-prefix global install.
+
 ### Fixed (review 2026-06-12 — 4-perspective defensive review cleanup)
 - **C-2 (High)** — `ccs-delete.sh` no longer dies silently under `set -e` when `rm` fails: the failure is reported, the "Press Enter" prompt still runs, and the script exits 1. `du` failure (file vanished mid-flow) falls back to `?` instead of killing the script.
 - **C-1 (High)** — `git log` parsing uses NUL (`%x00`) separators instead of tabs, so a commit subject containing a literal TAB can no longer shift the split and persist subject fragments into `last_commit_at`. Regression test commits a tab-in-subject fixture.

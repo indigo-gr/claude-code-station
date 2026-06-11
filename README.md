@@ -40,11 +40,18 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 
 - [Node.js](https://nodejs.org/) **20+**
 - [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023)
-- [tsx](https://github.com/privatenumber/tsx) — TypeScript runner (`npm install -g tsx`)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
-- `better-sqlite3` and `yaml` npm packages (installed via `npm install`)
+- [tsx](https://github.com/privatenumber/tsx) — TypeScript runner. **Bundled** as a package dependency; a global `tsx` (`npm install -g tsx`) is only needed for the bare-checkout workflow. / npmインストール時は同梱されるため、グローバルtsxは checkout 直接運用時のみ必要
 
-### Quick install / クイックインストール
+### Quick install (npm, recommended) / クイックインストール（npm直接・推奨）
+
+```bash
+npm install -g github:indigo-gr/claude-code-station
+```
+
+Installs straight from this public repo — no npm registry account involved. All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / 公開リポから直接インストール。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+
+### Copy install (checkout) / コピーインストール
 
 ```bash
 git clone https://github.com/indigo-gr/claude-code-station.git
@@ -53,7 +60,7 @@ npm install
 ./install.sh
 ```
 
-`install.sh --with-deps` で `npm install` も install.sh に任せられる。
+`install.sh --with-deps` で `npm install` も install.sh に任せられる。`install.sh` はランタイム依存解決のため checkout の `node_modules` をインストール先に symlink する（checkout は残しておくこと）。
 
 ### Manual install / 手動インストール
 
@@ -70,9 +77,9 @@ export PATH="$HOME/.claude/scripts:$PATH"
 
 ## Quick start / クイックスタート
 
-1. Run `ccs` once — it creates `~/.config/ccs/repos.yml` template and a `README.md` next to it. / 初回実行で `~/.config/ccs/repos.yml` のテンプレートと README を生成
-2. Edit `repos.yml` to add your projects (see [Configuration](#configuration--設定)) / プロジェクトを追記
-3. Run `ccs` again — fzf opens with your repos + past sessions. / 再実行でfzfが起動
+1. Run `ccs init --auto-discover` — scans `$HOME` (depth 5, `--depth N` to change) for git repos and lets you multi-select which to register via fzf (TAB to toggle). / `$HOME` をスキャンして登録するリポをfzfで複数選択
+2. Or edit `~/.config/ccs/repos.yml` by hand (`ccs init` scaffolds the template; see [Configuration](#configuration--設定)) / 手で書くなら `ccs init` でテンプレート生成
+3. Run `ccs` — fzf opens with your repos + past sessions. / `ccs` 実行でfzfが起動
 
 ```
 $ ccs
@@ -264,6 +271,7 @@ ccs (bash)
  ├─ ccs-preview.ts        → preview pane renderer (repo badges)
  │   └─ ccs-preview-session.ts (session conversation head)
  ├─ ccs-config.ts         → loads/validates ~/.config/ccs/repos.yml
+ ├─ ccs-init.ts           → `ccs init` scaffold / $HOME repo auto-discovery
  ├─ ccs-db.ts             → better-sqlite3 wrapper (WAL, FK, migrations)
  ├─ ccs-delete.sh         → Ctrl-D session delete handler
  │   └─ ccs-delete-session.ts  (cache row removal, bound params)
