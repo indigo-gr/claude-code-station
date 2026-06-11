@@ -47,7 +47,9 @@ if (( ${#MISSING[@]} > 0 )); then
   echo "Missing or insufficient dependencies:"
   for dep in "${MISSING[@]}"; do echo "  - $dep"; done
   echo ""
-  read -r -p "Continue anyway? (y/N): " cont
+  # Prompt to stderr explicitly — `read -p` drops the prompt on piped stdin.
+  printf 'Continue anyway? (y/N): ' >&2
+  read -r cont
   [[ "$cont" == "y" || "$cont" == "Y" ]] || exit 1
 fi
 

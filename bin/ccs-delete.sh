@@ -8,9 +8,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SESSION_ID="${1:-}"
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
+# bash renders `read -p` prompts only when stdin is a TTY — with piped stdin
+# (tests, scripted use) the prompt silently vanishes. Print prompts to stderr
+# explicitly so they are always visible; in a TTY this looks identical, since
+# `read -p` writes to stderr too.
+prompt_read() { # prompt_read <prompt> [varname]
+  printf '%s' "$1" >&2
+  IFS= read -r "${2:-REPLY}"
+}
+
 if [[ -z "$SESSION_ID" ]] || [[ ! "$SESSION_ID" =~ $UUID_RE ]]; then
   echo "❌ Invalid session ID"
-  read -r -p "Press Enter to continue..."
+  prompt_read "Press Enter to continue..."
   exit 1
 fi
 
@@ -27,7 +36,7 @@ done
 
 if [[ -z "$TARGET" ]]; then
   echo "❌ Session file not found"
-  read -r -p "Press Enter to continue..."
+  prompt_read "Press Enter to continue..."
   exit 1
 fi
 
@@ -39,7 +48,7 @@ echo "━━━ Delete Session ━━━"
 echo "📄 $TARGET"
 echo "📏 $SIZE"
 echo ""
-read -r -p "Delete this session? (y/N): " confirm
+prompt_read "Delete this session? (y/N): " confirm
 
 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # Wrap rm explicitly: under `set -e` a bare rm failure (permissions, file
@@ -48,7 +57,7 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # know the delete failed (review C-2).
   if ! rm "$TARGET"; then
     echo "❌ Failed to delete: $TARGET" >&2
-    read -r -p "Press Enter to continue..."
+    prompt_read "Press Enter to continue..."
     exit 1
   fi
   # Also remove subagents directory if it exists. The final-form check is a
@@ -77,4 +86,4 @@ else
   echo "Cancelled"
 fi
 
-read -r -p "Press Enter to continue..."
+prompt_read "Press Enter to continue..."

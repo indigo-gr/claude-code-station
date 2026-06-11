@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Advisory scan lock** — `<cacheDir>/scan.lock` (O_EXCL create, 5-minute stale takeover): a second concurrent scan skips with a stderr note instead of racing the sessions cleanup (original CR2 H3). `ScanResult.lockSkipped` exposes the skip.
 - **PRAGMA tuning** — write-path connections set `cache_size = -8000`, `temp_store = MEMORY`, `mmap_size = 64MB` (readonly preview path untouched).
 - **install.sh runtime deps** — `node_modules` is symlinked from the repo checkout into the install dir so installed scripts resolve `better-sqlite3`/`yaml` (closes the backlog HIGH short-term; npm-package distribution remains the long-term plan).
+- **Prompt visibility on piped stdin** — `ccs-delete.sh` and `install.sh` print prompts explicitly to stderr (`prompt_read` helper) instead of relying on `read -p`, which bash renders only when stdin is a TTY. TTY behavior is unchanged (`read -p` also writes to stderr); scripted/piped use no longer loses the prompts, and the shell tests now assert them.
 
 ### Tests (review 2026-06-12 — follow-up batch)
 - New `test/ccs-shell.test.ts`: the previously-untested bash surfaces — `bin/ccs --version/--help` and the full `ccs-delete.sh` matrix (non-UUID rejection, not-found, confirmed delete incl. subagent-dir removal, declined delete, and the C-2 rm-failure branch) — driven by node:test + spawnSync with sandboxed HOME/XDG. No bats dependency.

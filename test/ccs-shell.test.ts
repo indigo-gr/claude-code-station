@@ -113,6 +113,9 @@ describe("ccs-delete.sh", () => {
       const res = runDelete(sb, ["../../etc/passwd"], "\n");
       assert.equal(res.code, 1);
       assert.match(res.stdout, /Invalid session ID/);
+      // Prompts are printed explicitly to stderr (prompt_read), so they are
+      // visible even with piped stdin — `read -p` used to drop them here.
+      assert.match(res.stderr, /Press Enter to continue/);
     } finally {
       await sb.cleanup();
     }
@@ -142,6 +145,11 @@ describe("ccs-delete.sh", () => {
       const res = runDelete(sb, [UUID], "y\n\n");
       assert.equal(res.code, 0, `unexpected failure: ${res.stdout}${res.stderr}`);
       assert.match(res.stdout, /✅ Deleted/);
+      assert.match(
+        res.stderr,
+        /Delete this session\? \(y\/N\):/,
+        "confirm prompt must be visible on piped stdin (prompt_read)",
+      );
       assert.equal(await exists(target), false, "JSONL must be deleted");
       assert.equal(
         await exists(join(projDir, UUID)),
@@ -187,10 +195,10 @@ describe("ccs-delete.sh", () => {
         /Failed to delete/,
         `the failure must be reported (was silent before C-2): ${res.stdout}${res.stderr}`,
       );
-      // NOTE: the "Press Enter" prompt text is not asserted — bash only
-      // renders `read -p` prompts when stdin is a TTY, and here stdin is a
-      // pipe. Exit code 1 (vs the pre-fix silent set -e death mid-script)
-      // proves the guarded branch ran to completion.
+      // The "Press Enter" pause is now printed explicitly to stderr
+      // (prompt_read), so its visibility is assertable even on piped stdin —
+      // this is what keeps the fzf execute pane open on the error.
+      assert.match(res.stderr, /Press Enter to continue/);
       assert.equal(await exists(target), true, "file is still there");
     } finally {
       await chmod(projDir, 0o755).catch(() => {});
