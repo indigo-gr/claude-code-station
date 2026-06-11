@@ -6,6 +6,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (review 2026-06-12 — 4-perspective defensive review cleanup)
+- **C-2 (High)** — `ccs-delete.sh` no longer dies silently under `set -e` when `rm` fails: the failure is reported, the "Press Enter" prompt still runs, and the script exits 1. `du` failure (file vanished mid-flow) falls back to `?` instead of killing the script.
+- **C-1 (High)** — `git log` parsing uses NUL (`%x00`) separators instead of tabs, so a commit subject containing a literal TAB can no longer shift the split and persist subject fragments into `last_commit_at`. Regression test commits a tab-in-subject fixture.
+- **C-4** — a session JSONL growing past the 50MB cap now keeps its (stale but resumable) row, stamps the new size/mtime, and stops being re-parsed on every scan; previously the row was permanently stale AND re-attempted forever.
+- **C-5** — `ccs-list` cold-start friendly hint was dead code: the `isMissing` patterns never matched `openDb()`'s actual "state.db not found" message. Pattern added; the regression test now asserts the friendly branch specifically (the old test passed via the raw fatal path).
+- **C-3** — Twilio Account SID masking accepts uppercase hex (`AC[a-fA-F0-9]{32}`).
+- **DA-3** — `buildRepoResolver` registers each repo root under its realpath too, so repos registered via symlinked paths (or macOS `/var` aliasing) claim their sessions.
+- **A-8** — sessions not mapped to any repo now launch with the documented fallback chain (`defaults.command` > `CCS_CMD` > `"claude"`) via the new `meta.defaults_command` value, instead of a hardcoded `"claude"`.
+- **A-10** — `--current-only` filters in SQL (`cwd = ? OR (cwd >= ? AND cwd < ?)`) so `idx_sessions_cwd` applies; sibling dirs sharing the cwd as a string prefix are excluded by construction.
+- **A-6** — the resolved `defaults.command` (including `CCS_CMD`/`CCR_CMD` origin) is SHELL_METACHARS-validated in `loadConfig()` even when no repo inherits it.
+- **K-4** — `command` / `custom` ConfigError messages carry the `repos.yml: repos[i].field` prefix like every other validation error (the Phase 6 "at index" phrasing is retired).
+- **K-9** — `npm test` runs via `node --import tsx --test` (works on the documented Node >= 20, not just Node >= 23.6 type-stripping); `"type": "module"` added to silence `MODULE_TYPELESS_PACKAGE_JSON`.
+- **K-10** — `install.sh` lists installed files with `find -maxdepth 1` instead of `ls | grep` (SC2010).
+
+### Changed (review 2026-06-12 — structure)
+- **A-4** — session indexing extracted from `ccs-scan.ts` (999 lines) into `bin/ccs-scan-sessions.ts`; `parseSessionJsonl` / `buildRepoResolver` / `scanSessions` are exported and unit-testable.
+- **A-1 / A-2 / A-3 / K-8** — new `bin/ccs-utils.ts` is the single source for `truncate`, `timeBucket` / `formatRelativeTime` / `formatDateTime`, `extractText` (tool blocks behind an explicit option), `UUID_RE`, and `MAX_JSONL_SIZE`. The list/preview copies (which had already drifted in whitespace handling and 日本語/English suffixes) are gone; relative time renders uniformly as English ("5m ago"). List session badges show `-` for unparseable timestamps instead of echoing the raw DB string.
+- **Schema v2** — new `meta(key, value)` table (idempotent migration; `getMeta` degrades to null on pre-v2 caches read by readonly consumers).
+
+### Tests (review 2026-06-12)
+- New `test/ccs-utils.test.ts` pins the unified helper semantics (thresholds, control-char stripping, tool-block extraction, UUID gate).
+- New regression tests: tab-in-commit-subject (C-1), oversized-JSONL keep/touch/skip via sparse `ftruncate` (C-4), symlinked-repo session mapping (DA-3), cold-start friendly hint (C-5), unmapped-session command fallback incl. pre-v2 cache degradation (A-8), `--current-only` exact/subdir/sibling-prefix (A-10), `defaults.command`/`CCS_CMD` origin validation (A-6), uppercase Twilio SID (C-3), meta round-trip + v1→v2 upgrade.
+- `freshImport()` comment in the config tests now states the truth: the ESM cache is NOT busted; module state resets go through exported hooks (C-6).
+- 110 tests, all green.
+
+### Docs (review 2026-06-12)
+- Regression checklist #4 (secret patterns: 26 unified) and #18 (risky-command warning removed in Phase 6 S2) corrected; stale `isUnderHome` backlog entry closed (fixed by audit M-4); README architecture diagram lists all 14 bin/ modules; `REVIEW.md` reflects the metachar hard-reject reality; `sqlite-schema.md` documents schema v2 + the sessions-first scan order; `repos-yml-schema.md` documents the NEW-3 name policy, unified error formats, and the unmapped-session fallback.
+
+### Fixed (review 2026-06-12 — follow-up batch)
+- **COUNT(*) in-transaction** — `scanOneRepo` reads its session aggregates inside the write transaction, so a concurrent process committing session changes can no longer slip between the read and the `repo_stats` upsert.
+- **Advisory scan lock** — `<cacheDir>/scan.lock` (O_EXCL create, 5-minute stale takeover): a second concurrent scan skips with a stderr note instead of racing the sessions cleanup (original CR2 H3). `ScanResult.lockSkipped` exposes the skip.
+- **PRAGMA tuning** — write-path connections set `cache_size = -8000`, `temp_store = MEMORY`, `mmap_size = 64MB` (readonly preview path untouched).
+- **install.sh runtime deps** — `node_modules` is symlinked from the repo checkout into the install dir so installed scripts resolve `better-sqlite3`/`yaml` (closes the backlog HIGH short-term; npm-package distribution remains the long-term plan).
+- **Prompt visibility on piped stdin** — `ccs-delete.sh` and `install.sh` print prompts explicitly to stderr (`prompt_read` helper) instead of relying on `read -p`, which bash renders only when stdin is a TTY. TTY behavior is unchanged (`read -p` also writes to stderr); scripted/piped use no longer loses the prompts, and the shell tests now assert them.
+
+### Tests (review 2026-06-12 — follow-up batch)
+- New `test/ccs-shell.test.ts`: the previously-untested bash surfaces — `bin/ccs --version/--help` and the full `ccs-delete.sh` matrix (non-UUID rejection, not-found, confirmed delete incl. subagent-dir removal, declined delete, and the C-2 rm-failure branch) — driven by node:test + spawnSync with sandboxed HOME/XDG. No bats dependency.
+- Advisory-lock test: fresh lock → skip; stale lock → takeover + release.
+- 118 tests, all green.
+
 ### Security (audit 2026-06-12 hardening)
 - **H-1 / NEW-1 — session intake sanitization**: a session `.jsonl` `cwd` no longer reaches the Ctrl-Y clipboard command unchecked. Session `cwd`/`topic`/`summary`/`branch` and workspace `first_line` are now gated at scan time via a shared `bin/ccs-sanitize.ts`: shell metacharacters reject the `cwd` to an `"unknown"` sentinel (blocks deferred command injection on paste), and control characters incl. ESC are stripped (blocks ANSI/terminal-escape spoofing in the `--ansi` fzf list and preview).
 - Ctrl-Y clipboard line now `%q`-quotes the `cwd`/`uuid` (defense-in-depth for H-1); list/preview renderers strip control chars on the display side too (defense-in-depth for NEW-1).

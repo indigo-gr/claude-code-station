@@ -14,7 +14,7 @@ Target: **0 Critical, 0 High** before release. Medium/Low tracked in `docs/revie
 
 ## Always check — security
 
-- **Command injection**: UUID regex validation before `claude --resume <uuid>`; repo `name` rejects shell metachars (`; & | < > $ \``); `command:` field is user config, trust documented in README but never composed from external input
+- **Command injection**: UUID regex validation before `claude --resume <uuid>`; repo `name` / `command:` field rejects shell metachars (`;&|<>$\`"'\\` + control chars — `SHELL_METACHARS` policy in `bin/ccs-sanitize.ts`); `command:` is validated at config load, never composed from external input
 - **Path traversal**: every `cwd` must be under `$HOME`; fallback to `.` with a warning otherwise
 - **Secret masking**: API key / token patterns masked in preview output (JSONL + integration URLs)
 - **SQLite hygiene**: DB file created with `0600`; config/cache dirs `0700`; `PRAGMA foreign_keys = ON`; **prepared statements only** (no string concatenation of SQL)

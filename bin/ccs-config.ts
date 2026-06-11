@@ -359,13 +359,8 @@ function resolveRepoEntry(
   }
   // Reject shell metachars in resolved command (S1 hardening). The command
   // string is re-executed unquoted by bin/ccs via `${ROW_CMD} ...`, so any
-  // metachar here would break the last line of defense. Error message uses
-  // "at index" phrasing (not reposYmlPath prefix) per Phase 6 spec.
-  if (SHELL_METACHARS.test(command)) {
-    throw new ConfigError(
-      `command for repo at index ${index} contains shell metacharacter(s): ${JSON.stringify(command)}`,
-    );
-  }
+  // metachar here would break the last line of defense.
+  rejectShellMetachars("command", command, index, reposYmlPath);
 
   // description
   const description =
@@ -401,7 +396,7 @@ function resolveRepoEntry(
     const customJson = JSON.stringify(raw.custom);
     if (customJson.length > 64_000) {
       throw new ConfigError(
-        `custom for repo at index ${index} exceeds 64KB JSON size limit (got ${customJson.length} bytes)`,
+        `${reposYmlPath}: repos[${index}].custom exceeds 64KB JSON size limit (got ${customJson.length} bytes)`,
       );
     }
     custom = { ...raw.custom };
@@ -485,6 +480,15 @@ export function loadConfig(): CcsConfig {
   // defaults.command resolution: explicit defaults > env > "claude"
   const resolvedDefaultsCommand =
     defaultsCommand ?? envCommand() ?? "claude";
+  // Gate the resolved default at origin (review A-6): it is persisted to the
+  // meta table for unmapped-session fallback and exposed on CcsConfig, so it
+  // must satisfy the same metachar policy as per-repo commands even when no
+  // repo currently inherits it. resolveRepoEntry re-checks as defense in depth.
+  if (SHELL_METACHARS.test(resolvedDefaultsCommand)) {
+    throw new ConfigError(
+      `${paths.reposYml}: defaults.command (resolved from defaults.command / CCS_CMD / CCR_CMD) contains shell metacharacter(s): ${JSON.stringify(resolvedDefaultsCommand)}`,
+    );
+  }
 
   // repos
   if (!Array.isArray(parsed.repos) || parsed.repos.length === 0) {

@@ -13,9 +13,10 @@
  */
 
 import { homedir } from "node:os";
-import { openDb } from "./ccs-db.ts";
+import { openDb, getMeta } from "./ccs-db.ts";
 import { getPaths } from "./ccs-config.ts";
-import { parseDbTime } from "./ccs-time.ts";
+import { SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { truncate, formatRelativeTime, formatDateTime } from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -55,49 +56,9 @@ function parseArgs(argv: string[]): Flags {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function truncate(s: string, n: number): string {
-  if (!s) return "";
-  // Strip ALL control chars (incl. ESC, DEL), not just \t\n\r — second line
-  // of defense against terminal-escape injection (audit NEW-1); fzf renders
-  // these columns with --ansi. Intake sanitization in ccs-scan is the first.
-  const flat = s.replace(/[\x00-\x1f\x7f]+/g, " ").trim();
-  return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
-}
-
-function humanTime(iso: string | null): string {
-  if (!iso) return "";
-  // parseDbTime, not Date.parse: naive "YYYY-MM-DD HH:MM:SS" values from
-  // SQLite are UTC and must not be parsed as local time (audit logic H-2).
-  const t = parseDbTime(iso);
-  if (isNaN(t)) return "";
-  const diffMs = Date.now() - t;
-  if (diffMs < 0) return "<1m前";
-  const m = Math.floor(diffMs / 60000);
-  if (m < 1) return "<1m前";
-  if (m < 60) return `${m}m前`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h前`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d前`;
-  const w = Math.floor(d / 7);
-  // Past 4 weeks switch to an absolute date, matching the preview pane's
-  // relativeTime() so the same timestamp never renders as "52w前" in one
-  // place and "2025-06-12" in the other (audit logic L-3).
-  if (w < 4) return `${w}w前`;
-  return new Date(t).toISOString().slice(0, 10);
-}
-
-function formatSessionStamp(iso: string): string {
-  const t = parseDbTime(iso);
-  const d = new Date(t);
-  if (isNaN(d.getTime())) return iso;
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
-}
+// truncate / formatRelativeTime / formatDateTime come from ccs-utils.ts —
+// the single source shared with the preview pane (review A-1/A-3/K-8), so
+// list badges and preview text can no longer drift in thresholds or language.
 
 function clipBadges(badges: string[], max: number): string {
   const out: string[] = [];
@@ -194,7 +155,7 @@ function buildRepoBadges(r: RepoRowFull): string {
   }
 
   if (r.session_last_at) {
-    const ht = humanTime(r.session_last_at);
+    const ht = formatRelativeTime(r.session_last_at, "");
     if (ht) badges.push(`[🔄 ${ht}]`);
   } else {
     badges.push(`[💤 未使用]`);
@@ -242,7 +203,7 @@ interface SessionRowFull {
   repo_command: string | null;
 }
 
-function sessionToRow(s: SessionRowFull): string {
+function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
   // Mapped sessions use the registered repo icon + name.
   // Unmapped sessions get ❓ as a visible reminder: either a one-off run
   // or a repo that hasn't been added to repos.yml yet.
@@ -260,8 +221,11 @@ function sessionToRow(s: SessionRowFull): string {
   const mapIcon = s.repo_display ? s.repo_icon || "📁" : "❓";
   const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
   const desc = truncate(s.topic || "", DESC_MAX);
-  const badges = `[${formatSessionStamp(s.last_activity_at)}]`;
-  const command = s.repo_command || "claude";
+  const badges = `[${formatDateTime(s.last_activity_at)}]`;
+  // Unmapped sessions fall back to the scan-time resolved default
+  // (defaults.command > CCS_CMD > "claude"), not a hardcoded "claude" — the
+  // documented priority chain applies to every launchable row (review A-8).
+  const command = s.repo_command || defaultCommand;
   return [
     label,
     desc,
@@ -313,22 +277,43 @@ function main(): number {
     }
 
     if (wantSessions) {
+      // Launch-command fallback for unmapped sessions (review A-8), written
+      // by ccs-scan at sync time. getMeta returns null on a schema-v1 cache
+      // that predates the meta table — degrade to "claude". The metachar
+      // check is display-side defense in depth: the value was validated at
+      // config load, but this row is re-executed unquoted by bin/ccs.
+      const metaCommand = getMeta(db, "defaults_command");
+      const defaultCommand =
+        metaCommand && !SHELL_METACHARS.test(metaCommand)
+          ? metaCommand
+          : "claude";
+
       const filterCwd = flags.currentOnly ? process.cwd() : null;
-      const rows = db
-        .prepare(
-          `SELECT s.uuid, s.repo_name, s.cwd, s.last_activity_at, s.topic,
+      const baseSelect = `SELECT s.uuid, s.repo_name, s.cwd, s.last_activity_at, s.topic,
                   r.name AS repo_display, r.icon AS repo_icon, r.command AS repo_command
              FROM sessions s
-             LEFT JOIN repos r ON r.name = s.repo_name
+             LEFT JOIN repos r ON r.name = s.repo_name`;
+      // --current-only filters in SQL so idx_sessions_cwd is usable
+      // (review A-10). The prefix match is expressed as a half-open range
+      // [cwd + "/", cwd + "0") — "0" is the code point after "/" — because
+      // LIKE is case-insensitive by default and would bypass the index.
+      const rows = (
+        filterCwd
+          ? db
+              .prepare(
+                `${baseSelect}
+            WHERE s.cwd = ? OR (s.cwd >= ? AND s.cwd < ?)
             ORDER BY s.last_activity_at DESC`,
-        )
-        .all() as SessionRowFull[];
+              )
+              .all(filterCwd, filterCwd + "/", filterCwd + "0")
+          : db
+              .prepare(`${baseSelect}
+            ORDER BY s.last_activity_at DESC`)
+              .all()
+      ) as SessionRowFull[];
       const sessionRows: string[] = [];
       for (const s of rows) {
-        if (filterCwd && !(s.cwd === filterCwd || s.cwd.startsWith(filterCwd + "/"))) {
-          continue;
-        }
-        sessionRows.push(sessionToRow(s));
+        sessionRows.push(sessionToRow(s, defaultCommand));
       }
       // Insert a section separator between NEW repos and RESUME sessions
       // when both are present. The separator row uses KIND=separator so
@@ -348,10 +333,13 @@ function main(): number {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Cold-start case: state.db not yet built by the scanner.
-    // better-sqlite3 surfaces ENOENT-style failures with "unable to open
-    // database file" or similar; also guard against explicit "does not exist"
-    // messaging that openDb() may raise in future.
+    // The readonly path in openDb() raises its own "[ccs-db] state.db not
+    // found" message BEFORE better-sqlite3 ever runs (review C-5) — that
+    // pattern must be matched here or the friendly hint below is dead code.
+    // The better-sqlite3 native patterns stay as a guard for races where the
+    // file disappears between the existsSync check and the open.
     const isMissing =
+      /state\.db not found/i.test(msg) ||
       /unable to open database file/i.test(msg) ||
       /database (file )?does not exist/i.test(msg) ||
       /ENOENT/.test(msg);

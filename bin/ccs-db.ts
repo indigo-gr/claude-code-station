@@ -13,7 +13,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export interface DbHandle {
   db: Database.Database;
@@ -148,9 +148,22 @@ CREATE TABLE IF NOT EXISTS pending_items (
 CREATE INDEX IF NOT EXISTS idx_pending_repo ON pending_items(repo_name, mtime DESC);
 `;
 
+// v2: key/value store for scan-time resolved settings. First consumer is
+// `defaults_command` — the resolved launch-command fallback (defaults.command
+// > CCS_CMD > "claude") that ccs-list needs for sessions not mapped to any
+// repo (review A-8). ccs-list opens the DB readonly+skipMigrate, so it must
+// tolerate this table being absent on a not-yet-migrated cache (getMeta).
+const MIGRATION_V2 = `
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`;
+
 const migrations: Migration[] = [
   { version: 1, up: MIGRATION_V1 },
-  // future: { version: 2, up: `...` },
+  { version: 2, up: MIGRATION_V2 },
+  // future: { version: 3, up: `...` },
 ];
 
 // ---------------------------------------------------------------------------
@@ -220,6 +233,13 @@ export function openDb(
   if (!readOnly) {
     db.pragma("journal_mode = WAL");
     db.pragma("synchronous = NORMAL");
+    // Scan-workload throughput pragmas (backlog: PRAGMA tuning). Negative
+    // cache_size is KiB (≈8MB page cache); temp_store=MEMORY keeps sort/temp
+    // b-trees off disk; mmap_size lets reads go through the page cache
+    // mapping (64MB ≫ any ccs-sized DB). All session-scoped, write path only.
+    db.pragma("cache_size = -8000");
+    db.pragma("temp_store = MEMORY");
+    db.pragma("mmap_size = 67108864");
   }
   db.pragma("foreign_keys = ON");
   // WAL allows one writer at a time; concurrent `--force` scans (Ctrl-R right
@@ -331,6 +351,35 @@ export function getAllRepos(db: Database.Database): RepoRow[] {
 export function deleteSession(db: Database.Database, uuid: string): number {
   const res = db.prepare(`DELETE FROM sessions WHERE uuid = ?`).run(uuid);
   return res.changes;
+}
+
+/** Upsert one key into the meta table (schema v2). */
+export function setMeta(
+  db: Database.Database,
+  key: string,
+  value: string,
+): void {
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, value);
+}
+
+/**
+ * Read one key from the meta table. Returns null when the key is absent OR
+ * when the table itself does not exist yet — readonly/skipMigrate consumers
+ * (ccs-list) can hit a schema-v1 cache that predates migration v2, and a
+ * missing setting must degrade to the caller's default, not crash the list.
+ */
+export function getMeta(db: Database.Database, key: string): string | null {
+  try {
+    const row = db
+      .prepare(`SELECT value FROM meta WHERE key = ?`)
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function deleteReposNotIn(

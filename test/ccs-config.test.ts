@@ -5,9 +5,13 @@
  *
  * NOTE: ccs-config.ts uses `homedir()` + `process.env.XDG_*` to compute paths,
  * plus `homedir()` for path-under-HOME security checks. To isolate tests we
- * override `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME` per test and
- * re-import the module via a fresh dynamic import (cache-busted by query string)
- * so module-level state (e.g. `migrationWarned`) resets.
+ * override `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME` per test.
+ *
+ * NOTE on freshImport (review C-6): there is NO cache busting — Node's ESM
+ * loader caches by resolved URL, so every freshImport() returns the SAME
+ * module instance and module-level state (e.g. `migrationWarned`) persists
+ * across tests. Resets must be done explicitly through exported hooks like
+ * resetMigrationWarning(); do not rely on re-importing.
  */
 
 import { test, describe, afterEach } from "node:test";
@@ -65,13 +69,15 @@ function applyEnv(overrides: Record<string, string | undefined>): () => void {
   };
 }
 
-/** Fresh-import ccs-config.ts so module-level state is reset. */
+/**
+ * Import ccs-config.ts. NOT a fresh copy (review C-6): the ESM loader caches
+ * by URL, so module-level state survives between calls — reset it explicitly
+ * via exported hooks (e.g. resetMigrationWarning) where a test needs it.
+ */
 async function freshImport(): Promise<
   typeof import("../bin/ccs-config.ts")
 > {
   const url = new URL("../bin/ccs-config.ts", import.meta.url).href;
-  // Cache bust — Node's module cache keys by resolved URL including query.
-  // Note: ESM loader caches; tests still import fresh enough for our state.
   return import(url) as Promise<typeof import("../bin/ccs-config.ts")>;
 }
 
@@ -690,6 +696,77 @@ repos:
       const { loadConfig } = await freshImport();
       const cfg = loadConfig();
       assert.equal(cfg.repos[0].command, "opr claude");
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Review A-6 regression tests: defaults.command validated at origin
+  // -------------------------------------------------------------------------
+
+  test("A-6: rejects defaults.command with shell metacharacters even when no repo uses it", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+      CCS_CMD: undefined,
+      CCR_CMD: undefined,
+    });
+    try {
+      // Every repo has an explicit command, so the poisoned default is never
+      // inherited — it must STILL be rejected because it is persisted to the
+      // meta table and exposed on CcsConfig.
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+defaults:
+  command: "claude; rm -rf ~"
+repos:
+  - name: a
+    path: ${sb.home}
+    command: claude
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /defaults\.command.*shell metacharacter/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("A-6: rejects CCS_CMD with shell metacharacters at load time", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+      CCS_CMD: "claude `whoami`",
+      CCR_CMD: undefined,
+    });
+    try {
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: a
+    path: ${sb.home}
+    command: claude
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /shell metacharacter/);
+        return true;
+      });
     } finally {
       restore();
       await sb.cleanup();
