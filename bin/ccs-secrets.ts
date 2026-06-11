@@ -18,6 +18,12 @@
  *   github-server = GitHub server-to-server token (GitHub Apps)
  *   github-user   = GitHub user-to-server token
  *   github-refresh= GitHub OAuth refresh token
+ *   github-fine   = GitHub fine-grained personal access token (github_pat_)
+ *   gitlab-pat    = GitLab personal access token (glpat-)
+ *   google-oauth  = Google OAuth client secret (GOCSPX-)
+ *   sendgrid      = SendGrid API key (SG.xxx.yyy)
+ *   npm-token     = npm automation/publish token (npm_)
+ *   slack-webhook = Slack incoming-webhook URL (hooks.slack.com/services/...)
  *   aws-access    = AWS long-lived access key ID (AKIA prefix)
  *   aws-sts       = AWS STS temporary session credentials (ASIA prefix)
  *   google-api    = Google API key (AIza prefix)
@@ -28,8 +34,11 @@
  *   jwt           = JSON Web Token (3 base64url segments separated by dots)
  *   bearer        = "Bearer " Authorization header token
  *   op-ref        = 1Password op:// secret reference
- *   db-url        = Database connection URL with embedded credentials
- *                   (postgres/mysql/mongodb/redis, incl. +srv variants)
+ *   url-cred      = Any URL with embedded user:password credentials
+ *                   (postgres/mysql/mongodb/redis/https/..., incl. +srv)
+ *   env-assign    = Generic KEY=value / KEY: value assignment where the name
+ *                   ends in KEY/TOKEN/SECRET/PASSWORD (catch-all for pasted
+ *                   .env lines and handoff notes)
  *   private-key   = PEM-encoded private key block
  */
 export const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
@@ -40,6 +49,12 @@ export const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "github-server", re: /ghs_[A-Za-z0-9]{36,}/g },
   { name: "github-user", re: /ghu_[A-Za-z0-9]{36,}/g },
   { name: "github-refresh", re: /ghr_[A-Za-z0-9]{36,}/g },
+  { name: "github-fine", re: /github_pat_[A-Za-z0-9_]{22,}/g },
+  { name: "gitlab-pat", re: /glpat-[A-Za-z0-9_-]{20,}/g },
+  { name: "google-oauth", re: /GOCSPX-[A-Za-z0-9_-]{20,}/g },
+  { name: "sendgrid", re: /SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
+  { name: "npm-token", re: /npm_[A-Za-z0-9]{36}/g },
+  { name: "slack-webhook", re: /hooks\.slack\.com\/services\/\S+/g },
   { name: "aws-access", re: /AKIA[A-Z0-9]{16}/g },
   { name: "aws-sts", re: /ASIA[A-Z0-9]{16}/g },
   { name: "google-api", re: /AIza[A-Za-z0-9_-]{35}/g },
@@ -54,8 +69,17 @@ export const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "bearer", re: /Bearer\s+[A-Za-z0-9._-]{20,}/g },
   { name: "op-ref", re: /op:\/\/[A-Za-z0-9._/-]+/g },
   {
-    name: "db-url",
-    re: /\b(?:postgres|mysql|mongodb|redis)(?:\+srv)?:\/\/[^\s@]+:[^\s@]+@[^\s]+/gi,
+    // Any scheme (postgres/mysql/mongodb/redis/https/...) with a user:password
+    // userinfo component — broader than the old db-url pattern so credentials
+    // in plain https:// URLs are caught too.
+    name: "url-cred",
+    re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s:@/]+@[^\s]+/gi,
+  },
+  {
+    // Conservative catch-all: only fires on ALL-CAPS env-style names ending in
+    // a credential-ish suffix, so prose like "the key: rotate it" stays intact.
+    name: "env-assign",
+    re: /\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)\s*[=:]\s*\S{8,}/g,
   },
   {
     name: "private-key",

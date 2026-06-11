@@ -222,13 +222,26 @@ export function openDb(
     db.pragma("synchronous = NORMAL");
   }
   db.pragma("foreign_keys = ON");
+  // WAL allows one writer at a time; concurrent `--force` scans (Ctrl-R right
+  // after `ccs --refresh`, or two terminals) would otherwise fail immediately
+  // with SQLITE_BUSY (audit NEW-4). 3s is ample for ccs-sized transactions.
+  db.pragma("busy_timeout = 3000");
 
   if (!readOnly) {
-    // Tighten file permissions (best-effort; ignore on Windows / unsupported FS).
-    try {
-      chmodSync(stateDbPath, 0o600);
-    } catch {
-      // ignore
+    // Tighten file permissions, including WAL side files which inherit the
+    // main DB's content. Best-effort, but a failure is no longer silent
+    // (audit L-4): on umask-hostile or foreign filesystems the cache may stay
+    // group/world-readable, and the user should know.
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = stateDbPath + suffix;
+      if (suffix !== "" && !existsSync(p)) continue;
+      try {
+        chmodSync(p, 0o600);
+      } catch {
+        process.stderr.write(
+          `[ccs-db] warning: could not chmod 0600 ${p} — cache may be readable by other users\n`,
+        );
+      }
     }
   }
 
@@ -303,6 +316,21 @@ export function getAllRepos(db: Database.Database): RepoRow[] {
        ORDER BY name`,
     )
     .all() as RepoRow[];
+}
+
+/**
+ * Delete a single session row by UUID using a bound parameter.
+ *
+ * Exists so shell callers (ccs-delete.sh via ccs-delete-session.ts) never
+ * have to assemble SQL strings themselves (audit M-3 — the old sqlite3 CLI
+ * one-liner interpolated the UUID into the statement; safe only as long as
+ * the upstream regex gate held).
+ *
+ * Returns the number of rows removed (0 when the UUID was not cached).
+ */
+export function deleteSession(db: Database.Database, uuid: string): number {
+  const res = db.prepare(`DELETE FROM sessions WHERE uuid = ?`).run(uuid);
+  return res.changes;
 }
 
 export function deleteReposNotIn(
