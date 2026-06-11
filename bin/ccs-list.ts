@@ -15,6 +15,7 @@
 import { homedir } from "node:os";
 import { openDb } from "./ccs-db.ts";
 import { getPaths } from "./ccs-config.ts";
+import { parseDbTime } from "./ccs-time.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -56,13 +57,18 @@ function parseArgs(argv: string[]): Flags {
 
 function truncate(s: string, n: number): string {
   if (!s) return "";
-  const flat = s.replace(/[\t\n\r]+/g, " ").trim();
+  // Strip ALL control chars (incl. ESC, DEL), not just \t\n\r — second line
+  // of defense against terminal-escape injection (audit NEW-1); fzf renders
+  // these columns with --ansi. Intake sanitization in ccs-scan is the first.
+  const flat = s.replace(/[\x00-\x1f\x7f]+/g, " ").trim();
   return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
 }
 
 function humanTime(iso: string | null): string {
   if (!iso) return "";
-  const t = Date.parse(iso);
+  // parseDbTime, not Date.parse: naive "YYYY-MM-DD HH:MM:SS" values from
+  // SQLite are UTC and must not be parsed as local time (audit logic H-2).
+  const t = parseDbTime(iso);
   if (isNaN(t)) return "";
   const diffMs = Date.now() - t;
   if (diffMs < 0) return "<1m前";
@@ -74,11 +80,16 @@ function humanTime(iso: string | null): string {
   const d = Math.floor(h / 24);
   if (d < 7) return `${d}d前`;
   const w = Math.floor(d / 7);
-  return `${w}w前`;
+  // Past 4 weeks switch to an absolute date, matching the preview pane's
+  // relativeTime() so the same timestamp never renders as "52w前" in one
+  // place and "2025-06-12" in the other (audit logic L-3).
+  if (w < 4) return `${w}w前`;
+  return new Date(t).toISOString().slice(0, 10);
 }
 
 function formatSessionStamp(iso: string): string {
-  const d = new Date(iso);
+  const t = parseDbTime(iso);
+  const d = new Date(t);
   if (isNaN(d.getTime())) return iso;
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -142,6 +153,7 @@ interface RepoRowFull {
   cwd: string | null;
   icon: string;
   disabled: number;
+  scan_enabled: number;
   custom_json: string;
   // stats (LEFT JOINed, may be null)
   is_git: number | null;
@@ -155,6 +167,13 @@ interface RepoRowFull {
 
 function buildRepoBadges(r: RepoRowFull): string {
   const badges: string[] = [];
+
+  // scan: false repos keep their last-scanned stats forever — flag the
+  // staleness so the user doesn't read a frozen badge as current state
+  // (audit logic M-2).
+  if (r.scan_enabled === 0) {
+    badges.push(`[scan off]`);
+  }
 
   if (r.is_git === 1) {
     const branch = r.branch ?? "?";
@@ -229,10 +248,14 @@ function sessionToRow(s: SessionRowFull): string {
   // or a repo that hasn't been added to repos.yml yet.
   // Ternary tests s.repo_display directly so TS narrows string|null → string
   // without a non-null assertion.
+  // Unmapped sessions fall back to showing their cwd. That value is gated at
+  // scan time, but route it through truncate() anyway so the label column
+  // gets the same control-char stripping as every other column (audit NEW-1
+  // defense-in-depth; fzf renders this column with --ansi).
   const displayName = s.repo_display
     ? s.repo_display
     : s.cwd
-      ? s.cwd.replace(homedir(), "~")
+      ? truncate(s.cwd.replace(homedir(), "~"), DESC_MAX)
       : "(unknown)";
   const mapIcon = s.repo_display ? s.repo_icon || "📁" : "❓";
   const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
@@ -274,7 +297,7 @@ function main(): number {
       const repos = db
         .prepare(
           `SELECT r.name, r.path, r.description, r.command, r.cwd, r.icon,
-                  r.disabled, r.custom_json,
+                  r.disabled, r.scan_enabled, r.custom_json,
                   s.is_git, s.branch, s.uncommitted_insertions,
                   s.uncommitted_deletions, s.handoff_count, s.pending_count,
                   s.session_last_at

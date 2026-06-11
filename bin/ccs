@@ -140,11 +140,14 @@ CLIP_BINDS=()
 if [[ -n "$CLIP_CMD" ]]; then
   # ctrl-y: build "cd CWD && COMMAND [--resume UUID]" depending on kind ({4})
   # Keep fzf open (no +abort) and briefly flash a header confirming the copy.
+  # cwd/uuid are %q-quoted: the clipboard line gets pasted into a live shell,
+  # so a tainted cwd must arrive as an inert literal, never as syntax (audit
+  # H-1 defense-in-depth — intake sanitization in ccs-scan is the first gate).
   CLIP_BINDS+=(--bind "ctrl-y:execute-silent(
     kk={4}; cwd={5}; cmd={6};
     case \"\$kk\" in
-      resume:*) uuid=\${kk#resume:}; printf 'cd %s && %s --resume %s' \"\$cwd\" \"\$cmd\" \"\$uuid\" | ${CLIP_CMD} ;;
-      new:*)    printf 'cd %s && %s' \"\$cwd\" \"\$cmd\" | ${CLIP_CMD} ;;
+      resume:*) uuid=\${kk#resume:}; printf 'cd %q && %s --resume %q' \"\$cwd\" \"\$cmd\" \"\$uuid\" | ${CLIP_CMD} ;;
+      new:*)    printf 'cd %q && %s' \"\$cwd\" \"\$cmd\" | ${CLIP_CMD} ;;
     esac
   )+change-header(📋 Copied command to clipboard — ⏎: launch | ^Y: copy again)")
   # ctrl-i: copy UUID (resume) or repo path (new)
@@ -236,8 +239,12 @@ case "$KIND" in
     fi
     ;;
   new)
-    if [[ "$KEY" =~ [\;\&\|\<\>\$\`] ]]; then
-      echo "❌ Invalid repo name (shell metacharacters): ${KEY}" >&2
+    # Reject shell metacharacters, quotes/backslash AND control chars
+    # (incl. ESC — audit NEW-2). Mirrors the SHELL_METACHARS policy that
+    # ccs-config.ts enforces on repo names at load time; this is the
+    # defense-in-depth copy for rows coming back out of fzf.
+    if [[ "$KEY" =~ [\;\&\|\<\>\$\`\"\'\\] || "$KEY" =~ [[:cntrl:]] ]]; then
+      echo "❌ Invalid repo name (shell metacharacters/control chars): ${KEY}" >&2
       exit 1
     fi
     ;;
@@ -252,8 +259,10 @@ case "$KIND" in
     ;;
 esac
 
-# Path validation (traversal prevention)
-if [[ ! "$ROW_CWD" == "$HOME"* ]]; then
+# Path validation (traversal prevention). Must be $HOME itself or a child
+# path ("$HOME"/*): a bare prefix match would also accept sibling dirs like
+# /Users/daiskeEVIL (audit L-1).
+if [[ "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ]]; then
   echo "⚠️  cwd is outside \$HOME: ${ROW_CWD}" >&2
   echo "Launching in current directory instead." >&2
   ROW_CWD="."

@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security (audit 2026-06-12 hardening)
+- **H-1 / NEW-1 — session intake sanitization**: a session `.jsonl` `cwd` no longer reaches the Ctrl-Y clipboard command unchecked. Session `cwd`/`topic`/`summary`/`branch` and workspace `first_line` are now gated at scan time via a shared `bin/ccs-sanitize.ts`: shell metacharacters reject the `cwd` to an `"unknown"` sentinel (blocks deferred command injection on paste), and control characters incl. ESC are stripped (blocks ANSI/terminal-escape spoofing in the `--ansi` fzf list and preview).
+- Ctrl-Y clipboard line now `%q`-quotes the `cwd`/`uuid` (defense-in-depth for H-1); list/preview renderers strip control chars on the display side too (defense-in-depth for NEW-1).
+- **NEW-3** — `repos.yml` `name` now rejects the full `SHELL_METACHARS` set (was only `\t \n \\`), matching the `path`/`cwd`/`command` policy.
+- **NEW-2** — `bin/ccs` `new:` row validation rejects control chars (incl. ESC) in addition to shell metacharacters.
+- **M-1** — secret patterns expanded 19 → 26: GitLab PAT, GitHub fine-grained PAT, Google OAuth secret, SendGrid, npm token, Slack webhook URL, generic `KEY=value`, and any-scheme `user:pass@` URL credentials.
+- **M-2** — session `cwd` is now run through `maskSecrets`; preview-pane header fields (`cwd`/`branch`/`version`) are masked too.
+- **M-3** — `ccs-delete.sh` cache cleanup uses a bound-parameter delete (`bin/ccs-delete-session.ts`) instead of string-concatenated SQL.
+- **M-4** — `isUnderHome` resolves symlinks (`realpathSync`), closing the `~/escape -> /` HOME-escape.
+- **L-1** — `bin/ccs` HOME check requires `$HOME` itself or a `$HOME/` child (rejects sibling dirs like `/Users/xEVIL`).
+- **L-2** — `rm -rf` of the subagent dir is guarded by a final-form `<projects>/<dir>/<uuid>` check.
+
+### Fixed (audit 2026-06-12 logic)
+- **C-1 (critical)** — `scan()` now runs the sessions pass before the repo pass, so `repo_stats.session_count_total` / `session_last_at` are correct after a single `--refresh` (previously lagged one scan; a fresh DB showed every repo as `💤 未使用`).
+- **logic H-1** — `--no-sessions` scans preserve the previous session aggregates instead of rewinding them to 0.
+- **H-2 / M-1 (time)** — list and preview parse DB timestamps through a shared `bin/ccs-time.ts` that treats naive SQLite `datetime('now')` values as UTC (no more JST skew); `sessions.indexed_at` is written as ISO 8601 for a single in-DB time format.
+- **H-3** — preview "Recent" sessions use the same `WHERE repo_name = ?` population as the "Total" count (no more Total/Recent disagreement).
+- **H-4** — `message_count` counts only `user`/`assistant` rows, matching the preview.
+- **M-4 (logic)** — sessions started in a repo subdirectory map to the repo via longest-prefix matching.
+- **M-3 (logic)** — sessions left unmapped (repo added after the session) are re-resolved on later scans.
+- **M-2 (logic)** — `scan: false` repos show a `[scan off]` badge so their frozen stats aren't read as current.
+- **M-5** — `extractUserText` joins all text blocks (matches the preview), so topics aren't truncated to the first block.
+- **M-6** — `started_at` / `last_activity_at` use min/max of timestamps, not first/last line order.
+- **L-1 (logic)** — `parseInt` results are `Number.isFinite`-guarded before DB writes.
+- **L-3 / L-4 (perf/robustness)** — workspace dir previews `stat` in parallel and read only the first 4 KB per file; chmod failures on the cache (and WAL side files) now warn instead of failing silently.
+- **NEW-4** — `busy_timeout = 3000` set on the DB connection so concurrent `--force` scans don't fail with `SQLITE_BUSY`.
+- Stale `ccr-preview.ts` header comment in `ccs-preview-session.ts` corrected.
+
 ## [0.2.0] — 2026-04-26
 
 ### Changed

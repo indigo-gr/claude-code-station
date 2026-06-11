@@ -6,7 +6,7 @@
     "ccs": "./bin/ccs"
   },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test test/*.test.ts",
     "lint": "tsc --noEmit"
   },
   "keywords": [

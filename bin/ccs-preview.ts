@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { getPaths } from "./ccs-config.ts";
 import { openDb, type DbHandle } from "./ccs-db.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
+import { parseDbTime } from "./ccs-time.ts";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -48,8 +49,8 @@ function divider(title: string): string {
 
 function relativeTime(iso: string | null | undefined): string {
   if (!iso) return "-";
-  const then = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  const t = then.getTime();
+  const t = parseDbTime(iso);
+  const then = new Date(t);
   if (Number.isNaN(t)) return iso;
   const diffSec = Math.floor((Date.now() - t) / 1000);
   if (diffSec < 60) return "<1m ago";
@@ -67,7 +68,7 @@ function relativeTime(iso: string | null | undefined): string {
 
 function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "-";
-  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
+  const d = new Date(parseDbTime(iso));
   if (Number.isNaN(d.getTime())) return iso;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -75,7 +76,10 @@ function formatDateTime(iso: string | null | undefined): string {
 
 function truncate(s: string, max: number): string {
   if (!s) return "";
-  const one = s.replace(/\s+/g, " ").trim();
+  // Control chars (incl. ESC) are stripped before rendering — the preview
+  // pane prints raw to the terminal, so this is the display-side defense
+  // against terminal-escape injection (audit NEW-1).
+  const one = s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
   return one.length <= max ? one : one.slice(0, max - 1) + "…";
 }
 
@@ -297,13 +301,17 @@ function renderRepoPreview(name: string, cwd: string): void {
     } else {
       console.log(`${label("Total:".padEnd(14))} ${stats.session_count_total} sessions`);
       console.log(`${label("Last activity:".padEnd(14))} ${relativeTime(stats.session_last_at)}`);
+      // Same population as the Total count above (repo_stats aggregates
+      // WHERE repo_name = ?) — mixing in a cwd fallback here made Total and
+      // Recent disagree (audit logic H-3). Sessions under the repo path are
+      // mapped to repo_name at scan time, including subdirectories.
       const rows = db
         .prepare(
           `SELECT last_activity_at, topic FROM sessions
-           WHERE repo_name = ? OR cwd = ?
+           WHERE repo_name = ?
            ORDER BY last_activity_at DESC LIMIT 3`,
         )
-        .all(name, repo.path) as SessionRow[];
+        .all(name) as SessionRow[];
       if (rows.length > 0) {
         console.log(label("Recent:"));
         for (const r of rows) {
