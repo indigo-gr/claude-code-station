@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Docs (review 2026-06-12)
 - Regression checklist #4 (secret patterns: 26 unified) and #18 (risky-command warning removed in Phase 6 S2) corrected; stale `isUnderHome` backlog entry closed (fixed by audit M-4); README architecture diagram lists all 14 bin/ modules; `REVIEW.md` reflects the metachar hard-reject reality; `sqlite-schema.md` documents schema v2 + the sessions-first scan order; `repos-yml-schema.md` documents the NEW-3 name policy, unified error formats, and the unmapped-session fallback.
 
+### Fixed (review 2026-06-12 — follow-up batch)
+- **COUNT(*) in-transaction** — `scanOneRepo` reads its session aggregates inside the write transaction, so a concurrent process committing session changes can no longer slip between the read and the `repo_stats` upsert.
+- **Advisory scan lock** — `<cacheDir>/scan.lock` (O_EXCL create, 5-minute stale takeover): a second concurrent scan skips with a stderr note instead of racing the sessions cleanup (original CR2 H3). `ScanResult.lockSkipped` exposes the skip.
+- **PRAGMA tuning** — write-path connections set `cache_size = -8000`, `temp_store = MEMORY`, `mmap_size = 64MB` (readonly preview path untouched).
+- **install.sh runtime deps** — `node_modules` is symlinked from the repo checkout into the install dir so installed scripts resolve `better-sqlite3`/`yaml` (closes the backlog HIGH short-term; npm-package distribution remains the long-term plan).
+
+### Tests (review 2026-06-12 — follow-up batch)
+- New `test/ccs-shell.test.ts`: the previously-untested bash surfaces — `bin/ccs --version/--help` and the full `ccs-delete.sh` matrix (non-UUID rejection, not-found, confirmed delete incl. subagent-dir removal, declined delete, and the C-2 rm-failure branch) — driven by node:test + spawnSync with sandboxed HOME/XDG. No bats dependency.
+- Advisory-lock test: fresh lock → skip; stale lock → takeover + release.
+- 118 tests, all green.
+
 ### Security (audit 2026-06-12 hardening)
 - **H-1 / NEW-1 — session intake sanitization**: a session `.jsonl` `cwd` no longer reaches the Ctrl-Y clipboard command unchecked. Session `cwd`/`topic`/`summary`/`branch` and workspace `first_line` are now gated at scan time via a shared `bin/ccs-sanitize.ts`: shell metacharacters reject the `cwd` to an `"unknown"` sentinel (blocks deferred command injection on paste), and control characters incl. ESC are stripped (blocks ANSI/terminal-escape spoofing in the `--ansi` fzf list and preview).
 - Ctrl-Y clipboard line now `%q`-quotes the `cwd`/`uuid` (defense-in-depth for H-1); list/preview renderers strip control chars on the display side too (defense-in-depth for NEW-1).
