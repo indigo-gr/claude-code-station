@@ -258,12 +258,20 @@ rm -f ~/.claude/scripts/ccr ~/.claude/scripts/ccr-*.ts ~/.claude/scripts/ccr-*.s
 
 ```
 ccs (bash)
- ├─ ccs-scan.ts     → writes ~/.cache/ccs/state.db
- ├─ ccs-list.ts     → reads DB, emits fzf rows (NEW + RESUME)
- ├─ ccs-preview.ts  → preview pane (repo badges / session head)
- ├─ ccs-config.ts   → loads ~/.config/ccs/repos.yml
- ├─ ccs-db.ts       → better-sqlite3 wrapper (WAL, FK on)
- └─ ccs-delete.sh   → Ctrl-D handler
+ ├─ ccs-scan.ts           → scans repos, orchestrates, writes state.db
+ │   └─ ccs-scan-sessions.ts  (session walk, JSONL parse, cwd→repo resolve)
+ ├─ ccs-list.ts           → reads DB, emits fzf rows (NEW + RESUME)
+ ├─ ccs-preview.ts        → preview pane renderer (repo badges)
+ │   └─ ccs-preview-session.ts (session conversation head)
+ ├─ ccs-config.ts         → loads/validates ~/.config/ccs/repos.yml
+ ├─ ccs-db.ts             → better-sqlite3 wrapper (WAL, FK, migrations)
+ ├─ ccs-delete.sh         → Ctrl-D session delete handler
+ │   └─ ccs-delete-session.ts  (cache row removal, bound params)
+ └─ shared helpers (imported by scan / list / preview):
+    ├─ ccs-sanitize.ts    (SHELL_METACHARS, stripControlChars)
+    ├─ ccs-secrets.ts     (26-pattern maskSecrets)
+    ├─ ccs-time.ts        (UTC-safe DB timestamp parsing)
+    └─ ccs-utils.ts       (truncate, relative time, extractText, UUID_RE)
 ```
 
 Design docs: [`docs/design/`](docs/design/).
@@ -280,7 +288,7 @@ Design docs: [`docs/design/`](docs/design/).
 - Prepared statements only for SQLite; foreign keys enforced / SQLiteはprepared statementsのみ、FK有効
 - 50MB per-file cap when parsing JSONL sessions / JSONLパーサは1ファイル50MB上限
 
-> **Trust note / 注意**: the `command:` field in `repos.yml` is executed as-is. It's your config — don't paste anything you wouldn't type into a shell. / `repos.yml` の `command:` はそのまま実行される。自分の設定ファイルなので信頼されるが、シェルに打ちたくない文字列は書かないこと。
+> **Trust note / 注意**: the `command:` field in `repos.yml` is validated for shell metacharacters at load time — only safe, sanitized commands are executed. / `repos.yml` の `command:` はロード時にシェルメタ文字を検証し、安全な文字列のみが実行される。
 
 ---
 

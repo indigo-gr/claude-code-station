@@ -12,7 +12,17 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  writeFile,
+  mkdir,
+  symlink,
+  truncate as ftruncate,
+  utimes,
+} from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -570,6 +580,208 @@ describe("scan() — audit regressions", () => {
       } finally {
         db.close();
       }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});
+
+describe("scan() — 2026-06-12 review regressions", () => {
+  test("C-1: commit subject containing a TAB does not corrupt last_commit_at", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "tab-repo");
+    await mkdir(repoDir, { recursive: true });
+    const git = (...args: string[]) =>
+      spawnSync("git", ["-C", repoDir, ...args], { encoding: "utf-8" });
+    git("init", "-q");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    await writeFile(join(repoDir, "f.txt"), "x");
+    git("add", "f.txt");
+    const commit = git("commit", "-q", "-m", "subject\twith\ttabs");
+    assert.equal(commit.status, 0, `git commit failed: ${commit.stderr}`);
+
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: tab\n    path: ${repoDir}\n`,
+    );
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: false });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(
+            `SELECT last_commit_at, last_commit_subject FROM repo_stats WHERE name = ?`,
+          )
+          .get("tab") as
+          | { last_commit_at: string | null; last_commit_subject: string | null }
+          | undefined;
+        assert.ok(row, "repo_stats row should exist");
+        assert.match(
+          row!.last_commit_at ?? "",
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+          "last_commit_at must be a clean ISO timestamp, not a subject fragment",
+        );
+        assert.match(row!.last_commit_subject ?? "", /subject with tabs/);
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("C-4: a JSONL growing past 50MB keeps its row and stops re-parsing", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "big-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: big\n    path: ${repoDir}\n`,
+    );
+    const file = await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: new Date().toISOString(),
+        message: { content: "indexed while small" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+
+      // Grow past the limit WITHOUT writing 50MB: ftruncate extends the file
+      // sparsely, so st.size crosses the threshold instantly.
+      const oversize = 50 * 1024 * 1024 + 1;
+      await ftruncate(file, oversize);
+      await scan({ force: true, scanSessions: true });
+
+      {
+        const db = await openStateDb();
+        try {
+          const row = db
+            .prepare(
+              `SELECT topic, jsonl_size FROM sessions WHERE uuid = ?`,
+            )
+            .get(AUDIT_UUID_A) as
+            | { topic: string | null; jsonl_size: number }
+            | undefined;
+          assert.ok(row, "oversized session must NOT be deleted — it is still resumable");
+          assert.match(row!.topic ?? "", /indexed while small/, "last good parse is kept");
+          assert.equal(row!.jsonl_size, oversize, "size must be stamped so the row reflects reality");
+        } finally {
+          db.close();
+        }
+      }
+
+      // Third scan: mtime is unchanged since the touch, so the mtime cache
+      // must skip the file instead of re-attempting the parse forever.
+      const res3 = await scan({ force: true, scanSessions: true });
+      assert.equal(res3.sessionsIndexed, 0, "no re-index loop for oversized files");
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("DA-3: repo registered via symlink claims sessions recorded under its realpath", async () => {
+    const sb = await makeScanSandbox();
+    const realDir = join(sb.home, "real-target");
+    await mkdir(realDir, { recursive: true });
+    const linkRepo = join(sb.home, "link-repo");
+    await symlink(realDir, linkRepo);
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: sym\n    path: ${linkRepo}\n`,
+    );
+    // Real processes report a fully-resolved cwd (process.cwd() resolves
+    // symlinks and macOS /var -> /private/var aliasing) — mimic that.
+    const resolvedCwd = realpathSync(realDir);
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: resolvedCwd,
+        timestamp: new Date().toISOString(),
+        message: { content: "session under realpath" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT repo_name FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { repo_name: string | null } | undefined;
+        assert.equal(
+          row?.repo_name,
+          "sym",
+          "resolver must match on the realpath of a symlinked repo root",
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});
+
+describe("scan() — advisory lock", () => {
+  test("a fresh scan.lock makes the scan skip; a stale one is taken over", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "lock-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: lock\n    path: ${repoDir}\n`,
+    );
+    const cacheCcs = join(sb.xdgCache, "ccs");
+    await mkdir(cacheCcs, { recursive: true });
+    const lockPath = join(cacheCcs, "scan.lock");
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+
+      // Fresh lock (another scan "in progress") → skip, nothing scanned.
+      await writeFile(lockPath, "99999 held\n");
+      const held = await scan({ force: true, scanSessions: true });
+      assert.equal(held.lockSkipped, true);
+      assert.equal(held.reposScanned, 0);
+
+      // Stale lock (crashed scan >5min ago) → taken over, scan proceeds,
+      // and the lock is released afterwards.
+      const oldSec = (Date.now() - 10 * 60 * 1000) / 1000;
+      await utimes(lockPath, oldSec, oldSec);
+      const taken = await scan({ force: true, scanSessions: true });
+      assert.equal(taken.lockSkipped ?? false, false);
+      assert.equal(taken.reposScanned, 1);
+      const { existsSync } = await import("node:fs");
+      assert.equal(existsSync(lockPath), false, "lock must be released");
     } finally {
       restore();
       await sb.cleanup();

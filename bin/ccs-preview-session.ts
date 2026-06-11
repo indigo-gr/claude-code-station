@@ -8,39 +8,21 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { maskSecrets } from "./ccs-secrets.ts";
+import {
+  extractText,
+  truncate,
+  MAX_JSONL_SIZE,
+  UUID_RE,
+} from "./ccs-utils.ts";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const MAX_PREVIEW_MESSAGES = 20;
 const MAX_MSG_LEN = 200;
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB limit
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const texts: string[] = [];
-    for (const block of content) {
-      if (block?.type === "text" && typeof block.text === "string") {
-        texts.push(block.text);
-      } else if (block?.type === "tool_use") {
-        texts.push(`[tool: ${block.name}]`);
-      } else if (block?.type === "tool_result") {
-        texts.push(`[tool result]`);
-      }
-    }
-    return texts.join(" ");
-  }
-  return "";
-}
-
-function truncate(s: string, max: number): string {
-  // Strip control chars (incl. ESC) — message text comes straight from the
-  // JSONL and is printed raw to the terminal, so this is the display-side
-  // defense against terminal-escape injection (audit NEW-1).
-  const oneLine = s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, max - 1) + "…";
-}
+// extractText / truncate / UUID_RE / MAX_JSONL_SIZE come from ccs-utils.ts —
+// shared with the scanner so the preview and topic extraction can no longer
+// drift apart (review A-1/A-2). The preview passes includeToolBlocks below
+// because tool activity is part of the conversation flow it renders.
 
 export async function renderSessionPreview(sessionId: string): Promise<void> {
   if (!sessionId) {
@@ -84,7 +66,7 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
   // File size check
   try {
     const stats = await stat(targetFile);
-    if (stats.size > MAX_FILE_SIZE) {
+    if (stats.size > MAX_JSONL_SIZE) {
       console.log(`⚠️ File too large (${Math.round(stats.size / 1024 / 1024)}MB). Skipping preview.`);
       return;
     }
@@ -113,7 +95,9 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
         (entry.type === "user" || entry.type === "assistant") &&
         entry.message?.content
       ) {
-        const text = extractText(entry.message.content);
+        const text = extractText(entry.message.content, {
+          includeToolBlocks: true,
+        });
         if (text) {
           messages.push({
             role: entry.type === "user" ? "👤" : "🤖",

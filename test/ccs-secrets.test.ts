@@ -43,6 +43,13 @@ describe("maskSecrets — Phase 6-A additions", () => {
     assert.ok(!out.match(/AC[a-f0-9]{32}/));
   });
 
+  test("masks Twilio Account SID with uppercase hex (review C-3)", () => {
+    const fakeSid = "A" + "C" + "0A1B2C3D".repeat(4);
+    const out = maskSecrets(`sid=${fakeSid}`);
+    assert.ok(!out.includes(fakeSid));
+    assert.ok(out.includes("[REDACTED]"));
+  });
+
   test("masks JWT token", () => {
     // A realistic 3-segment JWT
     const jwt =

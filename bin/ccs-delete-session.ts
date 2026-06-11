@@ -14,8 +14,7 @@
 import { existsSync } from "node:fs";
 import { getPaths } from "./ccs-config.ts";
 import { openDb, deleteSession } from "./ccs-db.ts";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+import { UUID_RE } from "./ccs-utils.ts";
 
 function main(): number {
   const uuid = process.argv[2] ?? "";
