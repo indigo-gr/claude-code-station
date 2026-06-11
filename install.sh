@@ -71,7 +71,9 @@ done
 chmod +x "$INSTALL_DIR/ccs"
 [[ -e "$INSTALL_DIR/ccs-delete.sh" ]] && chmod +x "$INSTALL_DIR/ccs-delete.sh"
 
-ls "$INSTALL_DIR" | grep -E '^ccs' | sed 's/^/  /'
+# find, not `ls | grep` (shellcheck SC2010): ls output is for humans and
+# breaks on unusual filenames; -maxdepth 1 keeps it to the install dir itself.
+find "$INSTALL_DIR" -maxdepth 1 -name 'ccs*' -exec basename {} \; | sort | sed 's/^/  /'
 
 # ── Initialize config/cache dirs (ccs-config.ts populates template on first run) ─
 mkdir -p -m 0700 "$CONFIG_DIR" "$CACHE_DIR"

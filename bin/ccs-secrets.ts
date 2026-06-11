@@ -60,7 +60,9 @@ export const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "google-api", re: /AIza[A-Za-z0-9_-]{35}/g },
   { name: "stripe-live", re: /[sr]k_live_[A-Za-z0-9]{24,}/g },
   { name: "stripe-test", re: /[sr]k_test_[A-Za-z0-9]{24,}/g },
-  { name: "twilio-account", re: /AC[a-f0-9]{32}/g },
+  // Case-insensitive hex: Twilio renders SIDs lowercase today, but tooling
+  // and docs frequently uppercase them — both must mask (review C-3).
+  { name: "twilio-account", re: /AC[a-fA-F0-9]{32}/g },
   { name: "slack-token", re: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
   {
     name: "jwt",

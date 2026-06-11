@@ -2,11 +2,12 @@
   "name": "claude-code-station",
   "version": "0.2.0",
   "description": "Claude Code Station — fzf-powered launcher and session picker for Claude Code with multi-repo support and SQLite-backed state cache",
+  "type": "module",
   "bin": {
     "ccs": "./bin/ccs"
   },
   "scripts": {
-    "test": "node --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "lint": "tsc --noEmit"
   },
   "keywords": [

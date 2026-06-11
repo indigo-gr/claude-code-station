@@ -31,8 +31,10 @@ if [[ -z "$TARGET" ]]; then
   exit 1
 fi
 
-# Show file info
-SIZE=$(du -h "$TARGET" | cut -f1)
+# Show file info. du can fail if the file vanishes between the find loop and
+# here (concurrent cleanup) — under `set -e` that would kill the script with
+# no message, so fall back to "?" instead.
+SIZE=$(du -h "$TARGET" 2>/dev/null | cut -f1 || echo "?")
 echo "━━━ Delete Session ━━━"
 echo "📄 $TARGET"
 echo "📏 $SIZE"
@@ -40,13 +42,24 @@ echo ""
 read -r -p "Delete this session? (y/N): " confirm
 
 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-  rm "$TARGET"
+  # Wrap rm explicitly: under `set -e` a bare rm failure (permissions, file
+  # gone) would exit the script before the trailing "Press Enter" prompt, so
+  # the fzf execute pane closes with no message and the user has no way to
+  # know the delete failed (review C-2).
+  if ! rm "$TARGET"; then
+    echo "❌ Failed to delete: $TARGET" >&2
+    read -r -p "Press Enter to continue..."
+    exit 1
+  fi
   # Also remove subagents directory if it exists. The final-form check is a
   # defensive guard on the rm -rf argument: it must still look like
   # <projects>/<dir>/<validated-uuid> at deletion time (audit L-2).
   SUBAGENT_DIR="${PROJECTS_DIR}/$(basename "$(dirname "$TARGET")")/${SESSION_ID}"
   if [[ -d "$SUBAGENT_DIR" && "$SUBAGENT_DIR" == "$PROJECTS_DIR/"*"/$SESSION_ID" ]]; then
-    rm -rf "$SUBAGENT_DIR"
+    if ! rm -rf "$SUBAGENT_DIR"; then
+      # Main JSONL is already gone — report and continue to cache cleanup.
+      echo "[ccs] warning: could not remove subagent dir: $SUBAGENT_DIR" >&2
+    fi
   fi
   # Remove the stale row from the SQLite cache so the session disappears
   # from the fzf list immediately on reload (Ctrl-D → +reload). Uses a bound
