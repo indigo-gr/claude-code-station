@@ -240,6 +240,69 @@ repos:
     }
   });
 
+  test("rejects name with shell metacharacters or control chars (audit NEW-3)", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      // ESC (terminal escape) and `$` (command substitution) must both be
+      // rejected — the name reaches fzf's --ansi label column.
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: "evil\\u001b[2J$(touch /tmp/pwn)"
+    path: ${sb.home}
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /shell metacharacter|control char/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("rejects path escaping $HOME through a symlink (audit M-4)", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      // ~/escape -> <outside-home dir>. Lexically under $HOME, physically not.
+      const outside = join(sb.home, "..", "outside-home");
+      await mkdir(outside, { recursive: true });
+      const { symlink } = await import("node:fs/promises");
+      await symlink(outside, join(sb.home, "escape"));
+      await writeYml(
+        sb.reposYml,
+        `version: 1
+repos:
+  - name: escapee
+    path: ${join(sb.home, "escape")}
+`,
+      );
+      const { loadConfig, ConfigError } = await freshImport();
+      assert.throws(() => loadConfig(), (e: unknown) => {
+        assert.ok(e instanceof ConfigError);
+        assert.match((e as Error).message, /outside \$HOME/);
+        return true;
+      });
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
   test("rejects name with tab/newline/backslash", async () => {
     const sb = await makeSandbox();
     const restore = applyEnv({
@@ -260,7 +323,8 @@ repos:
       const { loadConfig, ConfigError } = await freshImport();
       assert.throws(() => loadConfig(), (e: unknown) => {
         assert.ok(e instanceof ConfigError);
-        assert.match((e as Error).message, /invalid characters/);
+        // Tab is a control char under the unified SHELL_METACHARS policy.
+        assert.match((e as Error).message, /shell metacharacter|control char/);
         return true;
       });
     } finally {

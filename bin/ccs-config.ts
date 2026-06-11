@@ -10,12 +10,15 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
+
+import { SHELL_METACHARS } from "./ccs-sanitize.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,17 +128,38 @@ function expandPath(p: string): string {
   return p;
 }
 
+// Symlink-aware $HOME containment check (audit M-4).
+//
+// Two layers:
+//   1. Lexical: the resolve()d path must sit under $HOME as written. This is
+//      the only possible check for paths that do not exist yet (disabled
+//      repos may point at absent directories — loadConfig only warns there).
+//   2. Physical: when the path EXISTS, its realpath must also sit under the
+//      realpath of $HOME — otherwise `~/escape -> /` style symlinks smuggle
+//      the repo outside $HOME while passing the lexical check. Both sides are
+//      realpath'd so macOS /var -> /private/var aliasing compares cleanly.
 function isUnderHome(absPath: string): boolean {
   const home = homedir();
-  const resolved = resolve(absPath);
-  return resolved === home || resolved.startsWith(home + "/");
+  const lexical = resolve(absPath);
+  if (lexical !== home && !lexical.startsWith(home + "/")) return false;
+
+  let physical: string;
+  try {
+    physical = realpathSync(lexical);
+  } catch {
+    return true; // path absent — lexical check above is all we can assert
+  }
+  let physicalHome: string;
+  try {
+    physicalHome = realpathSync(home);
+  } catch {
+    return true; // home unresolvable (exotic FS) — fall back to lexical result
+  }
+  return physical === physicalHome || physical.startsWith(physicalHome + "/");
 }
 
-// Shell metacharacters forbidden in path/cwd/command to prevent injection
-// through fzf `execute(...)` bindings that interpolate row columns into bash,
-// and through the final direct invocation in bin/ccs.
-// \x00-\x1f covers TAB (0x09), NL (0x0a), CR (0x0d), and other control chars.
-const SHELL_METACHARS = /[;&|<>$`"'\\\n\r\x00-\x1f]/;
+// SHELL_METACHARS is shared with the session-intake sanitizer; see
+// ccs-sanitize.ts for the policy rationale.
 
 function rejectShellMetachars(
   field: string,
@@ -268,9 +292,12 @@ function resolveRepoEntry(
       `${reposYmlPath}: repos[${index}].name is required and must be a non-empty string`,
     );
   }
-  if (/[\t\n\\]/.test(name)) {
+  // Same policy as path/cwd/command (audit NEW-3): the name lands in fzf's
+  // ANSI-rendered label column and in the `new:<name>` row key, so shell
+  // metacharacters and control chars (incl. ESC) are rejected outright.
+  if (SHELL_METACHARS.test(name)) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}].name contains invalid characters (\\t, \\n, or \\)`,
+      `${reposYmlPath}: repos[${index}].name contains shell metacharacter(s) or control char(s): ${JSON.stringify(name)}`,
     );
   }
 
