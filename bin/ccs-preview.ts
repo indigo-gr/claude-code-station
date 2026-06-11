@@ -13,7 +13,11 @@ import { existsSync } from "node:fs";
 import { getPaths } from "./ccs-config.ts";
 import { openDb, type DbHandle } from "./ccs-db.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
-import { parseDbTime } from "./ccs-time.ts";
+import {
+  formatRelativeTime,
+  formatDateTime,
+  truncate,
+} from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -43,45 +47,9 @@ function divider(title: string): string {
   return `${C.divider}${base}${"─".repeat(pad)}${C.reset}`;
 }
 
-// ---------------------------------------------------------------------------
-// Time formatting
-// ---------------------------------------------------------------------------
-
-function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return "-";
-  const t = parseDbTime(iso);
-  const then = new Date(t);
-  if (Number.isNaN(t)) return iso;
-  const diffSec = Math.floor((Date.now() - t) / 1000);
-  if (diffSec < 60) return "<1m ago";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffH = Math.floor(diffMin / 60);
-  if (diffH < 24) return `${diffH}h ago`;
-  const diffD = Math.floor(diffH / 24);
-  if (diffD < 7) return `${diffD}d ago`;
-  const diffW = Math.floor(diffD / 7);
-  if (diffW < 4) return `${diffW}w ago`;
-  // YYYY-MM-DD
-  return then.toISOString().slice(0, 10);
-}
-
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "-";
-  const d = new Date(parseDbTime(iso));
-  if (Number.isNaN(d.getTime())) return iso;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function truncate(s: string, max: number): string {
-  if (!s) return "";
-  // Control chars (incl. ESC) are stripped before rendering — the preview
-  // pane prints raw to the terminal, so this is the display-side defense
-  // against terminal-escape injection (audit NEW-1).
-  const one = s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
-  return one.length <= max ? one : one.slice(0, max - 1) + "…";
-}
+// Time formatting and truncation come from ccs-utils.ts — the single source
+// shared with the list renderer (review A-1/A-3/K-8). Unparseable timestamps
+// render as "-" (the utils default), never as the raw DB string.
 
 // ---------------------------------------------------------------------------
 // DB row types (narrow views)
@@ -234,7 +202,7 @@ function renderRepoPreview(name: string, cwd: string): void {
       const branch = stats.branch || "(detached)";
       console.log(`${label("Branch:".padEnd(14))} ${branch}`);
       if (stats.last_commit_hash) {
-        const rel = relativeTime(stats.last_commit_at);
+        const rel = formatRelativeTime(stats.last_commit_at);
         const shortHash = stats.last_commit_hash.slice(0, 7);
         const subj = truncate(stats.last_commit_subject || "", 60);
         console.log(`${label("Last commit:".padEnd(14))} ${rel}`);
@@ -269,7 +237,7 @@ function renderRepoPreview(name: string, cwd: string): void {
           )
           .all(name) as FileRow[];
         for (const r of rows) {
-          console.log(`  • ${truncate(r.filename, 50)} (${relativeTime(r.mtime)})`);
+          console.log(`  • ${truncate(r.filename, 50)} (${formatRelativeTime(r.mtime)})`);
         }
       }
 
@@ -282,13 +250,13 @@ function renderRepoPreview(name: string, cwd: string): void {
           )
           .all(name) as FileRow[];
         for (const r of rows) {
-          console.log(`  • ${truncate(r.filename, 50)} (${relativeTime(r.mtime)})`);
+          console.log(`  • ${truncate(r.filename, 50)} (${formatRelativeTime(r.mtime)})`);
         }
       }
 
       if (stats.claude_room_latest) {
         const latest = truncate(stats.claude_room_latest, 40);
-        const when = relativeTime(stats.claude_room_latest_at);
+        const when = formatRelativeTime(stats.claude_room_latest_at);
         console.log(`${label("Claude room:".padEnd(14))} latest: ${latest} (${when})`);
       }
       console.log("");
@@ -300,7 +268,7 @@ function renderRepoPreview(name: string, cwd: string): void {
       console.log("No sessions yet — ready to start");
     } else {
       console.log(`${label("Total:".padEnd(14))} ${stats.session_count_total} sessions`);
-      console.log(`${label("Last activity:".padEnd(14))} ${relativeTime(stats.session_last_at)}`);
+      console.log(`${label("Last activity:".padEnd(14))} ${formatRelativeTime(stats.session_last_at)}`);
       // Same population as the Total count above (repo_stats aggregates
       // WHERE repo_name = ?) — mixing in a cwd fallback here made Total and
       // Recent disagree (audit logic H-3). Sessions under the repo path are

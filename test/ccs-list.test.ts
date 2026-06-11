@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import Database from "better-sqlite3";
-import { openDb, upsertRepo } from "../bin/ccs-db.ts";
+import { openDb, upsertRepo, setMeta } from "../bin/ccs-db.ts";
 
 const LIST_TS = fileURLToPath(new URL("../bin/ccs-list.ts", import.meta.url));
 
@@ -97,6 +97,7 @@ function seed(db: Database.Database): void {
 function runList(
   sb: ListSandbox,
   args: string[],
+  cwd?: string,
 ): { stdout: string; stderr: string; code: number } {
   const res = spawnSync("tsx", [LIST_TS, ...args], {
     env: {
@@ -105,6 +106,7 @@ function runList(
       XDG_CONFIG_HOME: sb.xdgConfig,
       XDG_CACHE_HOME: sb.xdgCache,
     },
+    cwd,
     encoding: "utf-8",
   });
   return {
@@ -147,26 +149,131 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
   });
 
   test("cold start (state.db missing) prints friendly hint, not raw stack trace", async () => {
-    // Phase 7 CR3-A regression test: if state.db does not exist yet,
-    // ccs-list.ts must NOT leak a Node stack trace to stderr. It should
-    // print a one-line message pointing the user at `ccs --refresh`.
+    // Phase 7 CR3-A + review C-5 regression test: if state.db does not exist
+    // yet, ccs-list.ts must take the dedicated isMissing branch — the earlier
+    // version of this test accepted ANY output containing "state.db not
+    // found", which also matched the raw `[ccs-list] fatal:` path and let the
+    // friendly-hint branch rot as dead code.
     const sb = await makeListSandbox();
     try {
       // Do NOT create state.db — simulate cold start
       await rm(sb.dbPath, { force: true });
       const { stdout, stderr, code } = runList(sb, []);
-      // Either exit code 0 with hint on stderr, or non-zero — but NO raw
-      // stack trace. Friendly message mentions `ccs --refresh`.
       const combined = stdout + stderr;
+      assert.match(
+        stderr,
+        /\[ccs-list\] state\.db not found\. Run `ccs --refresh` first/,
+        `expected the friendly-hint branch, got code=${code}, combined=${combined}`,
+      );
       assert.ok(
-        /ccs --refresh|state\.db not found|cache/i.test(combined),
-        `expected friendly cold-start hint, got code=${code}, combined=${combined}`,
+        !/\[ccs-list\] fatal:/.test(combined),
+        `cold start must not go through the raw fatal path: ${combined}`,
       );
       // Raw stack trace indicators must NOT appear
       assert.ok(
         !/at Database|SqliteError|unable to open database/.test(combined),
         `raw error leak in output: ${combined}`,
       );
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("unmapped session command falls back to meta defaults_command (review A-8)", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      setMeta(h.db, "defaults_command", "opr claude");
+      h.db.prepare(
+        `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime, topic)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "pd",
+        "/home/u/unregistered",
+        new Date().toISOString(),
+        new Date().toISOString(),
+        new Date().toISOString(),
+        "orphan",
+      );
+      h.close();
+
+      const { stdout } = runList(sb, ["--sessions-only"]);
+      const row = stdout.split("\n").find((l) => l.includes("resume:aaaaaaaa"));
+      assert.ok(row, "unmapped session row should exist");
+      const command = row!.split("\t")[5];
+      assert.equal(
+        command,
+        "opr claude",
+        "unmapped sessions must inherit the resolved default, not hardcoded 'claude'",
+      );
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("unmapped session command degrades to 'claude' on a pre-v2 cache without meta", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      // Simulate a schema-v1 cache: meta table absent entirely.
+      h.db.exec(`DROP TABLE meta; DELETE FROM schema_version WHERE version = 2;`);
+      h.db.prepare(
+        `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime)
+         VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+      ).run(
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "pd",
+        "/home/u/unregistered",
+        new Date().toISOString(),
+        new Date().toISOString(),
+        new Date().toISOString(),
+      );
+      h.close();
+
+      const { stdout, code } = runList(sb, ["--sessions-only"]);
+      assert.equal(code, 0, `list must not crash on a meta-less cache: ${stdout}`);
+      const row = stdout.split("\n").find((l) => l.includes("resume:aaaaaaaa"));
+      assert.ok(row, "session row should exist");
+      assert.equal(row!.split("\t")[5], "claude");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("--current-only filters by cwd in SQL: exact, subdir, and sibling-prefix exclusion (review A-10)", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const projDir = join(sb.home, "proj");
+      await mkdir(projDir, { recursive: true });
+      // Seed with the RESOLVED path: the subprocess's process.cwd() resolves
+      // macOS /var -> /private/var aliasing, and real sessions record the
+      // resolved cwd the process actually ran in.
+      const { realpathSync } = await import("node:fs");
+      const projReal = realpathSync(projDir);
+      const h = openDb(sb.dbPath);
+      const ins = h.db.prepare(
+        `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime)
+         VALUES (?, NULL, 'pd', ?, ?, ?, ?)`,
+      );
+      const now = new Date().toISOString();
+      ins.run("11111111-1111-4111-8111-111111111111", projReal, now, now, now);
+      ins.run("22222222-2222-4222-8222-222222222222", join(projReal, "sub"), now, now, now);
+      // Sibling with the filter cwd as a STRING prefix — must be excluded.
+      ins.run("33333333-3333-4333-8333-333333333333", projReal + "evil", now, now, now);
+      ins.run("44444444-4444-4444-8444-444444444444", join(sb.home, "other"), now, now, now);
+      h.close();
+
+      const { stdout, code } = runList(sb, ["--current-only"], projDir);
+      assert.equal(code, 0, `list failed: ${stdout}`);
+      const kinds = stdout
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => l.split("\t")[3]);
+      assert.ok(kinds.includes("resume:11111111-1111-4111-8111-111111111111"), "exact cwd match expected");
+      assert.ok(kinds.includes("resume:22222222-2222-4222-8222-222222222222"), "subdir match expected");
+      assert.ok(!kinds.some((k) => k.startsWith("resume:33333333")), "sibling prefix must be excluded");
+      assert.ok(!kinds.some((k) => k.startsWith("resume:44444444")), "unrelated cwd must be excluded");
     } finally {
       await sb.cleanup();
     }
