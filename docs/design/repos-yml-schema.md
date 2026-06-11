@@ -102,8 +102,10 @@ repos:
 | `name` はユニーク | `duplicate name: "ClaudeCode"` |
 | `path` 存在チェック | `path not found: ~/projects/foo`（警告扱い、disabled 推奨） |
 | `path` は `$HOME` 配下必須 | `path outside $HOME: /etc/foo`（セキュリティ） |
-| `name` に `\t \n \\` 不可 | `invalid chars in name` |
-| `command` に shell metachar 不可 (`;&\|<>$\`"'\\` + 制御文字) | `command for repo at index 0 contains shell metacharacter(s): "claude;..."` |
+| `name` に shell metachar 不可 (`;&\|<>$\`"'\\` + 全制御文字 = `SHELL_METACHARS`、audit NEW-3。`path`/`cwd`/`command` と同一ポリシー) | `~/.config/ccs/repos.yml: repos[0].name contains shell metacharacter(s) or control char(s): "..."` |
+| `command` に shell metachar 不可 (`;&\|<>$\`"'\\` + 制御文字) | `~/.config/ccs/repos.yml: repos[0].command contains shell metacharacter(s): "claude;..."` |
+| `defaults.command`（CCS_CMD/CCR_CMD 由来含む）もロード時に同検証（レビューA-6） | `~/.config/ccs/repos.yml: defaults.command (resolved from defaults.command / CCS_CMD / CCR_CMD) contains shell metacharacter(s): "..."` |
+| `custom` のJSONサイズ 64KB 上限 | `~/.config/ccs/repos.yml: repos[0].custom exceeds 64KB JSON size limit` |
 | `disabled: true` の場合 scan/command 無視 | — |
 
 ## 例1: シンプル
@@ -165,6 +167,8 @@ repos:
 ccr v0.1.3 の `CCR_CMD` は `CCS_CMD` にリネーム（移行ガイドで明記、CCR_CMD指定時は警告ログ + 暫定honor）。
 
 **Security note**: `CCS_CMD` / `CCR_CMD` env values are subject to the same shell metacharacter rejection as `command:` in YAML. If env-sourced value contains any forbidden character, `loadConfig()` throws `ConfigError` before launch.
+
+**未マッピングセッションへの適用（レビューA-8）**: repos.yml に登録されていない cwd のセッション（fzf 上で `❓` 表示）も、この優先順位の `defaults.command` 以降のチェーンに従う。scan 時に解決済みフォールバックが state.db の `meta.defaults_command` に保存され、ccs-list が RESUME 行の起動コマンドとして使用する（旧実装はハードコードの `"claude"` 固定だった）。
 
 ## JSON Schema（抜粋）
 

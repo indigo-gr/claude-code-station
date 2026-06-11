@@ -25,6 +25,7 @@
 | `sessions` | Claude Code セッション要約キャッシュ | 〜5,000 |
 | `handoff_files` | handoff/ 配下のファイル一覧（プレビュー用） | 〜500 |
 | `pending_items` | pendings/ 配下のファイル一覧（プレビュー用） | 〜500 |
+| `meta` | キー/値ストア（v2以降） | 〜10 |
 
 ## DDL
 
@@ -147,23 +148,51 @@ CREATE TABLE pending_items (
 CREATE INDEX idx_pending_repo ON pending_items(repo_name, mtime DESC);
 ```
 
+### meta (v2以降)
+
+キー/値ストア。スキャン時に解決した設定値（例: `defaults_command`）をDBに保存し、セッション一覧表示時の未マッピングセッションのコマンドフォールバックに利用。
+
+```sql
+CREATE TABLE meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+```
+
+**用途例:**
+- `defaults_command`: 走査時に解決した最終フォールバック（`defaults.command` > `CCS_CMD` > `"claude"`）。ccs-list がセッション行生成時に、未マッピングセッション用の起動コマンドフォールバックに使用（レビューA-8）。
+
+## スキーマバージョン履歴
+
+| Version | Applied | Changes |
+|---------|---------|---------|
+| 1 | v0.2.0 init | 初期テーブル群（repos, repo_stats, sessions, handoff_files, pending_items） |
+| 2 | 2026-06-12 レビュークリーンアップ（v0.2.1） | meta テーブル追加（キー/値ストア、defaults_command 保存用） |
+
 ## 走査フロー
+
+> 順序重要（audit C-1）: repo_stats のセッション集計（session_count_total /
+> session_last_at）は sessions テーブルから再計算するため、**セッション走査が
+> 先**。逆順だと集計が1スキャン分遅延する。
 
 ```
 ccs 起動
-  ├─ repos.yml 読み込み
+  ├─ repos.yml 読み込み（ccs-config.ts: バリデーション + defaults解決）
   ├─ repos テーブルと差分比較（config_hash） → 変更分だけ UPSERT
-  ├─ 全リポジトリを並列走査（Promise.all, 同時実行上限=8）
+  │    + meta.defaults_command に解決済みフォールバックを保存
+  ├─ ~/.claude/projects/ 走査（ccs-scan-sessions.ts）
+  │    JSONL mtime と sessions.jsonl_mtime 比較 → 変更分だけ再パース
+  │    50MB超は既存行の size/mtime だけ更新（再パースloop防止）
+  │    cwd→repo 解決は lexical + realpath の最長プレフィックスマッチ
+  │    → sessions に UPSERT / 消滅分 DELETE / 未マッピング再解決
+  ├─ 全リポジトリを並列走査（Promise.allSettled, 同時実行上限=8）
   │    各リポジトリで:
   │      - git rev-parse --is-inside-work-tree
   │      - git branch --show-current
-  │      - git log -1 --format=...
+  │      - git log -1 --format=%H%x00%s%x00%cI   （NUL区切り）
   │      - git diff --shortstat
   │      - ls handoff/ pendings/ claude-room/
-  │    → repo_stats に UPSERT
-  ├─ ~/.claude/projects/ 走査
-  │    JSONL mtime と sessions.jsonl_mtime 比較 → 変更分だけ再パース
-  │    → sessions に UPSERT
+  │    → repo_stats に UPSERT（sessions から集計を再計算）
   └─ fzf 起動（DB読むだけ、高速）
 ```
 
@@ -172,7 +201,8 @@ ccs 起動
 ```typescript
 const migrations = [
   { version: 1, up: `CREATE TABLE schema_version (...); ...初期DDL...` },
-  // v0.3.0 以降で version: 2, 3, ... を追加
+  { version: 2, up: `CREATE TABLE meta (...);` },
+  // 以降 version: 3, 4, ... を追加
 ];
 
 function migrate(db: Database) {
