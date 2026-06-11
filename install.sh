@@ -75,6 +75,23 @@ chmod +x "$INSTALL_DIR/ccs"
 # breaks on unusual filenames; -maxdepth 1 keeps it to the install dir itself.
 find "$INSTALL_DIR" -maxdepth 1 -name 'ccs*' -exec basename {} \; | sort | sed 's/^/  /'
 
+# ── Runtime dependency resolution (backlog HIGH: node_modules) ──────────────
+# tsx resolves better-sqlite3/yaml by walking up from the SCRIPT's directory,
+# not the caller's cwd — so the installed copies under ~/.claude/scripts/
+# need a node_modules within reach. Symlink the repo checkout's tree (short-
+# term fix; npm-package distribution is the long-term plan, see backlog).
+if [[ -d "${REPO_ROOT}/node_modules" ]]; then
+  ln -sfn "${REPO_ROOT}/node_modules" "$INSTALL_DIR/node_modules"
+  echo ""
+  echo "Linked runtime deps: ${INSTALL_DIR}/node_modules -> ${REPO_ROOT}/node_modules"
+  echo "(Keep this repo checkout in place — the installed scripts resolve better-sqlite3/yaml through it.)"
+else
+  echo ""
+  echo "WARNING: ${REPO_ROOT}/node_modules not found — installed scripts will fail to"
+  echo "         resolve better-sqlite3/yaml. Run 'npm install' in the repo (or re-run"
+  echo "         with --with-deps), then run install.sh again."
+fi
+
 # ── Initialize config/cache dirs (ccs-config.ts populates template on first run) ─
 mkdir -p -m 0700 "$CONFIG_DIR" "$CACHE_DIR"
 
