@@ -262,3 +262,381 @@ repos:
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression suite for the 2026-06-12 audit fixes.
+// ---------------------------------------------------------------------------
+
+const AUDIT_UUID_A = "11111111-2222-4333-8444-555555555555";
+
+function sessionLine(fields: Record<string, unknown>): string {
+  return JSON.stringify(fields);
+}
+
+async function writeSession(
+  sb: ScanSandbox,
+  uuid: string,
+  lines: string[],
+): Promise<string> {
+  const projDir = join(sb.projectsDir, "-audit-proj");
+  await mkdir(projDir, { recursive: true });
+  const file = join(projDir, `${uuid}.jsonl`);
+  await writeFile(file, lines.join("\n") + "\n");
+  return file;
+}
+
+async function openStateDb() {
+  const { default: Database } = await import("better-sqlite3");
+  const { getPaths } = await import("../bin/ccs-config.ts");
+  return new Database(getPaths().stateDb, { readonly: true });
+}
+
+describe("scan() — audit regressions", () => {
+  test("C-1: repo_stats session aggregates are correct after a SINGLE scan", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "agg-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: agg\n    path: ${repoDir}\n`,
+    );
+    const ts = new Date().toISOString();
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: ts,
+        message: { content: "first message" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(
+            `SELECT session_count_total, session_last_at FROM repo_stats WHERE name = ?`,
+          )
+          .get("agg") as
+          | { session_count_total: number; session_last_at: string | null }
+          | undefined;
+        assert.ok(row, "repo_stats row should exist");
+        assert.equal(
+          row!.session_count_total,
+          1,
+          "session count must be visible after the FIRST scan (was lagging one scan behind)",
+        );
+        assert.equal(row!.session_last_at, ts);
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("logic H-1: --no-sessions scan preserves previous session aggregates", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "keep-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: keep\n    path: ${repoDir}\n`,
+    );
+    const ts = new Date().toISOString();
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: ts,
+        message: { content: "hello" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+
+      // Simulate a stale/cleared sessions table (the rewind scenario).
+      {
+        const { default: Database } = await import("better-sqlite3");
+        const { getPaths } = await import("../bin/ccs-config.ts");
+        const dbw = new Database(getPaths().stateDb);
+        try {
+          dbw.prepare(`DELETE FROM sessions`).run();
+        } finally {
+          dbw.close();
+        }
+      }
+
+      await scan({ force: true, scanSessions: false });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(
+            `SELECT session_count_total FROM repo_stats WHERE name = ?`,
+          )
+          .get("keep") as { session_count_total: number } | undefined;
+        assert.equal(
+          row?.session_count_total,
+          1,
+          "--no-sessions must carry forward previous aggregates, not rewind to 0",
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("H-1/M-2: session cwd with shell metacharacters degrades to 'unknown'", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "victim-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: victim\n    path: ${repoDir}\n`,
+    );
+    const evilCwd = `${repoDir} && touch /tmp/PWNED #`;
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: evilCwd,
+        timestamp: new Date().toISOString(),
+        message: { content: "innocent looking session" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT cwd FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { cwd: string } | undefined;
+        assert.ok(row, "session row should exist");
+        assert.equal(
+          row!.cwd,
+          "unknown",
+          "tainted cwd must never be stored verbatim",
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("NEW-1: topic with raw ESC sequences is stored stripped", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "esc-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: esc\n    path: ${repoDir}\n`,
+    );
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: new Date().toISOString(),
+        message: {
+          content: "\u001b[31mFAKE-ERROR\u001b[0m \u001b]0;hijack\u0007 normal text",
+        },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT topic FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { topic: string | null } | undefined;
+        assert.ok(row?.topic, "topic should exist");
+        assert.ok(
+          !row!.topic!.includes("\u001b"),
+          `raw ESC must not reach state.db; got: ${JSON.stringify(row!.topic)}`,
+        );
+        assert.match(row!.topic!, /normal text/);
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("H-4: message_count counts only user/assistant entries", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "count-repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: count\n    path: ${repoDir}\n`,
+    );
+    const ts = new Date().toISOString();
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({ type: "summary", summary: "meta row" }),
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: ts,
+        message: { content: "q" },
+      }),
+      sessionLine({ type: "assistant", timestamp: ts, message: { content: "a" } }),
+      sessionLine({ type: "file-history-snapshot", snapshot: {} }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT message_count FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { message_count: number } | undefined;
+        assert.equal(row?.message_count, 2, "only user+assistant rows count");
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+
+  test("logic M-4: session started in a repo SUBDIRECTORY maps to the repo", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "mono-repo");
+    const subDir = join(repoDir, "packages", "web");
+    await mkdir(subDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: mono\n    path: ${repoDir}\n`,
+    );
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: subDir,
+        timestamp: new Date().toISOString(),
+        message: { content: "subdir session" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT repo_name FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { repo_name: string | null } | undefined;
+        assert.equal(row?.repo_name, "mono");
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});
+
+describe("scan() — audit M-3 remap", () => {
+  test("session indexed before its repo existed is remapped on a later scan", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "late-repo");
+    const otherDir = join(sb.home, "other-repo");
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(otherDir, { recursive: true });
+    // First scan: repos.yml registers an UNRELATED sibling (not an ancestor of
+    // repoDir), so the session under repoDir lands with repo_name = NULL.
+    await writeFile(
+      sb.reposYml,
+      `version: 1\nrepos:\n  - name: other\n    path: ${otherDir}\n`,
+    );
+    await writeSession(sb, AUDIT_UUID_A, [
+      sessionLine({
+        type: "user",
+        cwd: repoDir,
+        timestamp: new Date().toISOString(),
+        message: { content: "orphan session" },
+      }),
+    ]);
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { scan } = await freshScan();
+      await scan({ force: true, scanSessions: true });
+      {
+        const db = await openStateDb();
+        try {
+          const row = db
+            .prepare(`SELECT repo_name FROM sessions WHERE uuid = ?`)
+            .get(AUDIT_UUID_A) as { repo_name: string | null } | undefined;
+          assert.equal(row?.repo_name, null, "should start unmapped");
+        } finally {
+          db.close();
+        }
+      }
+
+      // Register the repo and rescan. The JSONL mtime is unchanged (skip path),
+      // so the remap pass must claim the previously-NULL session.
+      await writeFile(
+        sb.reposYml,
+        `version: 1\nrepos:\n  - name: late\n    path: ${repoDir}\n`,
+      );
+      await scan({ force: true, scanSessions: true });
+      const db = await openStateDb();
+      try {
+        const row = db
+          .prepare(`SELECT repo_name FROM sessions WHERE uuid = ?`)
+          .get(AUDIT_UUID_A) as { repo_name: string | null } | undefined;
+        assert.equal(row?.repo_name, "late", "remap must claim orphan session");
+      } finally {
+        db.close();
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});

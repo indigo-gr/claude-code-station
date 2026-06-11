@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * ccr-preview.ts - Display conversation history in fzf preview pane
+ * ccs-preview-session.ts - Display conversation history in fzf preview pane
  * Args: sessionId
  */
 
@@ -34,7 +34,10 @@ function extractText(content: unknown): string {
 }
 
 function truncate(s: string, max: number): string {
-  const oneLine = s.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+  // Strip control chars (incl. ESC) — message text comes straight from the
+  // JSONL and is printed raw to the terminal, so this is the display-side
+  // defense against terminal-escape injection (audit NEW-1).
+  const oneLine = s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
   return oneLine.slice(0, max - 1) + "…";
 }
@@ -127,11 +130,14 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
     }
   }
 
-  // Header
+  // Header — cwd/gitBranch/version are untrusted JSONL fields read straight
+  // from disk (NOT the sanitized DB copy), so apply the same two-step
+  // treatment as message text: maskSecrets for credential leakage (audit
+  // M-2), truncate to strip control chars / escape sequences (audit NEW-1).
   console.log("━━━ Session Info ━━━");
-  console.log(`📁 ${cwd}`);
-  if (gitBranch) console.log(`🌿 ${gitBranch}`);
-  if (version) console.log(`📌 Claude ${version}`);
+  console.log(`📁 ${maskSecrets(truncate(cwd, 200))}`);
+  if (gitBranch) console.log(`🌿 ${maskSecrets(truncate(gitBranch, 100))}`);
+  if (version) console.log(`📌 Claude ${maskSecrets(truncate(version, 50))}`);
   console.log(`💬 ${messages.length} messages`);
   console.log("━━━ Conversation ━━━");
   console.log();
