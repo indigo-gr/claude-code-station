@@ -46,10 +46,16 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 ### Quick install (npm, recommended) / クイックインストール（npm直接・推奨）
 
 ```bash
-npm install -g github:indigo-gr/claude-code-station
+npm install -g claude-code-station
 ```
 
-Installs straight from this public repo — no npm registry account involved. All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / 公開リポから直接インストール。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+Installs from the [npm registry](https://www.npmjs.com/package/claude-code-station). All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / npm レジストリから取得。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+
+#### From GitHub (latest unreleased) / GitHub直接（未リリース版を使いたい時）
+
+```bash
+npm install -g github:indigo-gr/claude-code-station
+```
 
 ### Copy install (checkout) / コピーインストール
 
