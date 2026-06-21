@@ -1,6 +1,6 @@
 {
   "name": "claude-code-station",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Claude Code Station — fzf-powered launcher and session picker for Claude Code with multi-repo support and SQLite-backed state cache",
   "type": "module",
   "bin": {

@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-21
+
+### Fixed
+- **Version drift** — `bin/ccs` no longer hardcodes the version string. It now reads `version` from `package.json` next to the script, so `ccs --version` always matches the package version. The 0.2.1 publish shipped `VERSION="0.2.0"` because the bash constant was not bumped in tandem with `package.json`. Copy-install layouts (install.sh drops `bin/ccs` into `~/.claude/scripts/` without `package.json`) fall back to `0.0.0-dev`.
+
 ## [0.2.1] — 2026-06-21
 
 ### Added (v0.2.1 features)

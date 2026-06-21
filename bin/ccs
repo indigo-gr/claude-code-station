@@ -4,8 +4,6 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
-
 # Resolve $0 through symlinks before taking dirname: `npm install -g
 # github:indigo-gr/claude-code-station` links this script into the global
 # bin dir, and the SYMLINK's dirname has none of the sibling .ts modules.
@@ -16,6 +14,12 @@ while [[ -L "$SOURCE" ]]; do
   if [[ "$SOURCE" != /* ]]; then SOURCE="${DIR}/${SOURCE}"; fi
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Single source of truth: read version from package.json next to bin/.
+# Falls back to "0.0.0-dev" for copy-install layouts (install.sh drops bin/
+# scripts into ~/.claude/scripts/ without package.json) or if the read fails.
+VERSION=$(awk -F'"' '/"version":/{print $4; exit}' "${SCRIPT_DIR}/../package.json" 2>/dev/null)
+VERSION="${VERSION:-0.0.0-dev}"
 
 # Prefer a package-local tsx over the PATH one: the npm install brings tsx
 # as a dependency (../node_modules from the package's bin/), and the copy
