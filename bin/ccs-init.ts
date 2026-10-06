@@ -276,7 +276,12 @@ async function main(): Promise<number> {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().then(
-    (code) => process.exit(code),
+    // exitCode, not process.exit(): bin/ccs captures discover's candidates
+    // with $(...), a pipe, and exiting right after the writes dropped every
+    // candidate past the pipe buffer (same bug as ccs-list, 2026-10-07).
+    (code) => {
+      process.exitCode = code;
+    },
     (err) => {
       process.stderr.write(
         `[ccs-init] fatal: ${err instanceof Error ? err.message : String(err)}\n`,

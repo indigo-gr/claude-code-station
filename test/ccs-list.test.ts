@@ -12,7 +12,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -22,6 +22,7 @@ import Database from "better-sqlite3";
 import { openDb, upsertRepo, setMeta } from "../bin/ccs-db.ts";
 
 const LIST_TS = fileURLToPath(new URL("../bin/ccs-list.ts", import.meta.url));
+const SCAN_TS = fileURLToPath(new URL("../bin/ccs-scan.ts", import.meta.url));
 
 interface ListSandbox {
   root: string;
@@ -359,6 +360,156 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       assert.ok(heavy, "heavy row should exist");
       const badges = heavy!.split("\t")[2] ?? "";
       assert.ok(badges.length <= 60, `badges length > 60: ${badges.length} "${badges}"`);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pipe delivery (2026-10-07: the fzf list ended after 3 repos)
+// ---------------------------------------------------------------------------
+
+function sandboxEnv(sb: ListSandbox): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: sb.home,
+    XDG_CONFIG_HOME: sb.xdgConfig,
+    XDG_CACHE_HOME: sb.xdgCache,
+  };
+  // The developer's own launch command must not leak into the rows.
+  delete env.CCS_CMD;
+  delete env.CCR_CMD;
+  return env;
+}
+
+// bin/ccs feeds ccs-list into fzf through a real pipe(2), but spawnSync's
+// own stdout is a socketpair — so route through `bash -c '... | cat'` to
+// reproduce the production transport. macOS may give a new pipe only 512
+// bytes of buffer; a process.exit() right after the write dropped the rest.
+function runListPiped(
+  sb: ListSandbox,
+  args: string[],
+  reader = "cat",
+): { stdout: string; stderr: string; code: number } {
+  const res = spawnSync(
+    "bash",
+    ["-c", `set -o pipefail; tsx "$@" | ${reader}`, "bash", LIST_TS, ...args],
+    {
+      env: sandboxEnv(sb),
+      encoding: "utf-8",
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
+  return {
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    code: res.status ?? -1,
+  };
+}
+
+// 1 enabled repo + 1 session from seed(), plus `count` more sessions
+// (~150 bytes per row, so 1000 sessions is ~150 KB of output).
+function seedManySessions(db: Database.Database, count: number): void {
+  seed(db);
+  const insert = db.prepare(
+    `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime, topic)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const now = new Date().toISOString();
+  for (let i = 0; i < count; i++) {
+    const uuid = `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`;
+    insert.run(uuid, "alpha", "pd", "/home/u/alpha", now, now, now, `topic ${i} `.padEnd(60, "x"));
+  }
+}
+
+describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("a list larger than the pipe buffer reaches the reader in full", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      const SESSIONS = 1000;
+      seedManySessions(h.db, SESSIONS);
+      h.close();
+
+      const { stdout, stderr, code } = runListPiped(sb, []);
+      assert.equal(code, 0, `ccs-list failed: ${stderr}`);
+      const rows = stdout.split("\n").filter((l) => l.length > 0);
+      // alpha + separator + seeded session + SESSIONS (~150 KB in total)
+      assert.equal(
+        rows.length,
+        1 + 1 + 1 + SESSIONS,
+        `got ${rows.length} rows / ${Buffer.byteLength(stdout)} bytes`,
+      );
+      assert.ok(stdout.endsWith("\n"), "last row must be complete");
+      for (const row of rows) {
+        assert.equal(row.split("\t").length, 6, `truncated row: ${row}`);
+      }
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("a repo whose scan fails is still listed by name; every repos.yml entry is listed", async () => {
+    const sb = await makeListSandbox();
+    try {
+      // ~80 KB of rows: past both buffer sizes seen on macOS (512 B / 64 KB).
+      const REPOS = 250;
+      const BROKEN = "repo-117";
+      const yml = ["version: 1", "repos:"];
+      const expected: string[] = [];
+      for (let i = 0; i < REPOS; i++) {
+        const name = `repo-${String(i).padStart(3, "0")}`;
+        const dir = join(sb.home, name);
+        // BROKEN's dir is never created → scanOneRepo throws "path not found"
+        if (name !== BROKEN) await mkdir(dir, { recursive: true });
+        yml.push(
+          `  - name: ${name}`,
+          `    path: ${dir}`,
+          `    description: ${"説明".repeat(30)}`,
+        );
+        expected.push(`new:${name}`);
+      }
+      await mkdir(join(sb.xdgConfig, "ccs"), { recursive: true });
+      await writeFile(join(sb.xdgConfig, "ccs", "repos.yml"), yml.join("\n") + "\n");
+      await mkdir(join(sb.home, ".claude", "projects"), { recursive: true });
+
+      // Same invocation as the pre-scan in bin/ccs.
+      const scan = spawnSync("tsx", [SCAN_TS, "--quiet"], {
+        env: sandboxEnv(sb),
+        encoding: "utf-8",
+      });
+      assert.equal(scan.status, 0, `ccs-scan failed: ${scan.stderr}`);
+      const scanErrors = (scan.stderr ?? "")
+        .split("\n")
+        .filter((l) => l.startsWith("[ccs-scan]"));
+      assert.equal(scanErrors.length, 1, `expected one [ccs-scan] line: ${scan.stderr}`);
+      assert.match(scanErrors[0], new RegExp(`^\\[ccs-scan\\] ${BROKEN}: path not found`));
+
+      const { stdout, stderr, code } = runListPiped(sb, ["--repos-only"]);
+      assert.equal(code, 0, `ccs-list failed: ${stderr}`);
+      const kinds = stdout
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => l.split("\t")[3]);
+      assert.deepEqual(kinds, expected);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("a reader that closes early (fzf picks before reading every row) ends quietly with exit 0", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedManySessions(h.db, 1000);
+      h.close();
+
+      // pipefail as in bin/ccs: a non-zero ccs-list exit here would make
+      // bin/ccs drop the row the user just picked.
+      const { stderr, code } = runListPiped(sb, [], "head -1 >/dev/null");
+      assert.equal(stderr, "", "no EPIPE stack trace on the terminal");
+      assert.equal(code, 0);
     } finally {
       await sb.cleanup();
     }

@@ -19,6 +19,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import {
   discoverGitRepos,
@@ -301,6 +303,60 @@ describe("appendAndValidate()", () => {
       await access(sb.reposYml + ".bak"); // backup still present for inspection
     } finally {
       await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discover CLI — pipe delivery (2026-10-07: same truncation as ccs-list)
+// ---------------------------------------------------------------------------
+
+const INIT_TS = fileURLToPath(new URL("../bin/ccs-init.ts", import.meta.url));
+
+function tsxAvailable(): boolean {
+  return spawnSync("tsx", ["--version"], { encoding: "utf-8" }).status === 0;
+}
+
+describe("ccs-init discover CLI", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("a candidate list larger than the pipe buffer reaches $(...) in full", async () => {
+    const { home, cleanup } = await makeHome();
+    try {
+      // ~94 KB of candidates: past both buffer sizes seen on macOS (512 B / 64 KB).
+      const REPOS = 2000;
+      for (let i = 0; i < REPOS; i++) {
+        await gitDir(home, "work", `project-number-${String(i).padStart(4, "0")}`);
+      }
+      const registered = join(home, "registered");
+      await mkdir(registered);
+      await mkdir(join(home, ".config", "ccs"), { recursive: true });
+      await writeFile(
+        join(home, ".config", "ccs", "repos.yml"),
+        `version: 1\nrepos:\n  - name: registered\n    path: ${registered}\n`,
+      );
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
+        XDG_CACHE_HOME: join(home, ".cache"),
+      };
+      delete env.CCS_CMD;
+      delete env.CCR_CMD;
+
+      // Same capture as bin/ccs: CANDIDATES="$(tsx ccs-init.ts discover)"
+      const res = spawnSync(
+        "bash",
+        ["-c", 'c="$(tsx "$0" discover)" || exit; printf "%s\\n" "$c"', INIT_TS],
+        { env, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
+      );
+      assert.equal(res.status, 0, `discover failed: ${res.stderr}`);
+      const lines = res.stdout.split("\n").filter((l) => l.length > 0);
+      assert.equal(
+        lines.length,
+        REPOS,
+        `got ${lines.length} candidates / ${Buffer.byteLength(res.stdout)} bytes`,
+      );
+    } finally {
+      await cleanup();
     }
   });
 });

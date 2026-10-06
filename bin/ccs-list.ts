@@ -359,5 +359,18 @@ function main(): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exit(main());
+  // exitCode, not process.exit(): stdout is a pipe into fzf, and pipe writes
+  // are async on macOS. Exiting right after the write dropped everything past
+  // the pipe buffer — as little as 512 bytes, so the list ended after 3 repos
+  // (2026-10-07). Returning lets Node flush the whole list first.
+  //
+  // The flip side: fzf may exit (pick / Esc) before reading every row, and
+  // the pending write then fails with EPIPE. Those rows have no reader, so
+  // end quietly with main()'s status — an unhandled EPIPE would print a stack
+  // trace and exit 1, which pipefail in bin/ccs turns into a dropped launch.
+  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") process.exit(process.exitCode ?? 0);
+    throw err;
+  });
+  process.exitCode = main();
 }
