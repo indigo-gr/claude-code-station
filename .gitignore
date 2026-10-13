@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Local Claude Code workspace (handoffs, agent outputs, local notes) — never publish
+.claude/
