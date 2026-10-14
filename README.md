@@ -202,6 +202,14 @@ Notion:   ✅ abc123
 **Visual cues / 見た目のガイド:**
 - NEW rows and RESUME rows are separated by a dim `── Past Sessions ──` divider. Selecting the divider is a no-op.
 - RESUME sessions mapped to a registered repo show that repo's icon (e.g., `🔄 📁 ClaudeCode`). Unmapped sessions (cwd that isn't in `repos.yml`) show `❓` — a visual cue that the session was either a one-off or that the repo isn't registered yet.
+- A repo whose `path` sits inside another registered repo's `path` is listed right under that repo, indented, with the parent's name dimmed at the end. Nothing to configure — the nesting follows from `path`. The dim `‹parent›` keeps the relation visible when a search hides the parent row, and searching for the parent's name lists its children too. / `path` が別の登録リポの `path` の中にあるリポは、そのリポのすぐ下に字下げして並び、行の末尾に親の名前が薄く出る。設定は要らない（`path` から決まる）。絞り込みで親の行が隠れても `‹親›` で親子がわかり、親の名前で絞り込むと子も一緒に出る。
+
+  ```
+  📁 my-company
+    └ 📁 web-app  ‹my-company›
+    └ 📁 mobile-app  ‹my-company›
+  📁 side-project
+  ```
 
 ### Workflows / 主な使い方
 

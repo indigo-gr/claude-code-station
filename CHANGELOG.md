@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Nested repos are grouped in the list** — a repo whose `path` sits inside another listed repo's `path` now comes right after that repo, indented (`  └ 📁 child  ‹parent›`), instead of wherever its name sorts. The nearest enclosing path wins (the same deepest-path rule that maps sessions to repos), deeper nesting indents further, and siblings stay name-sorted. The dim `‹parent›` suffix keeps the relation readable when a fzf query hides the parent row, and a query for the parent's name matches its children too. Derived from `path` at list time — no `repos.yml` key and no cache migration. A disabled parent is not listed, so its children stay top-level.
+
 ## [0.2.2] — 2026-06-21
 
 ### Fixed

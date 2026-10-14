@@ -299,6 +299,59 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
     }
   });
 
+  test("nested repos follow their parent, indented, with a dim ‹parent› hint", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      const add = (name: string, path: string, disabled: 0 | 1 = 0): void => {
+        upsertRepo(h.db, {
+          name,
+          path,
+          description: "",
+          command: "claude",
+          cwd: null,
+          tags_json: "[]",
+          icon: "📁",
+          disabled,
+          scan_enabled: 1,
+          custom_json: "{}",
+          config_hash: name,
+        });
+      };
+      add("Aardvark", "/home/u/aardvark");
+      add("Series", "/home/u/series");
+      add("Zeta", "/home/u/series/zeta");
+      add("Mid", "/home/u/series/mid");
+      add("Inner", "/home/u/series/zeta/inner");
+      // Shares "/home/u/series" as a string prefix but is a sibling dir.
+      add("Series Other", "/home/u/series-other");
+      // A disabled parent is not listed, so its child stays top-level.
+      add("Hidden", "/home/u/hidden", 1);
+      add("Visible", "/home/u/hidden/visible");
+      h.close();
+
+      const { stdout, code } = runList(sb, ["--repos-only"]);
+      assert.equal(code, 0, `ccs-list failed: ${stdout}`);
+      const labels = stdout
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => (l.split("\t")[0] ?? "").replace(/\x1b\[[0-9;]*m/g, "").replace(/ │$/, ""));
+      assert.deepEqual(labels, [
+        "📁 Aardvark",
+        "📁 Series",
+        "  └ 📁 Mid  ‹Series›",
+        "  └ 📁 Zeta  ‹Series›",
+        "    └ 📁 Inner  ‹Zeta›",
+        "📁 Series Other",
+        "📁 Visible",
+      ]);
+      // The hint is dimmed, not plain text.
+      assert.ok(stdout.includes("\x1b[2m‹Series›\x1b[0m"), "parent hint should be dim");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
   test("--sessions-only yields only KIND=resume rows", async () => {
     const sb = await makeListSandbox();
     try {

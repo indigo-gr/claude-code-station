@@ -9,7 +9,8 @@
  *   --current-only    sessions whose cwd matches process.cwd()
  *   --repos-only      only NEW repo rows
  *   --sessions-only   only RESUME session rows
- *   (default)         NEW first (alpha), then RESUME (last_activity_at DESC)
+ *   (default)         NEW first (alpha, nested repos under their parent),
+ *                     then RESUME (last_activity_at DESC)
  */
 
 import { homedir } from "node:os";
@@ -175,8 +176,51 @@ function buildRepoBadges(r: RepoRowFull): string {
 // invoked with --ansi so these codes render as styling.
 const LABEL_SEP = " \x1b[2m│\x1b[0m";
 
-function repoToRow(r: RepoRowFull): string {
-  const label = `${r.icon || "📁"} ${r.name}${LABEL_SEP}`;
+interface GroupedRepo {
+  repo: RepoRowFull;
+  parentName: string | null;
+  depth: number;
+}
+
+function isUnder(child: string, parent: string): boolean {
+  return child.startsWith(parent.endsWith("/") ? parent : parent + "/");
+}
+
+// Nest each repo under the listed repo whose path most deeply contains its
+// own — the same deepest-path-wins rule buildRepoResolver uses for sessions,
+// so no repos.yml key is needed. Children follow their parent, siblings keep
+// the incoming (SQL, name-sorted) order. A disabled parent is not in the
+// list, so its children fall back to the top level.
+function groupRepos(repos: RepoRowFull[]): GroupedRepo[] {
+  const children = new Map<RepoRowFull | null, RepoRowFull[]>();
+  for (const r of repos) {
+    let parent: RepoRowFull | null = null;
+    for (const p of repos) {
+      if (p === r || !isUnder(r.path, p.path)) continue;
+      if (!parent || p.path.length > parent.path.length) parent = p;
+    }
+    const siblings = children.get(parent) ?? [];
+    siblings.push(r);
+    children.set(parent, siblings);
+  }
+  const out: GroupedRepo[] = [];
+  const walk = (parent: RepoRowFull | null, depth: number): void => {
+    for (const r of children.get(parent) ?? []) {
+      out.push({ repo: r, parentName: parent?.name ?? null, depth });
+      walk(r, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+}
+
+function repoToRow({ repo: r, parentName, depth }: GroupedRepo): string {
+  // Children are indented under their parent. The dim ‹parent› suffix keeps
+  // the relation readable when a fzf query hides the parent row, and lets a
+  // query for the parent's name match its children too.
+  const indent = depth > 0 ? `${"  ".repeat(depth)}└ ` : "";
+  const parentHint = parentName ? `  \x1b[2m‹${parentName}›\x1b[0m` : "";
+  const label = `${indent}${r.icon || "📁"} ${r.name}${parentHint}${LABEL_SEP}`;
   const desc = truncate(r.description || "", DESC_MAX);
   const badges = buildRepoBadges(r);
   const cwd = r.cwd && r.cwd.length > 0 ? r.cwd : r.path;
@@ -271,8 +315,8 @@ function main(): number {
             ORDER BY r.name COLLATE NOCASE ASC`,
         )
         .all() as RepoRowFull[];
-      for (const r of repos) {
-        lines.push(repoToRow(r));
+      for (const g of groupRepos(repos)) {
+        lines.push(repoToRow(g));
       }
     }
 
