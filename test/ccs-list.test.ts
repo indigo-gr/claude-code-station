@@ -1,5 +1,6 @@
 /**
- * Tests for bin/ccs-list.ts
+ * Tests for bin/ccs-list.ts (and the group/label paths of bin/ccs-preview.ts,
+ * which read the same sandbox DB)
  *
  * We populate the state DB directly (bypassing YAML->DB sync) and invoke
  * ccs-list.ts as a subprocess via `tsx` — capturing stdout. XDG env vars
@@ -23,6 +24,7 @@ import { openDb, upsertRepo, setMeta } from "../bin/ccs-db.ts";
 
 const LIST_TS = fileURLToPath(new URL("../bin/ccs-list.ts", import.meta.url));
 const SCAN_TS = fileURLToPath(new URL("../bin/ccs-scan.ts", import.meta.url));
+const PREVIEW_TS = fileURLToPath(new URL("../bin/ccs-preview.ts", import.meta.url));
 
 interface ListSandbox {
   root: string;
@@ -93,6 +95,65 @@ function seed(db: Database.Database): void {
     new Date().toISOString(),
     "Some topic",
   );
+}
+
+/** A plain enabled repo row; spread and override launch/label/icon/... */
+function repoRow(name: string, path: string) {
+  return {
+    name,
+    path,
+    description: "",
+    command: "claude",
+    cwd: null,
+    tags_json: "[]",
+    icon: "📁",
+    disabled: 0 as const,
+    scan_enabled: 1 as const,
+    custom_json: "{}",
+    config_hash: name,
+  };
+}
+
+// The physical parent/child layout the group header exists for: a parent
+// folder that must not be launched, with launchable children inside it.
+// (Fictional data — test fixtures ship with the public repo.)
+function seedStudio(db: Database.Database): void {
+  upsertRepo(db, {
+    ...repoRow("Studio", "/home/u/studio"),
+    icon: "🎬",
+    description: "制作チーム",
+    launch: 0,
+  });
+  upsertRepo(db, {
+    ...repoRow("Studio-app", "/home/u/studio/app"),
+    icon: "📱",
+    description: "アプリ app/",
+    label: "App team",
+  });
+  upsertRepo(db, {
+    ...repoRow("Studio-hq", "/home/u/studio/hq"),
+    icon: "🎬",
+    description: "統括 hq/",
+    label: "Studio",
+  });
+  upsertRepo(db, {
+    ...repoRow("Studio-web", "/home/u/studio/web"),
+    icon: "🌐",
+    description: "サイト web/",
+    label: "Web team",
+  });
+}
+
+/** LABEL column without ANSI styling and the trailing ` │` separator. */
+function plain(label: string): string {
+  return label.replace(/\x1b\[[0-9;]*m/g, "").replace(/ │$/, "");
+}
+
+function plainLabels(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => plain(l.split("\t")[0] ?? ""));
 }
 
 function runList(
@@ -339,7 +400,7 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       assert.deepEqual(labels, [
         "📁 Aardvark",
         "📁 Series",
-        "  └ 📁 Mid  ‹Series›",
+        "  ├ 📁 Mid  ‹Series›",
         "  └ 📁 Zeta  ‹Series›",
         "    └ 📁 Inner  ‹Zeta›",
         "📁 Series Other",
@@ -347,6 +408,128 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       ]);
       // The hint is dimmed, not plain text.
       assert.ok(stdout.includes("\x1b[2m‹Series›\x1b[0m"), "parent hint should be dim");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("tree glyphs: ├ for earlier siblings, └ for the last, │ rails while an ancestor has later siblings", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      for (const [name, path] of [
+        ["Root", "/home/u/root"],
+        ["A", "/home/u/root/a"],
+        ["A1", "/home/u/root/a/a1"],
+        ["A1x", "/home/u/root/a/a1/x"],
+        ["A2", "/home/u/root/a/a2"],
+        ["B", "/home/u/root/b"],
+        ["B1", "/home/u/root/b/b1"],
+        ["Solo", "/home/u/solo"],
+      ]) {
+        upsertRepo(h.db, repoRow(name, path));
+      }
+      h.close();
+
+      const { stdout, code } = runList(sb, ["--repos-only"]);
+      assert.equal(code, 0, `ccs-list failed: ${stdout}`);
+      assert.deepEqual(plainLabels(stdout), [
+        "📁 Root",
+        "  ├ 📁 A  ‹Root›",
+        "  │ ├ 📁 A1  ‹A›",
+        "  │ │ └ 📁 A1x  ‹A1›",
+        "  │ └ 📁 A2  ‹A›",
+        "  └ 📁 B  ‹Root›",
+        "    └ 📁 B1  ‹B›",
+        "📁 Solo",
+      ]);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("launch: false renders a group:<name> header; children show their label and nest under it", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedStudio(h.db);
+      // Label hygiene: control chars are stripped (no raw ESC reaches fzf),
+      // and a label that strips to nothing falls back to the name.
+      upsertRepo(h.db, { ...repoRow("Zed", "/home/u/zed"), label: "Evil\x1b[2JLabel" });
+      upsertRepo(h.db, { ...repoRow("Zz", "/home/u/zz"), label: " \t " });
+      h.db.prepare(
+        `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime, topic)
+         VALUES (?, 'Studio-web', 'pd', '/home/u/studio/web', ?, ?, ?, 'landing page')`,
+      ).run(
+        "ebebebeb-0000-4000-8000-000000000000",
+        new Date().toISOString(),
+        new Date().toISOString(),
+        new Date().toISOString(),
+      );
+      h.close();
+
+      const { stdout, code } = runList(sb, []);
+      assert.equal(code, 0, `ccs-list failed: ${stdout}`);
+      const rows = stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+      for (const r of rows) assert.equal(r.length, 6, `6 columns: ${r.join("|")}`);
+
+      const header = rows[0];
+      assert.equal(header[3], "group:Studio");
+      assert.equal(plain(header[0]), "🎬 Studio");
+      assert.equal(header[1], "制作チーム");
+      assert.equal(header[2], "", "a header carries no badges");
+      assert.equal(header[4], "/home/u/studio", "CWD carries the path (for ^I / preview)");
+      assert.equal(header[5], "", "a header has no command");
+
+      assert.deepEqual(
+        rows.slice(1, 4).map((r) => [plain(r[0]), r[3], r[5]]),
+        [
+          ["  ├ 📱 App team  ‹Studio›", "new:Studio-app", "claude"],
+          // ‹Studio› would only repeat the row's own label — omitted.
+          ["  ├ 🎬 Studio", "new:Studio-hq", "claude"],
+          ["  └ 🌐 Web team  ‹Studio›", "new:Studio-web", "claude"],
+        ],
+      );
+
+      const zed = rows.find((r) => r[3] === "new:Zed")!;
+      assert.ok(!zed[0].includes("\x1b[2J"), "raw ESC from the label must not reach fzf");
+      assert.equal(plain(zed[0]), "📁 Evil [2JLabel");
+      assert.equal(plain(rows.find((r) => r[3] === "new:Zz")![0]), "📁 Zz");
+
+      // Session rows keep the unique name, not the label.
+      const session = rows.find((r) => r[3] === "resume:ebebebeb-0000-4000-8000-000000000000")!;
+      assert.equal(plain(session[0]), "🔄 🌐 Studio-web");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("a v2 cache (no launch/label columns) still lists every repo as a launchable row", async () => {
+    // ccs-list opens readonly+skipMigrate; `ccs --no-scan` right after an
+    // upgrade meets a cache that migration v3 has not touched yet.
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedStudio(h.db);
+      h.db.exec(`
+        ALTER TABLE repos DROP COLUMN launch;
+        ALTER TABLE repos DROP COLUMN label;
+        DELETE FROM schema_version WHERE version >= 3;
+      `);
+      h.close();
+
+      const { stdout, stderr, code } = runList(sb, ["--repos-only"]);
+      assert.equal(code, 0, `list must not crash on a v2 cache: ${stderr}`);
+      const rows = stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+      assert.deepEqual(
+        rows.map((r) => [plain(r[0]), r[3]]),
+        [
+          ["🎬 Studio", "new:Studio"],
+          ["  ├ 📱 Studio-app  ‹Studio›", "new:Studio-app"],
+          ["  ├ 🎬 Studio-hq  ‹Studio›", "new:Studio-hq"],
+          ["  └ 🌐 Studio-web  ‹Studio›", "new:Studio-web"],
+        ],
+      );
     } finally {
       await sb.cleanup();
     }
@@ -413,6 +596,68 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       assert.ok(heavy, "heavy row should exist");
       const badges = heavy!.split("\t")[2] ?? "";
       assert.ok(badges.length <= 60, `badges length > 60: ${badges.length} "${badges}"`);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Preview pane for group headers / labelled repos (bin/ccs-preview.ts)
+// ---------------------------------------------------------------------------
+
+function runPreview(sb: ListSandbox, kindKey: string, cwd: string): string {
+  const res = spawnSync("tsx", [PREVIEW_TS, kindKey, cwd], {
+    env: {
+      ...process.env,
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    },
+    encoding: "utf-8",
+  });
+  return (res.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+describe("ccs-preview — group header & label", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("group:<name> shows the header, a not-launchable note, and its entries", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedStudio(h.db);
+      // Deeper repos belong to their own parent, not to the header.
+      upsertRepo(h.db, repoRow("Studio-web-docs", "/home/u/studio/web/docs"));
+      h.close();
+
+      const out = runPreview(sb, "group:Studio", "/home/u/studio");
+      const lines = out.split("\n");
+      assert.equal(lines[0], "🎬 Studio");
+      assert.equal(lines[1], "/home/u/studio");
+      assert.equal(lines[2], "制作チーム");
+      assert.match(out, /not launchable/);
+      assert.match(out, /Entries \(3\)/);
+      const entries = lines
+        .filter((l) => l.startsWith("  "))
+        .map((l) => l.trim().replace(/\s+/g, " "));
+      assert.deepEqual(entries, [
+        "📱 App team app/",
+        "🎬 Studio hq/",
+        "🌐 Web team web/",
+      ]);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("new:<name> is titled with the label, followed by the dim name", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedStudio(h.db);
+      h.close();
+
+      const out = runPreview(sb, "new:Studio-web", "/home/u/studio/web");
+      assert.equal(out.split("\n")[0], "🌐 Web team  (Studio-web)");
     } finally {
       await sb.cleanup();
     }

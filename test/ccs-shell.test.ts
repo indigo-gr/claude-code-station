@@ -7,7 +7,8 @@
  * No bats dependency: node:test drives bash via spawnSync, with stdin piped
  * for the `read -p` prompts and HOME/XDG redirected to a sandbox so the
  * ccs-delete-session.ts cache cleanup can never touch the real state.db.
- * The interactive fzf flow itself is out of scope (needs a TTY harness).
+ * The interactive fzf flow itself is out of scope (needs a TTY harness);
+ * the row dispatch after the pick is covered with a stub fzf on PATH.
  */
 
 import { test, describe } from "node:test";
@@ -24,6 +25,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { openDb, upsertRepo } from "../bin/ccs-db.ts";
 
 const CCS_BIN = fileURLToPath(new URL("../bin/ccs", import.meta.url));
 const DELETE_SH = fileURLToPath(new URL("../bin/ccs-delete.sh", import.meta.url));
@@ -151,6 +154,167 @@ describe("bin/ccs (non-interactive)", () => {
         true,
         "repos.yml template must be created",
       );
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bin/ccs — what happens after the pick (stub fzf + stub claude)
+// ---------------------------------------------------------------------------
+
+// The fzf UI itself needs a TTY, but everything after the pick does not. A
+// stub `fzf` on PATH prints the row whose KIND:KEY is $FAKE_FZF_PICK (as if
+// the user pressed Enter on it) and records the arguments bin/ccs passed; a
+// stub `claude` records where and how it was launched.
+const FAKE_FZF = `#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then echo "\${FAKE_FZF_VERSION} (fake)"; exit 0; fi
+printf '%s\\n' "$@" > "$FAKE_FZF_ARGS"
+rows=$(cat)
+while IFS= read -r row; do
+  if [[ "$(printf '%s' "$row" | cut -f4)" == "$FAKE_FZF_PICK" ]]; then
+    printf '%s\\n' "$row"; exit 0
+  fi
+done <<< "$rows"
+exit 1
+`;
+const FAKE_CLAUDE = `#!/usr/bin/env bash
+printf '%s|%s\\n' "$PWD" "$*" >> "$FAKE_CLAUDE_LOG"
+`;
+
+interface PickSandbox extends ShellSandbox {
+  stubBin: string;
+  fzfArgs: string;
+  claudeLog: string;
+}
+
+async function makePickSandbox(): Promise<PickSandbox> {
+  const sb = await makeShellSandbox();
+  const stubBin = join(sb.root, "stub-bin");
+  await mkdir(stubBin, { recursive: true });
+  await writeFile(join(stubBin, "fzf"), FAKE_FZF, { mode: 0o755 });
+  await writeFile(join(stubBin, "claude"), FAKE_CLAUDE, { mode: 0o755 });
+
+  // A group header with one launchable child. The child has NO description,
+  // so its row has an empty column 2 — the tab-collapse regression case.
+  await mkdir(join(sb.home, "studio", "web"), { recursive: true });
+  const h = openDb(join(sb.home, ".cache", "ccs", "state.db"));
+  const base = {
+    description: "",
+    command: "claude",
+    cwd: null,
+    tags_json: "[]",
+    icon: "📁",
+    disabled: 0 as const,
+    scan_enabled: 1 as const,
+    custom_json: "{}",
+  };
+  upsertRepo(h.db, {
+    ...base,
+    name: "Studio",
+    path: join(sb.home, "studio"),
+    description: "制作チーム",
+    launch: 0,
+    config_hash: "a",
+  });
+  upsertRepo(h.db, {
+    ...base,
+    name: "Studio-web",
+    path: join(sb.home, "studio", "web"),
+    label: "Web team",
+    config_hash: "b",
+  });
+  h.close();
+
+  return {
+    ...sb,
+    stubBin,
+    fzfArgs: join(sb.root, "fzf-args.txt"),
+    claudeLog: join(sb.root, "claude.log"),
+  };
+}
+
+function runPick(
+  sb: PickSandbox,
+  pick: string,
+  args: string[],
+  fzfVersion = "0.70.0",
+): { stdout: string; stderr: string; code: number } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${sb.stubBin}:${process.env.PATH ?? ""}`,
+    HOME: sb.home,
+    XDG_CONFIG_HOME: join(sb.home, ".config"),
+    XDG_CACHE_HOME: join(sb.home, ".cache"),
+    FAKE_FZF_PICK: pick,
+    FAKE_FZF_ARGS: sb.fzfArgs,
+    FAKE_FZF_VERSION: fzfVersion,
+    FAKE_CLAUDE_LOG: sb.claudeLog,
+  };
+  delete env.CCS_CMD;
+  delete env.CCR_CMD;
+  const res = spawnSync("bash", [CCS_BIN, "--no-scan", ...args], {
+    encoding: "utf-8",
+    env,
+  });
+  return {
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    code: res.status ?? -1,
+  };
+}
+
+describe("bin/ccs (after the pick)", () => {
+  test("picking a group header launches nothing and exits 0 (--new and mixed mode)", async () => {
+    const sb = await makePickSandbox();
+    try {
+      for (const args of [["--new"], []]) {
+        const res = runPick(sb, "group:Studio", args);
+        assert.equal(res.code, 0, `${args}: ${res.stdout}${res.stderr}`);
+        assert.doesNotMatch(res.stdout + res.stderr, /Launching|Could not parse|Unknown row kind/);
+      }
+      assert.equal(await exists(sb.claudeLog), false, "claude must not be launched");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("a NEW row with an empty DESCRIPTION column still launches in its cwd", async () => {
+    // `IFS=$'\t' read` merged the empty column into its neighbours, so
+    // KIND_KEY came back holding the cwd ("Unknown row kind").
+    const sb = await makePickSandbox();
+    try {
+      const res = runPick(sb, "new:Studio-web", ["--new"]);
+      assert.equal(res.code, 0, `${res.stdout}${res.stderr}`);
+      assert.match(res.stdout, /Launching Studio-web in /);
+      const { readFile } = await import("node:fs/promises");
+      const log = (await readFile(sb.claudeLog, "utf-8")).trim();
+      assert.ok(log.endsWith(`${join("studio", "web")}|`), `claude ran as: ${log}`);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("fzf >= 0.45 gets enter/double-click bindings that ignore group rows; older fzf does not", async () => {
+    const sb = await makePickSandbox();
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const bind = (key: string) =>
+        `${key}:transform:bash -c 'case $1 in group:*) echo ignore ;; *) echo accept ;; esac' _ {4}`;
+
+      runPick(sb, "group:Studio", ["--new"], "0.70.0");
+      let args = (await readFile(sb.fzfArgs, "utf-8")).split("\n");
+      assert.ok(args.includes(bind("enter")), "enter binding expected");
+      assert.ok(args.includes(bind("double-click")), "double-click binding expected");
+
+      // Older fzf has no transform action (it would refuse to start); the
+      // post-pick check is then the only guard and still exits quietly.
+      const res = runPick(sb, "group:Studio", ["--new"], "0.44.1");
+      assert.equal(res.code, 0);
+      args = (await readFile(sb.fzfArgs, "utf-8")).split("\n");
+      assert.ok(!args.some((a) => a.includes(":transform:")), "no transform on fzf 0.44");
+      assert.equal(await exists(sb.claudeLog), false);
     } finally {
       await sb.cleanup();
     }

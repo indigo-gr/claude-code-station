@@ -39,7 +39,7 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 ### Prerequisites / 前提条件
 
 - [Node.js](https://nodejs.org/) **20+**
-- [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023)
+- [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023). With **0.45+** Enter on a group header (`launch: false`) keeps the list open; on older fzf it just closes ccs without launching anything / 0.45 以上なら、グループ見出しの上で Enter を押してもリストは開いたまま（それより古い fzf では何も起動せずに閉じる）
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
 - [tsx](https://github.com/privatenumber/tsx) — TypeScript runner. **Bundled** as a package dependency; a global `tsx` (`npm install -g tsx`) is only needed for the bare-checkout workflow. / npmインストール時は同梱されるため、グローバルtsxは checkout 直接運用時のみ必要
 
@@ -156,6 +156,46 @@ repos:
 
 Precedence: `repos[].command` > `defaults.command` > `$CCS_CMD` > `"claude"`.
 
+### Group headers and labels / グループ見出しと表示名
+
+For a parent folder that should only hold its children — never be launched itself — mark it `launch: false`. Its children nest under it by `path` (no extra key), and `label` gives any entry a display name of its own. / 中の子を束ねるだけで、自分は起動しない親フォルダには `launch: false` を付ける。子は `path` で自動的にその下に並ぶ（追加のキーは不要）。`label` で行に出す名前を `name` と別にできる。
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `launch` | bool | `true` | `false` = display-only **group header**: listed with its children under it, but Enter does not launch it (`command`/`cwd` are ignored). `path` is still required — it decides which repos nest under the header. Must be a real boolean (`"false"` in quotes is an error). / `false` で表示だけの見出し行になる（Enter で起動しない。`command`/`cwd` は使われない）。`path` は必須（どの子がこの下に並ぶかを決める）。引用符付きの `"false"` はエラー |
+| `label` | string | `""` (show `name`) | Name shown in the repo row and the preview title instead of `name`. `name` stays the unique key (it is still what past-session rows show), so two entries may share a label. Display-only: control characters are stripped. / 行とプレビューの見出しに `name` の代わりに出す名前。一意のキーは `name` のまま（過去セッションの行も `name` で出る）なので、同じ `label` を複数の項目に付けてもよい。表示専用で、制御文字は取り除かれる |
+
+```yaml
+repos:
+  - name: Studio
+    path: ~/studio
+    launch: false               # header only — Enter does not launch ~/studio
+    icon: "🎬"
+    description: Production team
+  - name: Studio-hq
+    path: ~/studio/hq
+    label: Studio               # shown instead of "Studio-hq"
+    icon: "🎬"
+    description: Coordination hq/
+  - name: Studio-web
+    path: ~/studio/web
+    label: Web team
+    icon: "🌐"
+    description: Website web/
+  - name: Studio-app
+    path: ~/studio/app
+    label: App team
+    icon: "📱"
+    description: Mobile app/
+```
+
+```
+🎬 Studio │                    Production team         ← header: Enter does nothing
+  ├ 📱 App team  ‹Studio› │    Mobile app/
+  ├ 🎬 Studio │                Coordination hq/
+  └ 🌐 Web team  ‹Studio› │    Website web/
+```
+
 ### Preview pane sample / プレビュー表示例
 
 ```
@@ -192,9 +232,9 @@ Notion:   ✅ abc123
 
 | Key | Action |
 |---|---|
-| Enter | Launch (NEW) or resume (RESUME) / 起動または再開 |
-| Ctrl-Y | Copy `cd … && cmd [--resume …]` to clipboard; fzf stays open with a "📋 Copied" header / クリップボードコピー後もfzfは開いたまま、ヘッダーに📋通知 |
-| Ctrl-I | Copy session UUID or repo path; fzf stays open / コピー後も開いたまま |
+| Enter | Launch (NEW) or resume (RESUME); does nothing on a group header / 起動または再開（グループ見出しの上では何もしない） |
+| Ctrl-Y | Copy `cd … && cmd [--resume …]` to clipboard; fzf stays open with a "📋 Copied" header (nothing to copy on a group header) / クリップボードコピー後もfzfは開いたまま、ヘッダーに📋通知（グループ見出しはコピーする物なし） |
+| Ctrl-I | Copy session UUID or repo path (group headers too); fzf stays open / コピー後も開いたまま（グループ見出しはパス） |
 | Ctrl-R | Refresh DB and reload list / DB再走査してリロード |
 | Ctrl-D | Delete session (RESUME rows only). To remove a repo, edit `~/.config/ccs/repos.yml` directly / セッション削除はRESUME行のみ。リポ削除は`repos.yml`を直接編集 |
 | Esc / Ctrl-C | Cancel / キャンセル |
@@ -202,12 +242,13 @@ Notion:   ✅ abc123
 **Visual cues / 見た目のガイド:**
 - NEW rows and RESUME rows are separated by a dim `── Past Sessions ──` divider. Selecting the divider is a no-op.
 - RESUME sessions mapped to a registered repo show that repo's icon (e.g., `🔄 📁 ClaudeCode`). Unmapped sessions (cwd that isn't in `repos.yml`) show `❓` — a visual cue that the session was either a one-off or that the repo isn't registered yet.
-- A repo whose `path` sits inside another registered repo's `path` is listed right under that repo, indented, with the parent's name dimmed at the end. Nothing to configure — the nesting follows from `path`. The dim `‹parent›` keeps the relation visible when a search hides the parent row, and searching for the parent's name lists its children too. / `path` が別の登録リポの `path` の中にあるリポは、そのリポのすぐ下に字下げして並び、行の末尾に親の名前が薄く出る。設定は要らない（`path` から決まる）。絞り込みで親の行が隠れても `‹親›` で親子がわかり、親の名前で絞り込むと子も一緒に出る。
+- A repo whose `path` sits inside another registered repo's `path` is listed right under that repo as a tree (`├` / `└`, with `│` continuing past deeper levels), with the parent's name dimmed at the end. Nothing to configure — the nesting follows from `path`. The dim `‹parent›` keeps the relation visible when a search hides the parent row, and searching for the parent's name lists its children too; it is left out when it would just repeat the row's own name. A parent marked `launch: false` is a [group header](#group-headers-and-labels--グループ見出しと表示名). / `path` が別の登録リポの `path` の中にあるリポは、そのリポのすぐ下にツリー（`├` / `└`、深い段は `│` でつなぐ）で並び、行の末尾に親の名前が薄く出る。設定は要らない（`path` から決まる）。絞り込みで親の行が隠れても `‹親›` で親子がわかり、親の名前で絞り込むと子も一緒に出る。行の名前と同じになる時は `‹親›` を出さない。`launch: false` の親はグループ見出しになる。
 
   ```
   📁 my-company
+    ├ 📁 mobile-app  ‹my-company›
+    │ └ 📁 ios  ‹mobile-app›
     └ 📁 web-app  ‹my-company›
-    └ 📁 mobile-app  ‹my-company›
   📁 side-project
   ```
 

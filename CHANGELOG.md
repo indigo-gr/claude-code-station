@@ -4,7 +4,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.4] — 2026-10-21
+
+### Added
+- **Group headers (`launch: false`)** — a repos.yml entry with `launch: false` is listed as a display-only header row (`KIND=group:<name>`) for a parent folder that must not be launched; the repos inside its `path` nest under it by the existing deepest-path rule. Enter (and double-click) on a header keeps the picker open (fzf 0.45+ `transform` binding, detected from `fzf --version`; older fzf accepts the row and ccs exits quietly, like the separator). `^I` copies the header's path, `^Y` copies nothing, `^D` shows the same "edit repos.yml" note as repo rows. The preview shows the header's path, description, a not-launchable note, and its entries (display names + relative dirs). Headers carry no badges and are skipped by the repo scan. `path` is required for a header; `launch` must be a real boolean (a quoted `"false"` is rejected instead of being coerced to `true`).
+- **Display names (`label`)** — an optional `label` is shown instead of `name` in the repo row, the `‹parent›` hint and the preview title (with the `name` dimmed after it). `name` stays the unique key everywhere else; past-session rows keep showing `name`. Display-only like `description`: shell metacharacters are allowed and control characters are stripped at render time.
+
+### Changed
+- **Nested repos render as a tree** — children use `├ ` for earlier siblings and `└ ` for the last one, and deeper levels draw a `│ ` rail while an ancestor still has later siblings (previously every child used `└ `). The dim `‹parent›` hint uses the parent's display name and is omitted when it equals the row's own display name.
+- **Schema v3** — `repos.launch INTEGER NOT NULL DEFAULT 1` and `repos.label TEXT NOT NULL DEFAULT ''` (plain `ADD COLUMN`). ccs-list / ccs-preview (readonly, no migration) synthesize the defaults on a not-yet-migrated v2 cache, and 0.2.3 keeps working against a v3 cache: its repos statements name explicit columns, so the new columns take their defaults on insert and are never read.
+
+### Fixed
+- **Empty columns no longer shift the picked row** — `bin/ccs` parsed the picked row with `IFS=$'\t' read`, and TAB is IFS whitespace, so an empty column was merged away: a repo with no `description` could not be launched (`Unknown row kind`, because KIND:KEY held the cwd). Tabs are now swapped for `\x1f` before the read, which keeps empty fields.
+- A repos.yml entry without `path` no longer counts as the parent of every other repo in the list nesting (an empty path matched every absolute path as a prefix).
 
 ## [0.2.3] — 2026-10-14
 

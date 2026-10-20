@@ -59,7 +59,13 @@ CREATE TABLE repos (
 
 CREATE INDEX idx_repos_path ON repos(path);
 CREATE INDEX idx_repos_disabled ON repos(disabled);
+
+-- v3: repos.yml の launch / label（ADD COLUMN なので列は表の末尾に付く）
+ALTER TABLE repos ADD COLUMN launch INTEGER NOT NULL DEFAULT 1; -- 0 = 表示だけのグループ見出し
+ALTER TABLE repos ADD COLUMN label  TEXT    NOT NULL DEFAULT ''; -- 表示名（空なら name）
 ```
+
+v3 の列の互換: 古い版（0.2.3 以前）は repos の INSERT/SELECT で列名を明示しているので、v3 のキャッシュでも動く（新しい列は INSERT で既定値になり、SELECT では読まれない）。逆に readonly・マイグレーションなしで開く ccs-list / ccs-preview が v2 のキャッシュに当たった時は、`reposV3Columns()` が `1 AS launch, '' AS label` で既定値を補う（`getMeta` と同じ「落ちずに既定値へ」の扱い）。
 
 ### repo_stats
 
@@ -168,6 +174,7 @@ CREATE TABLE meta (
 |---------|---------|---------|
 | 1 | v0.2.0 init | 初期テーブル群（repos, repo_stats, sessions, handoff_files, pending_items） |
 | 2 | 2026-06-12 レビュークリーンアップ（v0.2.1） | meta テーブル追加（キー/値ストア、defaults_command 保存用） |
+| 3 | 2026-10-21 グループ見出しと表示名（未リリース） | repos に `launch`（既定 1）・`label`（既定 ''）を追加 |
 
 ## 走査フロー
 
@@ -202,7 +209,8 @@ ccs 起動
 const migrations = [
   { version: 1, up: `CREATE TABLE schema_version (...); ...初期DDL...` },
   { version: 2, up: `CREATE TABLE meta (...);` },
-  // 以降 version: 3, 4, ... を追加
+  { version: 3, up: `ALTER TABLE repos ADD COLUMN launch ...; ALTER TABLE repos ADD COLUMN label ...;` },
+  // 以降 version: 4, 5, ... を追加
 ];
 
 function migrate(db: Database) {

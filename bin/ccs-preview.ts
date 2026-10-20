@@ -4,19 +4,23 @@
  *
  * Invoked by fzf as: tsx bin/ccs-preview.ts <KIND:KEY> <CWD>
  *   KIND=new     → render repo preview (DB-backed state summary)
+ *   KIND=group   → render group-header preview (path + nested entries)
  *   KIND=resume  → delegate to renderSessionPreview (conversation history)
  *
  * All errors print to stdout (fzf reads stdout for preview) and exit 0.
  */
 
 import { existsSync } from "node:fs";
+import { relative } from "node:path";
 import { getPaths } from "./ccs-config.ts";
-import { openDb, type DbHandle } from "./ccs-db.ts";
+import { openDb, reposV3Columns, type DbHandle } from "./ccs-db.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
 import {
   formatRelativeTime,
   formatDateTime,
   truncate,
+  repoDisplayName,
+  findParentRepo,
 } from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
@@ -60,8 +64,18 @@ interface RepoView {
   path: string;
   description: string;
   icon: string;
+  label: string;
   tags_json: string;
   custom_json: string;
+}
+
+interface GroupMemberView {
+  name: string;
+  path: string;
+  description: string;
+  icon: string;
+  launch: number;
+  label: string;
 }
 
 interface StatsView {
@@ -167,7 +181,8 @@ function renderRepoPreview(name: string, cwd: string): void {
 
     const repo = db
       .prepare(
-        `SELECT name, path, description, icon, tags_json, custom_json
+        `SELECT name, path, description, icon, tags_json, custom_json,
+                ${reposV3Columns(db)}
          FROM repos WHERE name = ?`,
       )
       .get(name) as RepoView | undefined;
@@ -191,7 +206,12 @@ function renderRepoPreview(name: string, cwd: string): void {
       .get(name) as StatsView | undefined;
 
     // --- Header ---
-    console.log(`${hdr(`${repo.icon || "📁"} ${repo.name}`)}`);
+    // Titled with the repos.yml `label` like the list row; when one is set,
+    // the dim `name` after it ties the entry to its session rows, which keep
+    // showing the name.
+    const displayName = repoDisplayName(repo);
+    const nameHint = displayName !== repo.name ? `  ${dim(`(${repo.name})`)}` : "";
+    console.log(`${hdr(`${repo.icon || "📁"} ${displayName}`)}${nameHint}`);
     console.log(dim(repo.path));
     if (repo.description) console.log(repo.description);
     console.log("");
@@ -323,6 +343,84 @@ function renderRepoPreview(name: string, cwd: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Group-header preview (repos.yml `launch: false`)
+// ---------------------------------------------------------------------------
+
+function renderGroupPreview(name: string, cwd: string): void {
+  const paths = getPaths();
+  if (!existsSync(paths.stateDb)) {
+    console.log(`${hdr("📁 " + name)}`);
+    console.log(dim(cwd || ""));
+    console.log("");
+    console.log("No state cache yet — run `ccs --refresh` to scan.");
+    return;
+  }
+
+  let handle: DbHandle | null = null;
+  try {
+    handle = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
+    const db = handle.db;
+
+    // The listed (enabled) repos, in list order: children are resolved with
+    // the same findParentRepo rule over the same population as ccs-list, so
+    // the entries here are exactly the rows drawn under the header.
+    const listed = db
+      .prepare(
+        `SELECT name, path, description, icon, ${reposV3Columns(db)}
+         FROM repos WHERE disabled = 0
+         ORDER BY name COLLATE NOCASE ASC`,
+      )
+      .all() as GroupMemberView[];
+    const group = listed.find((r) => r.name === name);
+
+    if (!group) {
+      console.log(`${hdr("📁 " + name)}`);
+      console.log(dim(cwd || ""));
+      console.log("");
+      console.log(`Group "${name}" not found in cache.`);
+      return;
+    }
+
+    console.log(`${hdr(`${group.icon || "📁"} ${repoDisplayName(group)}`)}`);
+    console.log(dim(group.path));
+    if (group.description) console.log(truncate(group.description, 200));
+    console.log("");
+
+    console.log(divider("Group"));
+    console.log("Group header (launch: false) — not launchable.");
+    console.log("Pick one of the entries below to start a session.");
+    console.log("");
+
+    const entries = listed.filter(
+      (r) => r !== group && findParentRepo(r, listed) === group,
+    );
+    console.log(divider(`Entries (${entries.length})`));
+    if (entries.length === 0) {
+      console.log("No repos inside this path yet.");
+      return;
+    }
+    const names = entries.map((r) => repoDisplayName(r));
+    const width = Math.max(...names.map((n) => n.length));
+    entries.forEach((r, i) => {
+      const rel = truncate(relative(group.path, r.path), 60) + "/";
+      const tag = r.launch === 0 ? `  ${dim("(group)")}` : "";
+      console.log(`  ${r.icon || "📁"} ${names[i].padEnd(width)}  ${dim(rel)}${tag}`);
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`${hdr("📁 " + name)}`);
+    console.log("");
+    console.log(`Preview error: ${msg}`);
+  } finally {
+    try {
+      handle?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -348,6 +446,8 @@ async function main(): Promise<void> {
       await renderSessionPreview(key);
     } else if (kind === "new") {
       renderRepoPreview(key, cwd);
+    } else if (kind === "group") {
+      renderGroupPreview(key, cwd);
     } else if (kind === "separator") {
       // Divider row — intentionally blank preview.
       return;

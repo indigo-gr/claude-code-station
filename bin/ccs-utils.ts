@@ -1,12 +1,12 @@
 /**
  * ccs-utils.ts — Shared helpers for ccs scan/list/preview modules.
  *
- * Single source of truth for display-text truncation, relative-time
- * bucketing, JSONL message-content extraction, and cross-module constants
- * (review A-1/A-2/A-3/K-8). Before this module existed, each renderer kept
- * its own copy of these helpers with "keep in sync" comments — and they
- * drifted. Behavioral differences must now be expressed as explicit options,
- * never as parallel implementations.
+ * Single source of truth for display-text truncation, repo display names and
+ * nesting, relative-time bucketing, JSONL message-content extraction, and
+ * cross-module constants (review A-1/A-2/A-3/K-8). Before this module
+ * existed, each renderer kept its own copy of these helpers with "keep in
+ * sync" comments — and they drifted. Behavioral differences must now be
+ * expressed as explicit options, never as parallel implementations.
  */
 
 import { stripControlChars } from "./ccs-sanitize.ts";
@@ -44,6 +44,52 @@ export function truncate(s: string, max: number): string {
   if (!s) return "";
   const flat = stripControlChars(s);
   return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
+}
+
+// ---------------------------------------------------------------------------
+// Repo display name & nesting
+// ---------------------------------------------------------------------------
+
+/** Display cap for repos.yml `label` (it is a name, not a sentence). */
+export const LABEL_MAX = 40;
+
+/**
+ * Name shown for a repo in the NEW row and the repo/group preview: the
+ * repos.yml `label` when set, else the unique `name`. The label is
+ * display-only (never part of a row key or a shell line), so like
+ * `description` it is not rejected at load time — control chars are stripped
+ * here by truncate(). A label that strips down to nothing falls back to name.
+ */
+export function repoDisplayName(r: { name: string; label?: string | null }): string {
+  return truncate(r.label ?? "", LABEL_MAX) || r.name;
+}
+
+/**
+ * True when `child` sits strictly inside `parent` (path-segment aware). An
+ * empty parent (a repos.yml entry without `path`) contains nothing — as a
+ * bare prefix it would have claimed every absolute path.
+ */
+export function isUnderPath(child: string, parent: string): boolean {
+  if (!parent) return false;
+  return child.startsWith(parent.endsWith("/") ? parent : parent + "/");
+}
+
+/**
+ * The repo in `repos` whose path most deeply contains `repo`'s own — the
+ * deepest-path-wins rule buildRepoResolver uses for sessions. Shared by the
+ * list tree (ccs-list) and the group preview (ccs-preview) so the two can
+ * never disagree on whose child a repo is. Null for a top-level repo.
+ */
+export function findParentRepo<T extends { path: string }>(
+  repo: T,
+  repos: T[],
+): T | null {
+  let parent: T | null = null;
+  for (const p of repos) {
+    if (p === repo || !isUnderPath(repo.path, p.path)) continue;
+    if (!parent || p.path.length > parent.path.length) parent = p;
+  }
+  return parent;
 }
 
 // ---------------------------------------------------------------------------

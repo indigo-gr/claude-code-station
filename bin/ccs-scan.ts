@@ -144,6 +144,8 @@ function syncReposToDb(
         icon: r.icon,
         disabled: r.disabled ? 1 : 0,
         scan_enabled: r.scan ? 1 : 0,
+        launch: r.launch ? 1 : 0,
+        label: r.label,
         custom_json: JSON.stringify(r.custom),
         config_hash: r.configHash,
       });
@@ -520,8 +522,11 @@ async function scanAllRepos(
     preserveSessionAgg: boolean;
   },
 ): Promise<ReposScanSummary> {
+  // Group headers (`launch: false`) are skipped too: their list row carries
+  // no badges and their preview shows only the group, so git/workspace stats
+  // for the header's own path would never be displayed.
   const allRepos = getAllRepos(db).filter(
-    (r) => r.disabled === 0 && r.scan_enabled === 1,
+    (r) => r.disabled === 0 && r.scan_enabled === 1 && r.launch === 1,
   );
 
   // TTL check: read existing scanned_at per repo

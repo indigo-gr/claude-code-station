@@ -5,19 +5,28 @@
  * Outputs tab-separated rows for fzf consumption:
  *   <LABEL>\t<DESCRIPTION>\t<BADGES>\t<KIND>:<KEY>\t<CWD>\t<COMMAND>
  *
+ * KIND is `new` (launchable repo), `group` (display-only header, repos.yml
+ * `launch: false`), `resume` (past session) or `separator`.
+ *
  * Modes:
  *   --current-only    sessions whose cwd matches process.cwd()
- *   --repos-only      only NEW repo rows
+ *   --repos-only      only NEW repo rows (and group headers)
  *   --sessions-only   only RESUME session rows
- *   (default)         NEW first (alpha, nested repos under their parent),
- *                     then RESUME (last_activity_at DESC)
+ *   (default)         NEW first (alpha, nested repos in a tree under their
+ *                     parent), then RESUME (last_activity_at DESC)
  */
 
 import { homedir } from "node:os";
-import { openDb, getMeta } from "./ccs-db.ts";
+import { openDb, getMeta, reposV3Columns } from "./ccs-db.ts";
 import { getPaths } from "./ccs-config.ts";
 import { SHELL_METACHARS } from "./ccs-sanitize.ts";
-import { truncate, formatRelativeTime, formatDateTime } from "./ccs-utils.ts";
+import {
+  truncate,
+  formatRelativeTime,
+  formatDateTime,
+  repoDisplayName,
+  findParentRepo,
+} from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -116,6 +125,8 @@ interface RepoRowFull {
   icon: string;
   disabled: number;
   scan_enabled: number;
+  launch: number;
+  label: string;
   custom_json: string;
   // stats (LEFT JOINed, may be null)
   is_git: number | null;
@@ -178,50 +189,64 @@ const LABEL_SEP = " \x1b[2m│\x1b[0m";
 
 interface GroupedRepo {
   repo: RepoRowFull;
-  parentName: string | null;
-  depth: number;
-}
-
-function isUnder(child: string, parent: string): boolean {
-  return child.startsWith(parent.endsWith("/") ? parent : parent + "/");
+  parent: RepoRowFull | null;
+  /** Tree glyphs drawn before the icon ("" at the top level). */
+  prefix: string;
 }
 
 // Nest each repo under the listed repo whose path most deeply contains its
-// own — the same deepest-path-wins rule buildRepoResolver uses for sessions,
-// so no repos.yml key is needed. Children follow their parent, siblings keep
-// the incoming (SQL, name-sorted) order. A disabled parent is not in the
-// list, so its children fall back to the top level.
+// own — the same deepest-path-wins rule buildRepoResolver uses for sessions
+// (findParentRepo), so no repos.yml key is needed. Children follow their
+// parent, siblings keep the incoming (SQL, name-sorted) order. A disabled
+// parent is not in the list, so its children move up to the next listed
+// ancestor (or the top level).
+//
+// Children are drawn as a tree: `├ ` for a sibling with more after it, `└ `
+// for the last one, and for every ancestor level below the top a `│ ` rail
+// while that ancestor still has later siblings (blank once it was the last).
 function groupRepos(repos: RepoRowFull[]): GroupedRepo[] {
   const children = new Map<RepoRowFull | null, RepoRowFull[]>();
   for (const r of repos) {
-    let parent: RepoRowFull | null = null;
-    for (const p of repos) {
-      if (p === r || !isUnder(r.path, p.path)) continue;
-      if (!parent || p.path.length > parent.path.length) parent = p;
-    }
+    const parent = findParentRepo(r, repos);
     const siblings = children.get(parent) ?? [];
     siblings.push(r);
     children.set(parent, siblings);
   }
   const out: GroupedRepo[] = [];
-  const walk = (parent: RepoRowFull | null, depth: number): void => {
-    for (const r of children.get(parent) ?? []) {
-      out.push({ repo: r, parentName: parent?.name ?? null, depth });
-      walk(r, depth + 1);
-    }
+  const walk = (parent: RepoRowFull | null, rails: string): void => {
+    const kids = children.get(parent) ?? [];
+    kids.forEach((r, i) => {
+      const last = i === kids.length - 1;
+      const prefix = parent ? `  ${rails}${last ? "└ " : "├ "}` : "";
+      out.push({ repo: r, parent, prefix });
+      // Top-level repos draw no glyph of their own, so they add no rail.
+      walk(r, parent ? rails + (last ? "  " : "│ ") : "");
+    });
   };
-  walk(null, 0);
+  walk(null, "");
   return out;
 }
 
-function repoToRow({ repo: r, parentName, depth }: GroupedRepo): string {
-  // Children are indented under their parent. The dim ‹parent› suffix keeps
-  // the relation readable when a fzf query hides the parent row, and lets a
-  // query for the parent's name match its children too.
-  const indent = depth > 0 ? `${"  ".repeat(depth)}└ ` : "";
-  const parentHint = parentName ? `  \x1b[2m‹${parentName}›\x1b[0m` : "";
-  const label = `${indent}${r.icon || "📁"} ${r.name}${parentHint}${LABEL_SEP}`;
+function repoToRow({ repo: r, parent, prefix }: GroupedRepo): string {
+  // Rows show the repos.yml `label` when set (repoDisplayName); `name` stays
+  // the row key. The dim ‹parent› suffix keeps the relation readable when a
+  // fzf query hides the parent row, and lets a query for the parent's name
+  // match its children too. It is dropped when it would only repeat the
+  // row's own name (an entry labelled `Studio` under a `Studio` header).
+  const displayName = repoDisplayName(r);
+  const parentName = parent ? repoDisplayName(parent) : null;
+  const parentHint =
+    parentName && parentName !== displayName
+      ? `  \x1b[2m‹${parentName}›\x1b[0m`
+      : "";
+  const label = `${prefix}${r.icon || "📁"} ${displayName}${parentHint}${LABEL_SEP}`;
   const desc = truncate(r.description || "", DESC_MAX);
+  if (r.launch === 0) {
+    // Group header (`launch: false`): display-only, so no badges (the header
+    // is not scanned) and no COMMAND. CWD carries the path for ^I and the
+    // preview; bin/ccs never launches a `group:` row.
+    return [label, desc, "", `group:${r.name}`, r.path, ""].join("\t");
+  }
   const badges = buildRepoBadges(r);
   const cwd = r.cwd && r.cwd.length > 0 ? r.cwd : r.path;
   const command = r.command || "claude";
@@ -248,7 +273,9 @@ interface SessionRowFull {
 }
 
 function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
-  // Mapped sessions use the registered repo icon + name.
+  // Mapped sessions use the registered repo icon + name — the unique `name`,
+  // deliberately not the repos.yml `label`, so session rows read the same as
+  // before labels existed.
   // Unmapped sessions get ❓ as a visible reminder: either a one-off run
   // or a repo that hasn't been added to repos.yml yet.
   // Ternary tests s.repo_display directly so TS narrows string|null → string
@@ -302,10 +329,12 @@ function main(): number {
     const wantSessions = !flags.reposOnly;
 
     if (wantRepos) {
+      // launch/label come from schema v3; reposV3Columns() synthesizes the
+      // defaults when this readonly connection meets a v2 cache.
       const repos = db
         .prepare(
           `SELECT r.name, r.path, r.description, r.command, r.cwd, r.icon,
-                  r.disabled, r.scan_enabled, r.custom_json,
+                  r.disabled, r.scan_enabled, ${reposV3Columns(db, "r")}, r.custom_json,
                   s.is_git, s.branch, s.uncommitted_insertions,
                   s.uncommitted_deletions, s.handoff_count, s.pending_count,
                   s.session_last_at

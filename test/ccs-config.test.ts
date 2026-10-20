@@ -842,3 +842,154 @@ repos:
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// launch / label (group headers and display names)
+// ---------------------------------------------------------------------------
+
+describe("loadConfig() — launch / label", () => {
+  let restore: (() => void) | null = null;
+  let sb: Sandbox | null = null;
+  let warnings: string[] = [];
+  const origWarn = console.warn;
+
+  async function load(reposBody: string) {
+    sb = await makeSandbox();
+    restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    warnings = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    await mkdir(join(sb.home, "studio", "web"), { recursive: true });
+    await writeYml(
+      sb.reposYml,
+      `version: 1\nrepos:\n${reposBody.replaceAll("$HOME", sb.home)}`,
+    );
+    const mod = await freshImport();
+    return { ...mod, sb };
+  }
+
+  afterEach(async () => {
+    console.warn = origWarn;
+    restore?.();
+    restore = null;
+    await sb?.cleanup();
+    sb = null;
+  });
+
+  test("defaults: launch true, label empty; no unknown-key warning for either key", async () => {
+    const { loadConfig } = await load(`  - name: plain
+    path: $HOME/studio
+  - name: keyed
+    path: $HOME/studio/web
+    launch: true
+    label: Web team
+`);
+    const cfg = loadConfig();
+    assert.equal(cfg.repos[0].launch, true);
+    assert.equal(cfg.repos[0].label, "");
+    assert.equal(cfg.repos[1].launch, true);
+    assert.equal(cfg.repos[1].label, "Web team");
+    assert.ok(
+      !warnings.some((w) => /unknown key/.test(w)),
+      `launch/label must be known keys: ${warnings.join(" | ")}`,
+    );
+  });
+
+  test("launch: false makes a header; its path still resolves like any other entry", async () => {
+    const { loadConfig } = await load(`  - name: Studio
+    path: $HOME/studio
+    launch: false
+    icon: "🎬"
+  - name: Studio-web
+    path: $HOME/studio/web
+    label: Web team
+`);
+    const cfg = loadConfig();
+    const [hdr, child] = cfg.repos;
+    assert.equal(hdr.launch, false);
+    assert.equal(hdr.path, join(sb!.home, "studio"));
+    assert.equal(child.launch, true);
+  });
+
+  test("launch: false still warns on a missing path, like any other entry", async () => {
+    const { loadConfig } = await load(`  - name: Ghost
+    path: $HOME/no-such-dir
+    launch: false
+`);
+    const cfg = loadConfig();
+    assert.equal(cfg.repos[0].launch, false);
+    assert.ok(warnings.some((w) => /path not found/.test(w)), warnings.join(" | "));
+  });
+
+  test("launch must be a real boolean — a quoted \"false\" is rejected, not coerced to true", async () => {
+    const { loadConfig, ConfigError } = await load(`  - name: Studio
+    path: $HOME/studio
+    launch: "false"
+`);
+    assert.throws(() => loadConfig(), (e: unknown) => {
+      assert.ok(e instanceof ConfigError);
+      assert.match((e as Error).message, /repos\[0\]\.launch must be true or false/);
+      return true;
+    });
+  });
+
+  test("launch: false without a path is rejected (a header nests its children by path)", async () => {
+    const { loadConfig, ConfigError } = await load(`  - name: Floating
+    launch: false
+`);
+    assert.throws(() => loadConfig(), (e: unknown) => {
+      assert.ok(e instanceof ConfigError);
+      assert.match((e as Error).message, /repos\[0\]\.path is required when launch is false/);
+      return true;
+    });
+  });
+
+  test("label must be a string; a blank `label:` (YAML null) means unset", async () => {
+    let mod = await load(`  - name: Numbered
+    path: $HOME/studio
+    label: 42
+`);
+    assert.throws(() => mod.loadConfig(), (e: unknown) => {
+      assert.ok(e instanceof mod.ConfigError);
+      assert.match((e as Error).message, /repos\[0\]\.label must be a string/);
+      return true;
+    });
+    console.warn = origWarn;
+    restore?.();
+    await sb?.cleanup();
+
+    mod = await load(`  - name: Blank
+    path: $HOME/studio
+    label:
+`);
+    assert.equal(mod.loadConfig().repos[0].label, "");
+  });
+
+  test("label is display-only: shell metachars are kept verbatim (only name is a key)", async () => {
+    const { loadConfig } = await load(`  - name: rnd
+    path: $HOME/studio
+    label: "R&D — Dad's notes"
+`);
+    assert.equal(loadConfig().repos[0].label, "R&D — Dad's notes");
+  });
+
+  test("name stays unique even when two entries share a label", async () => {
+    const { loadConfig } = await load(`  - name: Studio
+    path: $HOME/studio
+    launch: false
+  - name: Studio-hq
+    path: $HOME/studio/web
+    label: Studio
+`);
+    const cfg = loadConfig();
+    assert.deepEqual(cfg.repos.map((r) => [r.name, r.label]), [
+      ["Studio", ""],
+      ["Studio-hq", "Studio"],
+    ]);
+  });
+});

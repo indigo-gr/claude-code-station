@@ -4,3 +4,6 @@ node_modules/
 
 # Local Claude Code workspace (handoffs, agent outputs, local notes) — never publish
 .claude/
+
+# Local clone of the distribution repository
+dist/

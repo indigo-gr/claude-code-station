@@ -34,6 +34,10 @@ export interface RepoEntry {
   disabled: boolean;
   scan: boolean;
   icon: string;
+  /** false = display-only group header: listed, never launched. */
+  launch: boolean;
+  /** Display name for the NEW row / preview ("" = show `name`). */
+  label: string;
   custom: Record<string, unknown>;
   configHash: string;
 }
@@ -74,6 +78,8 @@ const KNOWN_REPO_KEYS = new Set([
   "disabled",
   "scan",
   "icon",
+  "launch",
+  "label",
   "custom",
 ]);
 
@@ -304,6 +310,27 @@ function resolveRepoEntry(
   const disabled =
     raw.disabled === undefined ? false : Boolean(raw.disabled);
 
+  // launch — `launch: false` makes the entry a display-only group header:
+  // listed, with the repos inside its path nested under it, but never
+  // launched. Strictly typed, unlike disabled/scan: Boolean("false") is true,
+  // so a quoted value would silently turn the header back into a launcher.
+  let launch = true;
+  if (raw.launch !== undefined) {
+    if (typeof raw.launch !== "boolean") {
+      throw new ConfigError(
+        `${reposYmlPath}: repos[${index}].launch must be true or false (got ${JSON.stringify(raw.launch)})`,
+      );
+    }
+    launch = raw.launch;
+  }
+  // A header exists to hold its children, which nest by path — without one
+  // it would have nothing under it (command/cwd, by contrast, go unused).
+  if (!launch && raw.path === undefined) {
+    throw new ConfigError(
+      `${reposYmlPath}: repos[${index}].path is required when launch is false`,
+    );
+  }
+
   // path
   let resolvedPath = "";
   if (raw.path !== undefined) {
@@ -366,6 +393,22 @@ function resolveRepoEntry(
   const description =
     raw.description === undefined ? "" : String(raw.description);
 
+  // label — display name for the NEW row and the preview title; `name` stays
+  // the unique key (row key, DB, session rows). Display-only like
+  // description: it never reaches a shell line (bin/ccs skips the LABEL
+  // column; no fzf binding references it), so shell metachars are allowed
+  // ("R&D", "Dad's notes") and control chars are stripped at render time
+  // (repoDisplayName -> truncate). A blank `label:` (YAML null) means unset.
+  let label = "";
+  if (raw.label !== undefined && raw.label !== null) {
+    if (typeof raw.label !== "string") {
+      throw new ConfigError(
+        `${reposYmlPath}: repos[${index}].label must be a string`,
+      );
+    }
+    label = raw.label;
+  }
+
   // tags
   let tags: string[] = [];
   if (raw.tags !== undefined) {
@@ -412,6 +455,8 @@ function resolveRepoEntry(
     disabled,
     scan,
     icon,
+    launch,
+    label,
     custom,
     configHash: hashEntry(raw),
   };

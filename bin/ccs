@@ -106,9 +106,10 @@ Usage:
   ccs [options]       Unknown options pass through to launched command
 
 Controls:
-  Enter               Launch (or resume) selected entry
+  Enter               Launch (or resume) selected entry; does nothing on a
+                      group header (an entry with launch: false)
   Ctrl-Y              Copy the effective shell command to clipboard
-  Ctrl-I              Copy session UUID (resume) or repo path (new)
+  Ctrl-I              Copy session UUID (resume) or repo path (new/group)
   Ctrl-R              Refresh DB and reload list
   Ctrl-D              Delete session (resume rows only)
   Esc / Ctrl-C        Cancel
@@ -230,6 +231,8 @@ if [[ -n "$CLIP_CMD" ]]; then
   # cwd/uuid are %q-quoted: the clipboard line gets pasted into a live shell,
   # so a tainted cwd must arrive as an inert literal, never as syntax (audit
   # H-1 defense-in-depth — intake sanitization in ccs-scan is the first gate).
+  # group:* (display-only header) and separator rows have no command, so
+  # nothing is built or copied for them.
   CLIP_BINDS+=(--bind "ctrl-y:execute-silent(
     kk={4}; cwd={5}; cmd={6};
     case \"\$kk\" in
@@ -237,25 +240,47 @@ if [[ -n "$CLIP_CMD" ]]; then
       new:*)    printf 'cd %q && %s' \"\$cwd\" \"\$cmd\" | ${CLIP_CMD} ;;
     esac
   )+change-header(📋 Copied command to clipboard — ⏎: launch | ^Y: copy again)")
-  # ctrl-i: copy UUID (resume) or repo path (new)
+  # ctrl-i: copy UUID (resume) or repo path (new, group header)
   CLIP_BINDS+=(--bind "ctrl-i:execute-silent(
     kk={4};
     case \"\$kk\" in
-      resume:*) printf '%s' \"\${kk#resume:}\" | ${CLIP_CMD} ;;
-      new:*)    printf '%s' {5} | ${CLIP_CMD} ;;
+      resume:*)      printf '%s' \"\${kk#resume:}\" | ${CLIP_CMD} ;;
+      new:*|group:*) printf '%s' {5} | ${CLIP_CMD} ;;
     esac
   )+change-header(📋 Copied ID/path to clipboard — ⏎: launch | ^I: copy again)")
 fi
 
-# ctrl-d: delete session (resume only). Repo (new) rows cannot be deleted
-# from ccs — repos.yml is the source of truth; edit it directly to remove.
+# ctrl-d: delete session (resume only). Repo (new) rows and group headers
+# cannot be deleted from ccs — repos.yml is the source of truth; edit it
+# directly to remove.
 DELETE_BIND=(--bind "ctrl-d:execute(
   kk={4};
   case \"\$kk\" in
-    resume:*) bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
-    new:*)    echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r -n1 _ ;;
+    resume:*)      bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
+    new:*|group:*) echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r -n1 _ ;;
   esac
 )+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
+
+# enter / double-click on a group header (KIND=group, a repos.yml entry with
+# `launch: false`) keep the picker open instead of accepting the row. That
+# needs fzf's transform action (0.45+); on an older fzf the row is accepted
+# as usual and the post-selection check below exits quietly, like the
+# separator row. The `transform:` form takes the rest of the string as its
+# argument, so the `)` of the case patterns cannot end it early. fzf runs the
+# command with $SHELL -c; the test itself goes through `bash -c` so a
+# non-POSIX login shell (fish) cannot break Enter on every row.
+fzf_has_transform() {
+  local v
+  v=$(fzf --version 2>/dev/null) || return 1
+  [[ "$v" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  (( 10#${BASH_REMATCH[1]} > 0 || 10#${BASH_REMATCH[2]} >= 45 ))
+}
+GROUP_BINDS=()
+if fzf_has_transform; then
+  for key in enter double-click; do
+    GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo ignore ;; *) echo accept ;; esac' _ {4}")
+  done
+fi
 
 # ctrl-r: force refresh
 REFRESH_BIND=(--bind "ctrl-r:execute('${TSX}' '${CCS_SCAN}' --force --quiet)+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
@@ -280,6 +305,7 @@ SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
   "${DELETE_BIND[@]}" \
   "${REFRESH_BIND[@]}" \
+  "${GROUP_BINDS[@]+"${GROUP_BINDS[@]}"}" \
   --height='80%' \
   --layout=reverse \
   --border \
@@ -293,7 +319,13 @@ SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
 # 6-col TSV from ccs-list.ts: LABEL, DESCRIPTION, BADGES, KIND:KEY, CWD, COMMAND.
 # Use IFS-based read so values are never resplit by shell word-splitting
 # (H6 fix). The three `_` placeholders skip columns 1-3.
-IFS=$'\t' read -r _ _ _ KIND_KEY ROW_CWD ROW_CMD <<< "$SELECTED"
+# Tabs are swapped for US (\x1f) first: TAB is IFS whitespace, so a plain
+# `IFS=$'\t' read` merges runs of tabs, and an empty column (a repo without a
+# description, a group header's empty BADGES) shifted every later field —
+# KIND_KEY came back holding the cwd. \x1f is not IFS whitespace, so empty
+# fields survive, and it never occurs inside a row: every column is stripped
+# of (or rejected for) control characters upstream.
+IFS=$'\x1f' read -r _ _ _ KIND_KEY ROW_CWD ROW_CMD <<< "${SELECTED//$'\t'/$'\x1f'}"
 
 if [[ -z "$KIND_KEY" ]]; then
   echo "❌ Could not parse selection" >&2
@@ -303,9 +335,11 @@ fi
 KIND="${KIND_KEY%%:*}"
 KEY="${KIND_KEY#*:}"
 
-# Separator row is a non-actionable divider (empty ROW_CWD/ROW_CMD by design).
+# Separator row is a non-actionable divider (empty ROW_CWD/ROW_CMD by design),
+# and a group header (`launch: false`) is display-only (empty ROW_CMD) — it
+# only gets here when the enter binding above is unavailable (fzf < 0.45).
 # Short-circuit here so the downstream ROW_CMD empty-check doesn't misfire.
-[[ "$KIND" == "separator" ]] && exit 0
+[[ "$KIND" == "separator" || "$KIND" == "group" ]] && exit 0
 
 if [[ -z "$ROW_CMD" ]]; then
   echo "❌ Could not parse selection" >&2
@@ -335,9 +369,9 @@ case "$KIND" in
       exit 1
     fi
     ;;
-  separator)
-    # Defensive: separator should already be short-circuited above. Kept as
-    # a safety net in case row-parse order ever changes.
+  separator|group)
+    # Defensive: separator/group should already be short-circuited above.
+    # Kept as a safety net in case row-parse order ever changes.
     exit 0
     ;;
   *)
@@ -348,7 +382,7 @@ esac
 
 # Path validation (traversal prevention). Must be $HOME itself or a child
 # path ("$HOME"/*): a bare prefix match would also accept sibling dirs like
-# /Users/daiskeEVIL (audit L-1).
+# /Users/xEVIL (audit L-1).
 if [[ "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ]]; then
   echo "⚠️  cwd is outside \$HOME: ${ROW_CWD}" >&2
   echo "Launching in current directory instead." >&2

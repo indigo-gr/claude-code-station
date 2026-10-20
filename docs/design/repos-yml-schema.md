@@ -24,7 +24,7 @@ repos:                        # リポジトリ定義配列（必須、1件以�
 
 | フィールド | 型 | 必須 | デフォルト | 説明 |
 |---|---|:---:|---|---|
-| `name` | string | ✅ | — | 表示名（fzf行に出る、日本語可） |
+| `name` | string | ✅ | — | 一意のキー兼、既定の表示名（fzf行に出る、日本語可）。`label` があれば新規起動行とプレビューは `label` を出す。過去セッションの行は常に `name` |
 | `path` | string | ✅* | — | リポジトリのフルパス。`~` 展開あり |
 | `description` | string | — | `""` | プレビュー補助情報 |
 | `command` | string | — | `defaults.command` or `claude` | 起動コマンド。特殊な場合は丸ごと上書き |
@@ -33,9 +33,11 @@ repos:                        # リポジトリ定義配列（必須、1件以�
 | `disabled` | bool | — | `false` | true ならリストから除外 |
 | `scan` | bool | — | `true` | false なら状態走査をスキップ（非git含む） |
 | `icon` | string | — | `📁` | 表示アイコン（絵文字1文字推奨） |
+| `launch` | bool | — | `true` | false なら表示だけのグループ見出し（行の種類 `group:<name>`）。Enter で起動しない・バッジなし・状態走査しない。`command`/`cwd` は使われない。`path` の中のリポがこの下に並ぶ。真偽値のみ（`"false"` などの文字列はエラー） |
+| `label` | string | — | `""` | 新規起動行・`‹親›` の表示・プレビュー見出しに `name` の代わりに出す名前。表示専用（シェルメタ文字は可、制御文字は表示時に除去）。空・空白だけなら `name` |
 | `custom` | object | — | `{}` | 外部システム連携情報。任意のキー/値ペア（後述） |
 
-\* `path` は `command` に `cwd:` が含まれる特殊ケースを除き必須。
+\* `path` は `command` に `cwd:` が含まれる特殊ケースを除き必須。`launch: false` の項目では常に必須（無いとエラー）。
 
 ### `custom` フィールド（外部システム連携）
 
@@ -107,6 +109,9 @@ repos:
 | `defaults.command`（CCS_CMD/CCR_CMD 由来含む）もロード時に同検証（レビューA-6） | `~/.config/ccs/repos.yml: defaults.command (resolved from defaults.command / CCS_CMD / CCR_CMD) contains shell metacharacter(s): "..."` |
 | `custom` のJSONサイズ 64KB 上限 | `~/.config/ccs/repos.yml: repos[0].custom exceeds 64KB JSON size limit` |
 | `disabled: true` の場合 scan/command 無視 | — |
+| `launch` は真偽値のみ（`Boolean()` で丸めない: `"false"` が true になるのを防ぐ） | `~/.config/ccs/repos.yml: repos[0].launch must be true or false (got "false")` |
+| `launch: false` は `path` 必須 | `~/.config/ccs/repos.yml: repos[0].path is required when launch is false` |
+| `label` は文字列のみ（空の `label:` = YAML の null は未指定扱い） | `~/.config/ccs/repos.yml: repos[0].label must be a string` |
 
 ## 例1: シンプル
 

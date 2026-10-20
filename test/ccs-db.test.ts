@@ -11,6 +11,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type Database from "better-sqlite3";
 import {
   openDb,
   migrate,
@@ -20,6 +21,7 @@ import {
   deleteReposNotIn,
   setMeta,
   getMeta,
+  reposV3Columns,
   CURRENT_SCHEMA_VERSION,
   type DbHandle,
 } from "../bin/ccs-db.ts";
@@ -231,13 +233,161 @@ describe("setMeta / getMeta", () => {
     try {
       const h = openDb(sb.dbPath);
       openHandles.push(h);
-      // Simulate a v1-era cache: drop the v2 artifacts, rewind the version.
-      h.db.exec(`DROP TABLE meta; DELETE FROM schema_version WHERE version = 2;`);
+      // Simulate a v1-era cache: drop the v2/v3 artifacts, rewind the version.
+      h.db.exec(`
+        DROP TABLE meta;
+        ALTER TABLE repos DROP COLUMN launch;
+        ALTER TABLE repos DROP COLUMN label;
+        DELETE FROM schema_version WHERE version >= 2;
+      `);
       assert.equal(getCurrentSchemaVersion(h.db), 1);
       migrate(h.db);
       assert.equal(getCurrentSchemaVersion(h.db), CURRENT_SCHEMA_VERSION);
       setMeta(h.db, "k", "v");
       assert.equal(getMeta(h.db, "k"), "v");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// repos.launch / repos.label (migration v3 — group headers & labels)
+// ---------------------------------------------------------------------------
+
+/** Rewind a freshly migrated DB to schema v2 (drop the v3 columns). */
+function rewindToV2(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE repos DROP COLUMN launch;
+    ALTER TABLE repos DROP COLUMN label;
+    DELETE FROM schema_version WHERE version >= 3;
+  `);
+}
+
+function repoColumns(db: Database.Database): string[] {
+  return (db.prepare(`PRAGMA table_info(repos)`).all() as Array<{ name: string }>)
+    .map((c) => c.name);
+}
+
+describe("migration v3 (repos.launch / repos.label)", () => {
+  test("a fresh DB has the columns; omitted values default to launchable / no label", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      assert.equal(CURRENT_SCHEMA_VERSION, 3);
+      assert.equal(getCurrentSchemaVersion(h.db), 3);
+      const cols = repoColumns(h.db);
+      assert.ok(cols.includes("launch") && cols.includes("label"), cols.join(","));
+      upsertRepo(h.db, baseRepoInsert()); // no launch/label given
+      const [row] = getAllRepos(h.db);
+      assert.equal(row.launch, 1);
+      assert.equal(row.label, "");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("upgrading a v2 DB keeps existing rows and gives them the defaults", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      rewindToV2(h.db);
+      assert.equal(getCurrentSchemaVersion(h.db), 2);
+      // A row written by a v2-era build (explicit v2 column list).
+      h.db
+        .prepare(
+          `INSERT INTO repos (name, path, description, command, cwd, tags_json, icon,
+                              disabled, scan_enabled, custom_json, config_hash)
+           VALUES ('old', '/home/u/old', 'd', 'claude', NULL, '[]', '📁', 0, 1, '{}', 'h')`,
+        )
+        .run();
+      migrate(h.db);
+      assert.equal(getCurrentSchemaVersion(h.db), CURRENT_SCHEMA_VERSION);
+      const [row] = getAllRepos(h.db);
+      assert.equal(row.name, "old");
+      assert.equal(row.description, "d");
+      assert.equal(row.launch, 1);
+      assert.equal(row.label, "");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("upsertRepo round-trips launch/label and updates them on conflict", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      upsertRepo(h.db, baseRepoInsert({ launch: 0, label: "Alpha Group" }));
+      let [row] = getAllRepos(h.db);
+      assert.equal(row.launch, 0);
+      assert.equal(row.label, "Alpha Group");
+      upsertRepo(h.db, baseRepoInsert({ launch: 1, label: "" }));
+      [row] = getAllRepos(h.db);
+      assert.equal(row.launch, 1);
+      assert.equal(row.label, "");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("an older build's v2-shaped INSERT and SELECT still work against a v3 DB", async () => {
+    // Older ccs (<= 0.2.3) name explicit columns in every repos statement, so
+    // a v3 cache must accept their writes (new columns take the defaults)
+    // and serve their reads (new columns are simply not selected).
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      upsertRepo(h.db, baseRepoInsert({ name: "hdr", launch: 0, label: "Header" }));
+      const v2Upsert = h.db.prepare(
+        `INSERT INTO repos (name, path, description, command, cwd, tags_json, icon,
+                            disabled, scan_enabled, custom_json, config_hash,
+                            created_at, updated_at)
+         VALUES (?, '/home/u/x', '', 'claude', NULL, '[]', '📁', 0, 1, '{}', 'h2',
+                 datetime('now'), datetime('now'))
+         ON CONFLICT(name) DO UPDATE SET config_hash = excluded.config_hash`,
+      );
+      v2Upsert.run("legacy"); // new row from an old build
+      v2Upsert.run("hdr"); // old build re-syncing a row a v3 build wrote
+      const legacy = h.db
+        .prepare(
+          `SELECT name, path, description, command, cwd, tags_json, icon,
+                  disabled, scan_enabled, custom_json, config_hash, created_at, updated_at
+           FROM repos ORDER BY name`,
+        )
+        .all() as Array<{ name: string }>;
+      assert.deepEqual(legacy.map((r) => r.name), ["hdr", "legacy"]);
+      const all = getAllRepos(h.db);
+      assert.equal(all.find((r) => r.name === "legacy")!.launch, 1);
+      const hdr = all.find((r) => r.name === "hdr")!;
+      assert.deepEqual([hdr.launch, hdr.label], [0, "Header"], "v3 values survive");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("reposV3Columns selects the real columns on v3 and synthesizes defaults on v2", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      upsertRepo(h.db, baseRepoInsert({ launch: 0, label: "L" }));
+      assert.equal(reposV3Columns(h.db, "r"), "r.launch, r.label");
+      assert.equal(reposV3Columns(h.db), "launch, label");
+      let row = h.db
+        .prepare(`SELECT r.name, ${reposV3Columns(h.db, "r")} FROM repos r`)
+        .get() as { launch: number; label: string };
+      assert.deepEqual([row.launch, row.label], [0, "L"]);
+
+      rewindToV2(h.db);
+      assert.equal(reposV3Columns(h.db, "r"), "1 AS launch, '' AS label");
+      row = h.db
+        .prepare(`SELECT r.name, ${reposV3Columns(h.db, "r")} FROM repos r`)
+        .get() as { launch: number; label: string };
+      assert.deepEqual([row.launch, row.label], [1, ""]);
     } finally {
       await sb.cleanup();
     }
