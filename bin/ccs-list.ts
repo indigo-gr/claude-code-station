@@ -147,6 +147,7 @@ interface RepoRowFull {
   scan_enabled: number;
   launch: number;
   label: string;
+  lead: number;
   custom_json: string;
   // stats (LEFT JOINed, may be null)
   is_git: number | null;
@@ -224,6 +225,14 @@ interface GroupedRepo {
 // Children are drawn as a tree: `├ ` for a sibling with more after it, `└ `
 // for the last one, and for every ancestor level below the top a `│ ` rail
 // while that ancestor still has later siblings (blank once it was the last).
+//
+// A child marked `lead: true` (the group's director / coordinator) comes
+// first among its siblings; the rest keep name order. Top-level repos are
+// never reordered — a lead only means something inside a group.
+function leadFirst<T extends { lead?: number }>(kids: T[]): T[] {
+  return [...kids.filter((k) => k.lead === 1), ...kids.filter((k) => k.lead !== 1)];
+}
+
 function groupRepos(repos: RepoRowFull[]): GroupedRepo[] {
   const children = new Map<RepoRowFull | null, RepoRowFull[]>();
   for (const r of repos) {
@@ -234,7 +243,7 @@ function groupRepos(repos: RepoRowFull[]): GroupedRepo[] {
   }
   const out: GroupedRepo[] = [];
   const walk = (parent: RepoRowFull | null, rails: string): void => {
-    const kids = children.get(parent) ?? [];
+    const kids = parent ? leadFirst(children.get(parent) ?? []) : (children.get(parent) ?? []);
     kids.forEach((r, i) => {
       const last = i === kids.length - 1;
       const prefix = parent ? `  ${rails}${last ? "└ " : "├ "}` : "";
@@ -385,7 +394,7 @@ function simpleSections(repos: RepoRowFull[]): {
     out: SimpleNode[],
   ): void => {
     out.push({ repo: node, parent, depth });
-    for (const kid of children.get(node) ?? []) walk(kid, node, depth + 1, out);
+    for (const kid of leadFirst(children.get(node) ?? [])) walk(kid, node, depth + 1, out);
   };
   const groups: SimpleNode[] = [];
   const projects: SimpleNode[] = [];
@@ -395,13 +404,22 @@ function simpleSections(repos: RepoRowFull[]): {
   return { groups, projects };
 }
 
-/** The icon as drawn in the simple look: control characters stripped. */
-function simpleIcon(icon: string): string {
-  return truncate(icon || "", 8) || "📁";
+/** Marks a group's lead entry (repos.yml `lead: true`) in the simple look. */
+const LEAD_ICON = "👑";
+
+/**
+ * The icon as drawn in the simple look: control characters stripped, a lead
+ * shown as 👑, and always two columns wide — an emoji without emoji
+ * presentation (🛰, ✍️, 🛠️) is one column for fzf and the terminal, and its
+ * glyph would otherwise run into the name.
+ */
+function simpleIcon(repo: { icon: string; lead?: number }): string {
+  const icon = repo.lead === 1 ? LEAD_ICON : truncate(repo.icon || "", 8) || "📁";
+  return padDisplay(icon, 2);
 }
 
 function simpleHead(n: SimpleNode): string {
-  return `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(n.repo.icon)} ${repoDisplayName(n.repo)}`;
+  return `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(n.repo)} ${repoDisplayName(n.repo)}`;
 }
 
 function simpleRepoRow(n: SimpleNode, nameCol: number): string {
@@ -413,7 +431,7 @@ function simpleRepoRow(n: SimpleNode, nameCol: number): string {
   // plain text, so the styling does not shift the description column.
   const styled =
     r.launch === 0
-      ? `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(r.icon)} ${BOLD}${displayName}${RESET}${gap}`
+      ? `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(r)} ${BOLD}${displayName}${RESET}${gap}`
       : `${head}${gap}`;
   const desc = truncate(r.description || "", DESC_MAX);
   const parentName = n.parent ? repoDisplayName(n.parent) : null;

@@ -238,6 +238,7 @@ describe("setMeta / getMeta", () => {
         DROP TABLE meta;
         ALTER TABLE repos DROP COLUMN launch;
         ALTER TABLE repos DROP COLUMN label;
+        ALTER TABLE repos DROP COLUMN lead;
         DELETE FROM schema_version WHERE version >= 2;
       `);
       assert.equal(getCurrentSchemaVersion(h.db), 1);
@@ -255,12 +256,21 @@ describe("setMeta / getMeta", () => {
 // repos.launch / repos.label (migration v3 — group headers & labels)
 // ---------------------------------------------------------------------------
 
-/** Rewind a freshly migrated DB to schema v2 (drop the v3 columns). */
+/** Rewind a freshly migrated DB to schema v2 (drop the v3 and v4 columns). */
 function rewindToV2(db: Database.Database): void {
   db.exec(`
     ALTER TABLE repos DROP COLUMN launch;
     ALTER TABLE repos DROP COLUMN label;
+    ALTER TABLE repos DROP COLUMN lead;
     DELETE FROM schema_version WHERE version >= 3;
+  `);
+}
+
+/** Rewind a freshly migrated DB to schema v3 (drop the v4 column). */
+function rewindToV3(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE repos DROP COLUMN lead;
+    DELETE FROM schema_version WHERE version >= 4;
   `);
 }
 
@@ -275,8 +285,8 @@ describe("migration v3 (repos.launch / repos.label)", () => {
     try {
       const h = openDb(sb.dbPath);
       openHandles.push(h);
-      assert.equal(CURRENT_SCHEMA_VERSION, 3);
-      assert.equal(getCurrentSchemaVersion(h.db), 3);
+      assert.equal(CURRENT_SCHEMA_VERSION, 4);
+      assert.equal(getCurrentSchemaVersion(h.db), 4);
       const cols = repoColumns(h.db);
       assert.ok(cols.includes("launch") && cols.includes("label"), cols.join(","));
       upsertRepo(h.db, baseRepoInsert()); // no launch/label given
@@ -375,15 +385,15 @@ describe("migration v3 (repos.launch / repos.label)", () => {
       const h = openDb(sb.dbPath);
       openHandles.push(h);
       upsertRepo(h.db, baseRepoInsert({ launch: 0, label: "L" }));
-      assert.equal(reposV3Columns(h.db, "r"), "r.launch, r.label");
-      assert.equal(reposV3Columns(h.db), "launch, label");
+      assert.equal(reposV3Columns(h.db, "r"), "r.launch, r.label, r.lead");
+      assert.equal(reposV3Columns(h.db), "launch, label, lead");
       let row = h.db
         .prepare(`SELECT r.name, ${reposV3Columns(h.db, "r")} FROM repos r`)
         .get() as { launch: number; label: string };
       assert.deepEqual([row.launch, row.label], [0, "L"]);
 
       rewindToV2(h.db);
-      assert.equal(reposV3Columns(h.db, "r"), "1 AS launch, '' AS label");
+      assert.equal(reposV3Columns(h.db, "r"), "1 AS launch, '' AS label, 0 AS lead");
       row = h.db
         .prepare(`SELECT r.name, ${reposV3Columns(h.db, "r")} FROM repos r`)
         .get() as { launch: number; label: string };
@@ -583,6 +593,57 @@ describe("foreign key cascades", () => {
 
       const sess = db.prepare(`SELECT repo_name FROM sessions`).get() as { repo_name: string | null };
       assert.equal(sess.repo_name, null, "sessions.repo_name should be set NULL");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// repos.lead (migration v4 — a group's lead entry)
+// ---------------------------------------------------------------------------
+
+describe("migration v4 (repos.lead)", () => {
+  test("a fresh DB has the column; an omitted lead defaults to 0", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      assert.ok(repoColumns(h.db).includes("lead"));
+      upsertRepo(h.db, baseRepoInsert());
+      assert.equal(getAllRepos(h.db)[0].lead, 0);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("upgrading a v3 DB keeps rows (launch/label intact) and gives lead its default", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      upsertRepo(h.db, baseRepoInsert({ launch: 0, label: "Group" }));
+      rewindToV3(h.db);
+      assert.equal(getCurrentSchemaVersion(h.db), 3);
+      assert.equal(reposV3Columns(h.db), "launch, label, 0 AS lead");
+      migrate(h.db);
+      assert.equal(getCurrentSchemaVersion(h.db), 4);
+      const [row] = getAllRepos(h.db);
+      assert.deepEqual([row.launch, row.label, row.lead], [0, "Group", 0]);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("upsertRepo round-trips lead and updates it on conflict", async () => {
+    const sb = await makeDbSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      openHandles.push(h);
+      upsertRepo(h.db, baseRepoInsert({ lead: 1 }));
+      assert.equal(getAllRepos(h.db)[0].lead, 1);
+      upsertRepo(h.db, baseRepoInsert({ lead: 0 }));
+      assert.equal(getAllRepos(h.db)[0].lead, 0);
     } finally {
       await sb.cleanup();
     }

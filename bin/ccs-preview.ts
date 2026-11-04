@@ -72,6 +72,7 @@ interface RepoView {
   description: string;
   icon: string;
   label: string;
+  lead?: number;
   tags_json: string;
   custom_json: string;
 }
@@ -83,6 +84,12 @@ interface GroupMemberView {
   icon: string;
   launch: number;
   label: string;
+  lead?: number;
+}
+
+/** A group's lead entry (`lead: true`) first, the rest in their given order — as in the list. */
+function leadFirst<T extends { lead?: number }>(rows: T[]): T[] {
+  return [...rows.filter((r) => r.lead === 1), ...rows.filter((r) => r.lead !== 1)];
 }
 
 interface StatsView {
@@ -398,8 +405,8 @@ function renderGroupPreview(name: string, cwd: string): void {
     console.log("Pick one of the entries below to start a session.");
     console.log("");
 
-    const entries = listed.filter(
-      (r) => r !== group && findParentRepo(r, listed) === group,
+    const entries = leadFirst(
+      listed.filter((r) => r !== group && findParentRepo(r, listed) === group),
     );
     console.log(divider(`Entries (${entries.length})`));
     if (entries.length === 0) {
@@ -530,6 +537,10 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
     const folderExists = folder ? existsSync(folder) : false;
 
     cardTitle(`✨ ${repoDisplayName(repo)} で、新しく Claude Code を始めます`);
+    if (repo.lead === 1) {
+      console.log("  👑 このグループの統括です");
+      console.log("");
+    }
     if (repo.description) {
       console.log(`  ${truncate(repo.description, 200)}`);
       console.log("");
@@ -624,8 +635,8 @@ function renderSimpleGroupCard(name: string): void {
     console.log("  ここは見出しです。開くときは、下のプロジェクトをえらんでください");
     console.log("");
 
-    const entries = listed.filter(
-      (r) => r !== group && findParentRepo(r, listed) === group,
+    const entries = leadFirst(
+      listed.filter((r) => r !== group && findParentRepo(r, listed) === group),
     );
     if (entries.length === 0) {
       console.log("  このグループには、まだプロジェクトがありません");
@@ -636,8 +647,14 @@ function renderSimpleGroupCard(name: string): void {
       `中のプロジェクト（${entries.length}）`,
       entries.map((r) => {
         const desc = r.description ? `  ${dim(truncate(r.description, 40))}` : "";
-        const tag = r.launch === 0 ? `  ${dim("（グループ）")}` : "";
-        return `${truncate(r.icon || "", 8) || "📁"} ${repoDisplayName(r)}${desc}${tag}`;
+        const tag =
+          r.launch === 0
+            ? `  ${dim("（グループ）")}`
+            : r.lead === 1
+              ? `  ${dim("（統括）")}`
+              : "";
+        const icon = r.lead === 1 ? "👑" : truncate(r.icon || "", 8) || "📁";
+        return `${icon} ${repoDisplayName(r)}${desc}${tag}`;
       }),
     );
   });

@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-11-04
+
+### Added
+- **`lead: true`** — marks the entry that leads its group (a director or coordinator). It is listed first among its siblings instead of in name order — in both looks, in the list and in the group preview — and the simple look draws it with 👑 (its card says "👑 このグループの統括です", the group card tags it （統括）). Must be a real boolean. Stored in the cache as `repos.lead` (**schema v4**, plain `ADD COLUMN ... DEFAULT 0`; readonly readers synthesize the default on a v3 cache, and 0.3.0 keeps working against a v4 cache). Without `lead`, every order is unchanged.
+
+### Fixed
+- **Simple look: emoji widths** — the name column was padded counting an emoji that has no emoji presentation (🛰, ✍️, 🛠️, ✴️ — VS16 included) as two columns, while fzf and wcwidth count it as one, so those rows' descriptions started one column left and the glyph ran into the name. Widths now follow wcwidth (2 only for CJK and `Emoji_Presentation`), and the icon cell is always padded to two columns.
+
 ## [0.3.0] — 2026-11-04
 
 ### Added

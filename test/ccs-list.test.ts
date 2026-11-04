@@ -1141,3 +1141,77 @@ describe("ccs-list --ui=simple — display hardening", { skip: !tsxAvailable() &
     }
   });
 });
+
+describe("lead: true (v0.3.1)", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  /** Studio group whose lead (hq) sorts after app by name. */
+  function seedLead(db: Database.Database): void {
+    seedStudio(db);
+    upsertRepo(db, { ...repoRow("Studio-hq", "/home/u/studio/hq"), icon: "🎬", description: "統括 hq/", label: "Studio", lead: 1 });
+    upsertRepo(db, { ...repoRow("Studio-zz", "/home/u/studio/zz"), icon: "🛰", description: "衛星", label: "Zz" });
+  }
+
+  test("simple: the lead is first inside its group and drawn with 👑; a 1-column icon is padded to 2", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedLead(h.db);
+      h.close();
+      const rows = cols(runList(sb, ["--ui=simple", "--repos-only"]).stdout);
+      assert.deepEqual(rows.map((r) => r[3]), [
+        "separator:-",
+        "group:Studio",
+        "new:Studio-hq",
+        "new:Studio-app",
+        "new:Studio-web",
+        "new:Studio-zz",
+      ]);
+      assert.match(plain(rows[2][0]), /^ {3}👑 Studio\s+統括 hq\//);
+      // 🛰 is one column for fzf: it gets a space so the name does not touch it,
+      // and the description starts in the same column as the other rows.
+      const zz = plain(rows[5][0]);
+      assert.match(zz, /^ {3}🛰 {2}Zz/);
+      const descCol = (l: string, d: string) => {
+        let w = 0;
+        for (const ch of l.slice(0, l.indexOf(d))) w += /\p{Emoji_Presentation}|[　-鿿]/u.test(ch) ? 2 : ch === "️" ? 0 : 1;
+        return w;
+      };
+      assert.equal(descCol(zz, "衛星"), descCol(plain(rows[3][0]), "アプリ"));
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("classic: the lead is first among its siblings too, icon unchanged; no lead = name order as before", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedLead(h.db);
+      h.close();
+      const rows = cols(runList(sb, ["--repos-only"]).stdout);
+      assert.deepEqual(rows.map((r) => r[3]), ["group:Studio", "new:Studio-hq", "new:Studio-app", "new:Studio-web", "new:Studio-zz"]);
+      assert.match(plain(rows[1][0]), /^ {2}├ 🎬 Studio/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("cards: the group card lists the lead first as 👑 （統括）; the lead's own card says so", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedLead(h.db);
+      h.close();
+      const group = runPreviewSimple(sb, "group:Studio", "/home/u/studio");
+      const entries = group.split("\n").filter((l) => /^ {5}\S/.test(l)).map((l) => l.trim());
+      assert.match(entries[0], /^👑 Studio .*（統括）$/);
+      assert.match(entries[1], /App team/);
+      const card = runPreviewSimple(sb, "new:Studio-hq", "/home/u/studio/hq");
+      assert.match(card, /👑 このグループの統括です/);
+      const classic = runPreview(sb, "group:Studio", "/home/u/studio");
+      const classicEntries = classic.split("\n").filter((l) => l.startsWith("  ")).map((l) => l.trim().split(/\s+/).slice(0, 2).join(" "));
+      assert.equal(classicEntries[0], "🎬 Studio", "classic preview: lead first, own icon");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});

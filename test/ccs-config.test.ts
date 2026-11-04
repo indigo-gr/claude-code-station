@@ -1067,3 +1067,33 @@ describe("loadConfig() — defaults.ui", () => {
     }
   });
 });
+
+describe("loadConfig() — lead", () => {
+  async function load(yml: (home: string) => string) {
+    const sb = await makeSandbox();
+    const restore = applyEnv({ HOME: sb.home, XDG_CONFIG_HOME: sb.xdgConfig, XDG_CACHE_HOME: sb.xdgCache });
+    try {
+      await writeYml(sb.reposYml, yml(sb.home));
+      const { loadConfig, ConfigError } = await freshImport();
+      try {
+        return { cfg: loadConfig(), err: null as Error | null, ConfigError };
+      } catch (e) {
+        return { cfg: null, err: e as Error, ConfigError };
+      }
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  }
+
+  test("defaults to false; true is kept", async () => {
+    const { cfg } = await load((h) => `version: 1\nrepos:\n  - name: a\n    path: ${h}\n  - name: b\n    path: ${h}\n    lead: true\n`);
+    assert.deepEqual(cfg!.repos.map((r) => r.lead), [false, true]);
+  });
+
+  test("must be a real boolean", async () => {
+    const { err, ConfigError } = await load((h) => `version: 1\nrepos:\n  - name: a\n    path: ${h}\n    lead: "true"\n`);
+    assert.ok(err instanceof ConfigError);
+    assert.match(err!.message, /repos\[0\]\.lead must be true or false/);
+  });
+});

@@ -13,7 +13,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export interface DbHandle {
   db: Database.Database;
@@ -41,6 +41,8 @@ export interface RepoRow {
   launch: 0 | 1;
   /** schema v3: repos.yml `label` ("" = display `name`). */
   label: string;
+  /** schema v4: 1 = the group's lead (repos.yml `lead: true`) — listed first among its siblings. */
+  lead: 0 | 1;
   custom_json: string;
   config_hash: string;
   created_at: string;
@@ -176,11 +178,19 @@ ALTER TABLE repos ADD COLUMN launch INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE repos ADD COLUMN label  TEXT    NOT NULL DEFAULT '';
 `;
 
+// v4: repos.yml `lead` (the group's lead entry, listed first among its
+// siblings). Same plain ADD COLUMN pattern as v3: older builds keep working
+// against a v4 cache, and readonly readers meeting a v3 cache get the default
+// through reposV3Columns().
+const MIGRATION_V4 = `
+ALTER TABLE repos ADD COLUMN lead INTEGER NOT NULL DEFAULT 0;
+`;
+
 const migrations: Migration[] = [
   { version: 1, up: MIGRATION_V1 },
   { version: 2, up: MIGRATION_V2 },
   { version: 3, up: MIGRATION_V3 },
-  // future: { version: 4, up: `...` },
+  { version: 4, up: MIGRATION_V4 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -308,10 +318,10 @@ export function openDb(
 // Repo helpers (used by ccs-scan.ts to sync repos.yml -> DB)
 // ---------------------------------------------------------------------------
 
-// launch/label (schema v3) are optional and default to a plain launchable
-// entry, matching the column defaults.
-type RepoInsert = Omit<RepoRow, "created_at" | "updated_at" | "launch" | "label"> &
-  Partial<Pick<RepoRow, "launch" | "label">>;
+// launch/label (schema v3) and lead (v4) are optional and default to a plain
+// launchable entry, matching the column defaults.
+type RepoInsert = Omit<RepoRow, "created_at" | "updated_at" | "launch" | "label" | "lead"> &
+  Partial<Pick<RepoRow, "launch" | "label" | "lead">>;
 
 export function upsertRepo(db: Database.Database, row: RepoInsert): void {
   // Update updated_at only when config_hash changes; created_at is preserved
@@ -319,11 +329,11 @@ export function upsertRepo(db: Database.Database, row: RepoInsert): void {
   const stmt = db.prepare(`
     INSERT INTO repos (
       name, path, description, command, cwd, tags_json, icon,
-      disabled, scan_enabled, launch, label, custom_json, config_hash,
+      disabled, scan_enabled, launch, label, lead, custom_json, config_hash,
       created_at, updated_at
     ) VALUES (
       @name, @path, @description, @command, @cwd, @tags_json, @icon,
-      @disabled, @scan_enabled, @launch, @label, @custom_json, @config_hash,
+      @disabled, @scan_enabled, @launch, @label, @lead, @custom_json, @config_hash,
       datetime('now'), datetime('now')
     )
     ON CONFLICT(name) DO UPDATE SET
@@ -337,6 +347,7 @@ export function upsertRepo(db: Database.Database, row: RepoInsert): void {
       scan_enabled = excluded.scan_enabled,
       launch       = excluded.launch,
       label        = excluded.label,
+      lead         = excluded.lead,
       custom_json  = excluded.custom_json,
       config_hash  = excluded.config_hash,
       updated_at   = CASE
@@ -345,14 +356,14 @@ export function upsertRepo(db: Database.Database, row: RepoInsert): void {
         ELSE repos.updated_at
       END
   `);
-  stmt.run({ ...row, launch: row.launch ?? 1, label: row.label ?? "" });
+  stmt.run({ ...row, launch: row.launch ?? 1, label: row.label ?? "", lead: row.lead ?? 0 });
 }
 
 export function getAllRepos(db: Database.Database): RepoRow[] {
   return db
     .prepare(
       `SELECT name, path, description, command, cwd, tags_json, icon,
-              disabled, scan_enabled, launch, label, custom_json, config_hash,
+              disabled, scan_enabled, launch, label, lead, custom_json, config_hash,
               created_at, updated_at
        FROM repos
        ORDER BY name`,
@@ -361,8 +372,8 @@ export function getAllRepos(db: Database.Database): RepoRow[] {
 }
 
 /**
- * SELECT-list fragment for the schema-v3 repos columns, `launch, label`,
- * qualified with `alias` when given.
+ * SELECT-list fragment for the repos columns added after v2 — `launch, label`
+ * (v3) and `lead` (v4) — qualified with `alias` when given.
  *
  * ccs-list and ccs-preview open the DB readonly+skipMigrate, so they can meet
  * a v2 cache that predates migration v3 (`ccs --no-scan` right after an
@@ -379,6 +390,7 @@ export function reposV3Columns(db: Database.Database, alias = ""): string {
   return [
     have.has("launch") ? `${q}launch` : `1 AS launch`,
     have.has("label") ? `${q}label` : `'' AS label`,
+    have.has("lead") ? `${q}lead` : `0 AS lead`,
   ].join(", ");
 }
 

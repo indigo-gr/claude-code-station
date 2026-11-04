@@ -164,6 +164,7 @@ For a parent folder that should only hold its children — never be launched its
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `launch` | bool | `true` | `false` = display-only **group header**: listed with its children under it, but Enter does not launch it (`command`/`cwd` are ignored). `path` is still required — it decides which repos nest under the header. Must be a real boolean (`"false"` in quotes is an error). / `false` で表示だけの見出し行になる（Enter で起動しない。`command`/`cwd` は使われない）。`path` は必須（どの子がこの下に並ぶかを決める）。引用符付きの `"false"` はエラー |
+| `lead` | bool | `false` | `true` = the group's lead (a director / coordinator): listed **first among its siblings** instead of in name order, and drawn with 👑 in the simple look. Must be a real boolean. / `true` でグループの統括。兄弟の中で一番上に並び、やさしい見た目では 👑 で出る |
 | `label` | string | `""` (show `name`) | Name shown in the repo row and the preview title instead of `name`. `name` stays the unique key (it is still what past-session rows show), so two entries may share a label. Display-only: control characters are stripped. / 行とプレビューの見出しに `name` の代わりに出す名前。一意のキーは `name` のまま（過去セッションの行も `name` で出る）なので、同じ `label` を複数の項目に付けてもよい。表示専用で、制御文字は取り除かれる |
 
 ```yaml
@@ -208,6 +209,7 @@ defaults:
 ```
 
 - **Order** — groups first (`launch: false` headers with everything inside them), then the other projects, then past conversations, each under a heading row. Nested entries are indented instead of drawn as a tree, and every row inside a group ends with the group's name (dim), so **typing a group's name narrows the list to that group**, its projects and their conversations. The list keeps this order while you type. / 並びはグループ（`launch: false` の見出しと中身）→ ほかのプロジェクト → 前の会話。グループの名前を打つと、そのグループの中身だけに絞れる
+- **Leads first** — an entry with `lead: true` (the group's director / coordinator) is the first row inside its group, marked 👑. / `lead: true` の席はグループの一番上に 👑 で出る
 - **Rows** — name and description only. Branch / uncommitted / handoff / integration badges move into the preview "card", and times read like speech (たった今・3 時間前・きのう・3 日前・10月25日). / バッジは右の欄のカードへ。時刻は「3 時間前」「きのう」
 - **Guidance** — the guide line shows only Enter / ↑↓ / Esc (`^Y` `^I` `^R` `^D` still work). Enter on a heading, a group header or an empty result says why nothing opened; Esc says how to come back; with nothing to open, ccs prints how to add projects instead of an empty picker. A broken `repos.yml` is flagged in the frame and explained after the picker closes. / 見出しや空振りで Enter を押すと理由が出る。Esc の後・空の時・設定の誤りも 1 行で案内する
 - **Narrow terminals** — under ~100 columns the preview moves below the list (80x24 keeps 8 list rows). / 狭い端末では右の欄が下に回る

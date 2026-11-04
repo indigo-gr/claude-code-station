@@ -230,7 +230,6 @@ const WIDE_RANGES: [number, number][] = [
   [0xfe30, 0xfe4f], // CJK compatibility forms
   [0xff00, 0xff60], // Fullwidth forms
   [0xffe0, 0xffe6],
-  [0x1f300, 0x1faff], // Emoji & pictographs
   [0x20000, 0x3fffd], // CJK Ext B+
 ];
 
@@ -241,18 +240,21 @@ function isWide(cp: number): boolean {
   return false;
 }
 
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
+
 /**
- * Approximate terminal column width of plain (ANSI-free) text: CJK and
- * emoji count 2, combining marks / ZWJ / variation selectors 0, and a narrow
- * symbol followed by VS16 (U+FE0F, emoji presentation) counts 2. Used only to
- * pad the simple UI's name column; a terminal that disagrees on an exotic
- * code point shifts the description by a column, nothing else.
+ * Terminal column width of plain (ANSI-free) text, the way wcwidth and fzf
+ * count it: CJK and emoji with emoji presentation (🧠 🎬 👑) count 2;
+ * combining marks, ZWJ and variation selectors count 0; everything else 1 —
+ * including symbols that only become emoji with VS16 (✍️ 🛠️ ✴️) and
+ * text-presentation pictographs (🛰). Counting those as 2 (what some
+ * terminals draw) put the description one column left of fzf's own layout.
+ * Used only to pad the simple UI's columns.
  */
 export function displayWidth(s: string): number {
-  const cps = Array.from(s, (c) => c.codePointAt(0) ?? 0);
   let w = 0;
-  for (let i = 0; i < cps.length; i++) {
-    const cp = cps[i];
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0;
     if (
       (cp >= 0x0300 && cp <= 0x036f) ||
       cp === 0x200d ||
@@ -260,11 +262,7 @@ export function displayWidth(s: string): number {
     ) {
       continue;
     }
-    if (isWide(cp) || cps[i + 1] === 0xfe0f) {
-      w += 2;
-    } else {
-      w += 1;
-    }
+    w += isWide(cp) || EMOJI_PRESENTATION.test(ch) ? 2 : 1;
   }
   return w;
 }

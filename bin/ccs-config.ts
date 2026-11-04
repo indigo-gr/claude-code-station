@@ -39,6 +39,8 @@ export interface RepoEntry {
   launch: boolean;
   /** Display name for the NEW row / preview ("" = show `name`). */
   label: string;
+  /** true = the group's lead: listed first among its siblings (👑 in ui: simple). */
+  lead: boolean;
   custom: Record<string, unknown>;
   configHash: string;
 }
@@ -82,6 +84,7 @@ const KNOWN_REPO_KEYS = new Set([
   "icon",
   "launch",
   "label",
+  "lead",
   "custom",
 ]);
 
@@ -412,6 +415,19 @@ function resolveRepoEntry(
     label = raw.label;
   }
 
+  // lead — the entry that leads its group (a director, a coordinator): listed
+  // first among its siblings, and marked 👑 in the simple look. Strictly
+  // typed like `launch`, so a quoted "false" cannot turn into true.
+  let lead = false;
+  if (raw.lead !== undefined) {
+    if (typeof raw.lead !== "boolean") {
+      throw new ConfigError(
+        `${reposYmlPath}: repos[${index}].lead must be true or false (got ${JSON.stringify(raw.lead)})`,
+      );
+    }
+    lead = raw.lead;
+  }
+
   // tags
   let tags: string[] = [];
   if (raw.tags !== undefined) {
@@ -460,6 +476,7 @@ function resolveRepoEntry(
     icon,
     launch,
     label,
+    lead,
     custom,
     configHash: hashEntry(raw),
   };

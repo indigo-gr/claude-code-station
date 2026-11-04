@@ -148,6 +148,7 @@ function syncReposToDb(
         scan_enabled: r.scan ? 1 : 0,
         launch: r.launch ? 1 : 0,
         label: r.label,
+        lead: r.lead ? 1 : 0,
         custom_json: JSON.stringify(r.custom),
         config_hash: r.configHash,
       });
