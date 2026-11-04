@@ -40,6 +40,7 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 
 - [Node.js](https://nodejs.org/) **20+**
 - [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023). With **0.45+** Enter on a group header (`launch: false`) keeps the list open; on older fzf it just closes ccs without launching anything / 0.45 以上なら、グループ見出しの上で Enter を押してもリストは開いたまま（それより古い fzf では何も起動せずに閉じる）
+  - The friendlier look (`ui: simple`, below) needs **fzf ≥ 0.61.0** (`--ghost`; the frame and labels need 0.58+). On an older fzf ccs opens the classic look and says so in one line / やさしい見た目（`ui: simple`）は fzf 0.61.0 以上。古い fzf ではいつもの見た目で開き、1 行で知らせる
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
 - [tsx](https://github.com/privatenumber/tsx) — TypeScript runner. **Bundled** as a package dependency; a global `tsx` (`npm install -g tsx`) is only needed for the bare-checkout workflow. / npmインストール時は同梱されるため、グローバルtsxは checkout 直接運用時のみ必要
 
@@ -196,6 +197,35 @@ repos:
   └ 🌐 Web team  ‹Studio› │    Website web/
 ```
 
+### Friendlier look (`ui: simple`) / やさしい見た目
+
+For people who are new to the terminal, `defaults.ui: simple` switches ccs to a full-screen look with rounded frames and plain Japanese words. The default (`classic`) does not change. / ターミナルに慣れていない人向けに、`defaults.ui: simple` で全画面・角の丸い枠・日本語の言葉の見た目に切り替わる。既定（`classic`）は変わらない。
+
+```yaml
+version: 1
+defaults:
+  ui: simple        # or classic (default). Any other value is an error
+```
+
+- **Order** — groups first (`launch: false` headers with everything inside them), then the other projects, then past conversations, each under a heading row. Nested entries are indented instead of drawn as a tree, and every row inside a group ends with the group's name (dim), so **typing a group's name narrows the list to that group**, its projects and their conversations. The list keeps this order while you type. / 並びはグループ（`launch: false` の見出しと中身）→ ほかのプロジェクト → 前の会話。グループの名前を打つと、そのグループの中身だけに絞れる
+- **Rows** — name and description only. Branch / uncommitted / handoff / integration badges move into the preview "card", and times read like speech (たった今・3 時間前・きのう・3 日前・10月25日). / バッジは右の欄のカードへ。時刻は「3 時間前」「きのう」
+- **Guidance** — the guide line shows only Enter / ↑↓ / Esc (`^Y` `^I` `^R` `^D` still work). Enter on a heading, a group header or an empty result says why nothing opened; Esc says how to come back; with nothing to open, ccs prints how to add projects instead of an empty picker. A broken `repos.yml` is flagged in the frame and explained after the picker closes. / 見出しや空振りで Enter を押すと理由が出る。Esc の後・空の時・設定の誤りも 1 行で案内する
+- **Narrow terminals** — under ~100 columns the preview moves below the list (80x24 keeps 8 list rows). / 狭い端末では右の欄が下に回る
+- **Override per launch** — `ccs --ui=simple` / `ccs --ui=classic`, or `CCS_UI=simple|classic` (the flag wins over the variable, the variable over `repos.yml`). / 起動ごとの切り替えは `--ui=` か `CCS_UI`
+
+The list part of the screen (the frame around it carries the labels Claude Code をはじめる / さがす / えらぶ / 中身, and the right-hand card explains the focused row):
+
+```
+──────── グループ ────────
+🎬 Studio          Production team
+   📱 App team     Mobile app/  （Studio）
+   🌐 Web team     Website web/  （Studio）
+──────── プロジェクト ────────
+📁 notes           Daily notes
+──────── 前の会話のつづき ────────
+💬 3 時間前    Studio・Web team  Make the top headline bigger
+```
+
 ### Preview pane sample / プレビュー表示例
 
 ```
@@ -224,6 +254,7 @@ Notion:   ✅ abc123
 | `--resume` | Only past sessions / 再開行のみ |
 | `--refresh` | Force DB rebuild before showing list / 走査を強制してから表示 |
 | `--no-scan` | Skip implicit pre-scan (use stale DB) / 事前走査をスキップ |
+| `--ui=simple` / `--ui=classic` | Friendlier look / classic look for this launch (wins over `CCS_UI` and `defaults.ui`) / この起動だけ見た目を切り替える |
 | `--help` / `-h` | Help / ヘルプ |
 | `--version` / `-v` | Version / バージョン |
 | _anything else_ | Passed through to the launched command / 起動コマンドへパススルー |

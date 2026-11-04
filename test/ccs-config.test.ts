@@ -993,3 +993,77 @@ describe("loadConfig() — launch / label", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// defaults.ui (v0.3.0)
+// ---------------------------------------------------------------------------
+
+describe("loadConfig() — defaults.ui", () => {
+  async function withYml(
+    yml: (home: string) => string,
+    fn: (mod: Awaited<ReturnType<typeof freshImport>>) => void,
+  ): Promise<void> {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      await writeYml(sb.reposYml, yml(sb.home));
+      fn(await freshImport());
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  }
+  const repos = (home: string) => `repos:\n  - name: a\n    path: ${home}\n`;
+
+  test("absent (or no defaults block at all) means classic", async () => {
+    await withYml((h) => `version: 1\n${repos(h)}`, ({ loadConfig }) => {
+      assert.equal(loadConfig().defaults.ui, "classic");
+    });
+    await withYml((h) => `version: 1\ndefaults:\n  command: claude\n${repos(h)}`, ({ loadConfig }) => {
+      assert.equal(loadConfig().defaults.ui, "classic");
+    });
+  });
+
+  test("simple and classic are accepted", async () => {
+    for (const ui of ["simple", "classic"]) {
+      await withYml((h) => `version: 1\ndefaults:\n  ui: ${ui}\n${repos(h)}`, ({ loadConfig }) => {
+        assert.equal(loadConfig().defaults.ui, ui);
+      });
+    }
+  });
+
+  test("any other value fails loudly instead of falling back", async () => {
+    for (const bad of ["Simple", "friendly", "true", "[simple]"]) {
+      await withYml((h) => `version: 1\ndefaults:\n  ui: ${bad}\n${repos(h)}`, ({ loadConfig, ConfigError }) => {
+        assert.throws(() => loadConfig(), (e: unknown) => {
+          assert.ok(e instanceof ConfigError);
+          assert.match((e as Error).message, /defaults\.ui must be one of classic \/ simple/);
+          return true;
+        });
+      });
+    }
+  });
+
+  test("the first-run template mentions the setting, commented out", async () => {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    });
+    try {
+      const { ensureConfigDir } = await freshImport();
+      ensureConfigDir();
+      const { readFile } = await import("node:fs/promises");
+      const tpl = await readFile(sb.reposYml, "utf-8");
+      assert.match(tpl, /^ {2}# ui: simple/m);
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});

@@ -14,6 +14,15 @@
  *   --sessions-only   only RESUME session rows
  *   (default)         NEW first (alpha, nested repos in a tree under their
  *                     parent), then RESUME (last_activity_at DESC)
+ *
+ * Look (`--ui=`):
+ *   classic (default) the rows above, byte-for-byte as before v0.3.0
+ *   simple            the friendly look (Japanese): groups (`launch: false`
+ *                     headers and what is inside them) first, then the other
+ *                     projects, then past conversations, each under a heading
+ *                     row; no badge column, no tree glyphs, plain-word times
+ *
+ *   --print-ui        print the `defaults.ui` the last scan stored, then exit
  */
 
 import { homedir } from "node:os";
@@ -24,8 +33,15 @@ import {
   truncate,
   formatRelativeTime,
   formatDateTime,
+  formatFriendlyTime,
   repoDisplayName,
   findParentRepo,
+  displayWidth,
+  padDisplay,
+  tildePath,
+  isUiMode,
+  uiFromArgv,
+  type UiMode,
 } from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
@@ -52,6 +68,8 @@ interface Flags {
   currentOnly: boolean;
   reposOnly: boolean;
   sessionsOnly: boolean;
+  ui: UiMode;
+  printUi: boolean;
 }
 
 function parseArgs(argv: string[]): Flags {
@@ -59,6 +77,8 @@ function parseArgs(argv: string[]): Flags {
     currentOnly: argv.includes("--current-only"),
     reposOnly: argv.includes("--repos-only"),
     sessionsOnly: argv.includes("--sessions-only"),
+    ui: uiFromArgv(argv),
+    printUi: argv.includes("--print-ui"),
   };
 }
 
@@ -308,12 +328,214 @@ function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// ui: simple — row builders
+// ---------------------------------------------------------------------------
+//
+// Same 6-column TSV contract as the classic rows (bin/ccs reads KIND:KEY, CWD
+// and COMMAND from columns 4-6 and never the LABEL), but the whole visible
+// line lives in column 1 — bin/ccs shows only that column in the simple look
+// (`--with-nth=1`), and fzf can only search what it shows. That is why a
+// row inside a group carries the group's name (dim, after the description):
+// typing the group's name narrows the list to the group, its projects and
+// their conversations.
+
+const DIM = "\x1b[2m";
+const BOLD = "\x1b[1m";
+const RESET = "\x1b[0m";
+/** Indent per nesting level, in place of the classic tree glyphs. */
+const SIMPLE_INDENT = "   ";
+/** The description column starts here at most (longer names push it). */
+const SIMPLE_NAME_COL_MAX = 34;
+const SIMPLE_TIME_COL = 10;
+const SIMPLE_PROJECT_COL_MAX = 26;
+
+/** A heading row: KIND=separator, so Enter on it never launches anything. */
+function simpleHeading(title: string): string {
+  const bar = "─".repeat(8);
+  const label = `${DIM}${bar}${RESET} ${BOLD}${title}${RESET} ${DIM}${bar}${RESET}`;
+  return [label, "", "", "separator:-", "", ""].join("\t");
+}
+
+interface SimpleNode {
+  repo: RepoRowFull;
+  parent: RepoRowFull | null;
+  depth: number;
+}
+
+/**
+ * The classic nesting (findParentRepo, name order) flattened with depths,
+ * split into the two simple sections: top-level `launch: false` headers with
+ * everything under them, then every other top-level repo with its subtree.
+ */
+function simpleSections(repos: RepoRowFull[]): {
+  groups: SimpleNode[];
+  projects: SimpleNode[];
+} {
+  const children = new Map<RepoRowFull | null, RepoRowFull[]>();
+  for (const r of repos) {
+    const parent = findParentRepo(r, repos);
+    const siblings = children.get(parent) ?? [];
+    siblings.push(r);
+    children.set(parent, siblings);
+  }
+  const walk = (
+    node: RepoRowFull,
+    parent: RepoRowFull | null,
+    depth: number,
+    out: SimpleNode[],
+  ): void => {
+    out.push({ repo: node, parent, depth });
+    for (const kid of children.get(node) ?? []) walk(kid, node, depth + 1, out);
+  };
+  const groups: SimpleNode[] = [];
+  const projects: SimpleNode[] = [];
+  for (const root of children.get(null) ?? []) {
+    walk(root, null, 0, root.launch === 0 ? groups : projects);
+  }
+  return { groups, projects };
+}
+
+/** The icon as drawn in the simple look: control characters stripped. */
+function simpleIcon(icon: string): string {
+  return truncate(icon || "", 8) || "📁";
+}
+
+function simpleHead(n: SimpleNode): string {
+  return `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(n.repo.icon)} ${repoDisplayName(n.repo)}`;
+}
+
+function simpleRepoRow(n: SimpleNode, nameCol: number): string {
+  const r = n.repo;
+  const displayName = repoDisplayName(r);
+  const head = simpleHead(n);
+  const gap = " ".repeat(Math.max(0, nameCol - displayWidth(head)));
+  // Bold only the name of a group header; the padding is computed on the
+  // plain text, so the styling does not shift the description column.
+  const styled =
+    r.launch === 0
+      ? `${SIMPLE_INDENT.repeat(n.depth)}${simpleIcon(r.icon)} ${BOLD}${displayName}${RESET}${gap}`
+      : `${head}${gap}`;
+  const desc = truncate(r.description || "", DESC_MAX);
+  const parentName = n.parent ? repoDisplayName(n.parent) : null;
+  const hint =
+    parentName && parentName !== displayName
+      ? `  ${DIM}（${parentName}）${RESET}`
+      : "";
+  const label = `${styled}  ${desc}${hint}`;
+  if (r.launch === 0) {
+    return [label, desc, "", `group:${r.name}`, r.path, ""].join("\t");
+  }
+  const cwd = r.cwd && r.cwd.length > 0 ? r.cwd : r.path;
+  return [label, desc, "", `new:${r.name}`, cwd, r.command || "claude"].join("\t");
+}
+
+function simpleRepoRows(repos: RepoRowFull[]): string[] {
+  const { groups, projects } = simpleSections(repos);
+  const all = [...groups, ...projects];
+  const nameCol = Math.min(
+    SIMPLE_NAME_COL_MAX,
+    Math.max(0, ...all.map((n) => displayWidth(simpleHead(n)))),
+  );
+  const lines: string[] = [];
+  if (groups.length > 0) {
+    lines.push(simpleHeading("グループ"));
+    for (const n of groups) lines.push(simpleRepoRow(n, nameCol));
+  }
+  if (projects.length > 0) {
+    lines.push(simpleHeading("プロジェクト"));
+    for (const n of projects) lines.push(simpleRepoRow(n, nameCol));
+  }
+  return lines;
+}
+
+interface RepoNameView {
+  name: string;
+  path: string;
+  label: string;
+  launch: number;
+}
+
+/**
+ * "Studio・Web team" for a project inside a group, else its display
+ * name — a seat's own label ("Director") repeats across groups. Unmapped
+ * sessions show their cwd with $HOME as ~.
+ */
+function simpleProjectName(
+  s: SessionRowFull,
+  repos: Map<string, RepoNameView>,
+  listed: RepoNameView[],
+): string {
+  const repo = s.repo_name ? repos.get(s.repo_name) : undefined;
+  if (!repo) {
+    return s.cwd
+      ? truncate(tildePath(s.cwd, homedir()), SIMPLE_PROJECT_COL_MAX)
+      : "（フォルダ不明）";
+  }
+  const own = repoDisplayName(repo);
+  const parent = findParentRepo(repo, listed);
+  const parentName = parent ? repoDisplayName(parent) : null;
+  return parentName && parentName !== own ? `${parentName}・${own}` : own;
+}
+
+function simpleSessionRows(
+  sessions: SessionRowFull[],
+  defaultCommand: string,
+  repoViews: RepoNameView[],
+): string[] {
+  const byName = new Map(repoViews.map((r) => [r.name, r]));
+  const projects = sessions.map((s) =>
+    truncate(simpleProjectName(s, byName, repoViews), SIMPLE_PROJECT_COL_MAX),
+  );
+  const projectCol = Math.min(
+    SIMPLE_PROJECT_COL_MAX,
+    Math.max(0, ...projects.map(displayWidth)),
+  );
+  return sessions.map((s, i) => {
+    const when = formatFriendlyTime(s.last_activity_at);
+    const topic = truncate(s.topic || "（話題なし）", DESC_MAX);
+    const label = `💬 ${padDisplay(when, SIMPLE_TIME_COL)}  ${padDisplay(projects[i], projectCol)}  ${topic}`;
+    return [
+      label,
+      truncate(s.topic || "", DESC_MAX),
+      "",
+      `resume:${s.uuid}`,
+      s.cwd,
+      s.repo_command || defaultCommand,
+    ].join("\t");
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+/**
+ * `--print-ui`: the `defaults.ui` the last scan stored (meta table). Any
+ * failure — no cache yet, a cache older than the setting, an unknown value —
+ * prints "classic": the launcher must always get an answer it can use.
+ */
+function printUi(stateDb: string): number {
+  let ui: UiMode = "classic";
+  try {
+    const handle = openDb(stateDb, { readonly: true, skipMigrate: true });
+    try {
+      const v = getMeta(handle.db, "defaults_ui");
+      if (isUiMode(v)) ui = v;
+    } finally {
+      handle.close();
+    }
+  } catch {
+    // keep classic
+  }
+  process.stdout.write(`${ui}\n`);
+  return 0;
+}
 
 function main(): number {
   const flags = parseArgs(process.argv.slice(2));
   const paths = getPaths();
+  if (flags.printUi) return printUi(paths.stateDb);
+  const simple = flags.ui === "simple";
   // openDb() is called INSIDE the try so that a cold-start failure (state.db
   // missing before first scan) is caught and rendered as a friendly hint
   // instead of leaking a raw stack trace to fzf.
@@ -344,8 +566,12 @@ function main(): number {
             ORDER BY r.name COLLATE NOCASE ASC`,
         )
         .all() as RepoRowFull[];
-      for (const g of groupRepos(repos)) {
-        lines.push(repoToRow(g));
+      if (simple) {
+        lines.push(...simpleRepoRows(repos));
+      } else {
+        for (const g of groupRepos(repos)) {
+          lines.push(repoToRow(g));
+        }
       }
     }
 
@@ -385,15 +611,30 @@ function main(): number {
               .all()
       ) as SessionRowFull[];
       const sessionRows: string[] = [];
-      for (const s of rows) {
-        sessionRows.push(sessionToRow(s, defaultCommand));
+      if (simple) {
+        // Labels and nesting for the project column (all enabled repos, the
+        // same population as the list's tree).
+        const repoViews = db
+          .prepare(
+            `SELECT r.name, r.path, ${reposV3Columns(db, "r")}
+               FROM repos r WHERE r.disabled = 0
+              ORDER BY r.name COLLATE NOCASE ASC`,
+          )
+          .all() as RepoNameView[];
+        sessionRows.push(...simpleSessionRows(rows, defaultCommand, repoViews));
+      } else {
+        for (const s of rows) {
+          sessionRows.push(sessionToRow(s, defaultCommand));
+        }
       }
       // Insert a section separator between NEW repos and RESUME sessions
       // when both are present. The separator row uses KIND=separator so
       // bin/ccs recognises it and exits cleanly if the user selects it.
       // Guard uses the explicit wantRepos flag (not lines.length) so future
       // additions to `lines` before this block can't spuriously trigger it.
-      if (wantRepos && sessionRows.length > 0) {
+      if (simple && sessionRows.length > 0) {
+        lines.push(simpleHeading("前の会話のつづき"));
+      } else if (wantRepos && sessionRows.length > 0) {
         const bar = "─".repeat(20);
         const label = `\x1b[2m${bar}\x1b[0m \x1b[1;90m Past Sessions \x1b[0m\x1b[2m${bar}\x1b[0m`;
         lines.push([label, "", "", "separator:-", "", ""].join("\t"));

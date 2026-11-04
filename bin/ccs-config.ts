@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 
 import { SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { isUiMode, UI_MODES, type UiMode } from "./ccs-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +45,8 @@ export interface RepoEntry {
 
 export interface CcsConfig {
   version: 1;
-  defaults: { command: string };
+  /** ui: list/preview look — "classic" (default) or "simple" (friendly, Japanese). */
+  defaults: { command: string; ui: UiMode };
   repos: RepoEntry[];
 }
 
@@ -90,6 +92,7 @@ version: 1
 
 defaults:
   command: "claude"
+  # ui: simple   # friendlier full-screen look (Japanese text, needs fzf 0.61+)
 
 repos:
   - name: Example Project
@@ -505,6 +508,7 @@ export function loadConfig(): CcsConfig {
 
   // defaults
   let defaultsCommand: string | undefined;
+  let defaultsUi: UiMode = "classic";
   if (parsed.defaults !== undefined) {
     if (!isPlainObject(parsed.defaults)) {
       throw new ConfigError(
@@ -519,6 +523,17 @@ export function loadConfig(): CcsConfig {
         );
       }
       defaultsCommand = defaults.command;
+    }
+    // ui — display only (never reaches a shell line), but bin/ccs picks its
+    // fzf flags from it, so only the known values pass; a typo fails loudly
+    // instead of silently falling back to the classic look.
+    if (defaults.ui !== undefined && defaults.ui !== null) {
+      if (!isUiMode(defaults.ui)) {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.ui must be one of ${UI_MODES.join(" / ")} (got ${JSON.stringify(defaults.ui)})`,
+        );
+      }
+      defaultsUi = defaults.ui;
     }
   }
 
@@ -567,7 +582,7 @@ export function loadConfig(): CcsConfig {
 
   return {
     version: 1,
-    defaults: { command: resolvedDefaultsCommand },
+    defaults: { command: resolvedDefaultsCommand, ui: defaultsUi },
     repos,
   };
 }

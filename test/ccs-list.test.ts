@@ -813,3 +813,331 @@ describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PA
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// ui: simple (v0.3.0) — list rows and preview cards
+// ---------------------------------------------------------------------------
+
+/** Studio group + a standalone repo + three sessions (one unmapped). */
+function seedSimple(db: Database.Database): void {
+  seedStudio(db);
+  upsertRepo(db, { ...repoRow("alpha", "/home/u/alpha"), description: "Alpha repo" });
+  const ins = db.prepare(
+    `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime, topic)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  ins.run("aaaaaaaa-0000-0000-0000-000000000001", "Studio-web", "pd", "/home/u/studio/web", ago(5), ago(5), ago(5), "トップの文字を直す");
+  ins.run("aaaaaaaa-0000-0000-0000-000000000002", "alpha", "pd", "/home/u/alpha", ago(200), ago(200), ago(200), "Alpha の作業");
+  ins.run("aaaaaaaa-0000-0000-0000-000000000003", null, "pd", "/home/u/elsewhere", ago(300), ago(300), ago(300), null);
+}
+
+function cols(stdout: string): string[][] {
+  return stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+}
+
+describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("groups first, then projects, then conversations — each under a heading row", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedSimple(h.db);
+      h.close();
+      const res = runList(sb, ["--ui=simple"]);
+      assert.equal(res.code, 0, res.stderr);
+      const rows = cols(res.stdout);
+      // Six columns, keys in list order, no badges anywhere.
+      assert.ok(rows.every((r) => r.length === 6));
+      assert.deepEqual(rows.map((r) => r[3]), [
+        "separator:-",
+        "group:Studio",
+        "new:Studio-app",
+        "new:Studio-hq",
+        "new:Studio-web",
+        "separator:-",
+        "new:alpha",
+        "separator:-",
+        "resume:aaaaaaaa-0000-0000-0000-000000000001",
+        "resume:aaaaaaaa-0000-0000-0000-000000000002",
+        "resume:aaaaaaaa-0000-0000-0000-000000000003",
+      ]);
+      assert.ok(rows.every((r) => r[2] === ""), "simple rows carry no badge column");
+      const labels = rows.map((r) => plain(r[0]).replace(/\s+/g, " ").trim());
+      assert.deepEqual(labels.slice(0, 7), [
+        "──────── グループ ────────",
+        "🎬 Studio 制作チーム",
+        "📱 App team アプリ app/ （Studio）",
+        "🎬 Studio 統括 hq/",
+        "🌐 Web team サイト web/ （Studio）",
+        "──────── プロジェクト ────────",
+        "📁 alpha Alpha repo",
+      ]);
+      assert.equal(labels[7], "──────── 前の会話のつづき ────────");
+      assert.equal(labels[8], "💬 5 分前 Studio・Web team トップの文字を直す");
+      assert.equal(labels[9], "💬 3 時間前 alpha Alpha の作業");
+      assert.equal(labels[10], "💬 5 時間前 /home/u/elsewhere （話題なし）");
+      // No tree glyphs; children are indented instead.
+      assert.ok(!rows.some((r) => /[├└│]/.test(plain(r[0]))));
+      assert.match(plain(rows[2][0]), /^ {3}📱 App team/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("launch columns stay the classic ones (cwd, command; groups have none)", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedSimple(h.db);
+      h.close();
+      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const byKey = new Map(rows.map((r) => [r[3], r]));
+      assert.deepEqual(byKey.get("group:Studio")!.slice(4), ["/home/u/studio", ""]);
+      assert.deepEqual(byKey.get("new:Studio-web")!.slice(4), ["/home/u/studio/web", "claude"]);
+      assert.deepEqual(
+        byKey.get("resume:aaaaaaaa-0000-0000-0000-000000000003")!.slice(4),
+        ["/home/u/elsewhere", "claude"],
+      );
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("the group's name is on every row inside it, so typing it filters to the group", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedSimple(h.db);
+      h.close();
+      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const hits = rows.filter((r) => plain(r[0]).includes("Studio")).map((r) => r[3]);
+      assert.deepEqual(hits, [
+        "group:Studio",
+        "new:Studio-app",
+        "new:Studio-hq",
+        "new:Studio-web",
+        "resume:aaaaaaaa-0000-0000-0000-000000000001",
+      ]);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("empty sections get no heading (--repos-only, --sessions-only, no groups)", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedSimple(h.db);
+      h.close();
+      const reposOnly = cols(runList(sb, ["--ui=simple", "--repos-only"]).stdout);
+      assert.ok(!reposOnly.some((r) => plain(r[0]).includes("前の会話")));
+      const sessionsOnly = cols(runList(sb, ["--ui=simple", "--sessions-only"]).stdout);
+      assert.equal(plain(sessionsOnly[0][0]).replace(/\s+/g, " "), "──────── 前の会話のつづき ────────");
+      assert.equal(sessionsOnly.length, 4);
+    } finally {
+      await sb.cleanup();
+    }
+    const sb2 = await makeListSandbox();
+    try {
+      const h = openDb(sb2.dbPath);
+      upsertRepo(h.db, repoRow("solo", "/home/u/solo"));
+      h.close();
+      const rows = cols(runList(sb2, ["--ui=simple"]).stdout);
+      assert.deepEqual(rows.map((r) => r[3]), ["separator:-", "new:solo"]);
+      assert.match(plain(rows[0][0]), /プロジェクト/);
+    } finally {
+      await sb2.cleanup();
+    }
+  });
+
+  test("--print-ui returns the stored defaults.ui, and classic for anything else", async () => {
+    const sb = await makeListSandbox();
+    try {
+      // No cache yet → classic, exit 0.
+      let res = runList(sb, ["--print-ui"]);
+      assert.equal(res.code, 0);
+      assert.equal(res.stdout, "classic\n");
+      const h = openDb(sb.dbPath);
+      setMeta(h.db, "defaults_ui", "simple");
+      h.close();
+      res = runList(sb, ["--print-ui"]);
+      assert.equal(res.stdout, "simple\n");
+      const h2 = openDb(sb.dbPath);
+      setMeta(h2.db, "defaults_ui", "$(evil)");
+      h2.close();
+      res = runList(sb, ["--print-ui"]);
+      assert.equal(res.stdout, "classic\n");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("without --ui the classic rows are unchanged (tree glyphs, badges)", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedSimple(h.db);
+      h.close();
+      const rows = cols(runList(sb, []).stdout);
+      // Classic keeps plain name order: groups are not moved to the top.
+      assert.deepEqual(rows.slice(0, 2).map((r) => r[3]), ["new:alpha", "group:Studio"]);
+      assert.ok(rows.some((r) => /[├└]/.test(plain(r[0]))));
+      assert.ok(rows.some((r) => r[2].length > 0), "classic rows keep their badges");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+function runPreviewSimple(sb: ListSandbox, kindKey: string, cwd: string): string {
+  const res = spawnSync("tsx", [PREVIEW_TS, kindKey, cwd, "--ui=simple"], {
+    env: {
+      ...process.env,
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+    },
+    encoding: "utf-8",
+  });
+  return (res.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("new: says what Enter does, the folder, last use, and plain-word state", async () => {
+    const sb = await makeListSandbox();
+    try {
+      await mkdir(join(sb.home, "work", "site"), { recursive: true });
+      const h = openDb(sb.dbPath);
+      upsertRepo(h.db, {
+        ...repoRow("site", join(sb.home, "work", "site")),
+        label: "Web team",
+        description: "会社のサイト",
+        custom_json: JSON.stringify({ github_repo: "x/y", plane_project_id: "p" }),
+      });
+      h.db
+        .prepare(
+          `INSERT INTO repo_stats (name, is_git, branch, uncommitted_files, uncommitted_insertions,
+             uncommitted_deletions, handoff_count, pending_count, session_count_total, session_last_at)
+           VALUES ('site', 1, 'feature-x', 2, 10, 1, 1, 0, 0, NULL)`,
+        )
+        .run();
+      h.close();
+      const out = runPreviewSimple(sb, "new:site", join(sb.home, "work", "site"));
+      assert.match(out, /✨ Web team で、新しく Claude Code を始めます/);
+      assert.match(out, /📂 フォルダ\n {5}~\/work\/site\n/);
+      assert.match(out, /🕒 最後に開いた\n {5}まだ開いたことはありません/);
+      assert.match(out, /まだ保存（commit）していない変更が 2 ファイルあります/);
+      assert.match(out, /作業中のブランチ: feature-x/);
+      assert.match(out, /📌 申し送り\n {5}1 件あります/);
+      assert.match(out, /つながっているサービス\n {5}Plane・GitHub/);
+      assert.match(out, /Enter を押すと、このフォルダで Claude Code が開きます/);
+      assert.doesNotMatch(out, /Uncommitted|Branch:|Sessions/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("new: a missing folder is said plainly, with where Enter will open instead", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      upsertRepo(h.db, repoRow("gone", join(sb.home, "nowhere")));
+      h.close();
+      const out = runPreviewSimple(sb, "new:gone", join(sb.home, "nowhere"));
+      assert.match(out, /このフォルダが見つかりません。repos\.yml の path を確かめてください/);
+      assert.match(out, /Enter を押すと、いまいるフォルダで Claude Code が開きます/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("group: is a heading that points to the projects inside", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      seedStudio(h.db);
+      h.close();
+      const out = runPreviewSimple(sb, "group:Studio", "/home/u/studio");
+      assert.match(out, /📂 グループ「Studio」/);
+      assert.match(out, /ここは見出しです。開くときは、下のプロジェクトをえらんでください/);
+      assert.match(out, /中のプロジェクト（3）/);
+      assert.match(out, /📱 App team/);
+      assert.doesNotMatch(out, /launch: false|not launchable/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("resume: card first, then the conversation without tool placeholders", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const uuid = "bbbbbbbb-0000-0000-0000-000000000001";
+      const proj = join(sb.home, ".claude", "projects", "p1");
+      await mkdir(proj, { recursive: true });
+      const lines = [
+        { type: "user", cwd: "/home/u/alpha", message: { content: "ログイン画面を直したい" } },
+        { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash" }] } },
+        { type: "user", message: { content: [{ type: "tool_result" }] } },
+        { type: "assistant", message: { content: [{ type: "text", text: "直しました" }] } },
+      ];
+      await writeFile(join(proj, `${uuid}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n"));
+      const h = openDb(sb.dbPath);
+      upsertRepo(h.db, { ...repoRow("alpha", "/home/u/alpha"), label: "アルファ" });
+      const now = new Date().toISOString();
+      h.db
+        .prepare(
+          `INSERT INTO sessions (uuid, repo_name, project_dir, cwd, started_at, last_activity_at, jsonl_mtime, topic)
+           VALUES (?, 'alpha', 'p1', '/home/u/alpha', ?, ?, ?, 'ログイン画面を直したい')`,
+        )
+        .run(uuid, now, now, now);
+      h.close();
+      const out = runPreviewSimple(sb, `resume:${uuid}`, "/home/u/alpha");
+      assert.match(out, /↩️ {2}前の会話のつづきから再開します/);
+      assert.match(out, /プロジェクト\n {5}アルファ/);
+      assert.match(out, /最後に話した\n {5}たった今/);
+      assert.match(out, /前の話題\n {5}ログイン画面を直したい/);
+      assert.match(out, /Enter を押すと、この会話のつづきが開きます/);
+      assert.match(out, /──── これまでの会話 ────/);
+      assert.match(out, /👤 あなた: ログイン画面を直したい/);
+      assert.match(out, /🤖 Claude: 直しました/);
+      assert.doesNotMatch(out, /\[tool/);
+      assert.doesNotMatch(out, /Session Info/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("separator: and a missing cache answer in one sentence", async () => {
+    const sb = await makeListSandbox();
+    try {
+      assert.match(runPreviewSimple(sb, "separator:-", ""), /ここは区切りの行です/);
+      // No state.db at all.
+      assert.match(
+        runPreviewSimple(sb, "new:x", "/home/u/x"),
+        /まだ一覧の準備ができていません。\n {2}いちど Esc でやめて、ccs --refresh と打ってください。/,
+      );
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+describe("ccs-list --ui=simple — display hardening", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+  test("a group label with $& / $' is drawn literally, and an escape in the icon is neutralized", async () => {
+    const sb = await makeListSandbox();
+    try {
+      const h = openDb(sb.dbPath);
+      upsertRepo(h.db, { ...repoRow("G", "/home/u/g"), label: "R$&D $' $$", icon: "\x1b[31m🎬", launch: 0 });
+      upsertRepo(h.db, repoRow("G-a", "/home/u/g/a"));
+      h.close();
+      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const header = rows.find((r) => r[3] === "group:G")!;
+      // ESC is removed, which neutralizes the sequence; the printable rest
+      // ("[31m") stays as harmless text — the same policy as truncate().
+      assert.ok(plain(header[0]).startsWith("[31m🎬 R$&D $' $$"), plain(header[0]));
+      assert.ok(!header[0].includes("\x1b[31m"), "the icon's escape sequence is neutralized");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});

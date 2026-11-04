@@ -153,6 +153,157 @@ export function formatRelativeTime(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Friendly (ui: simple) time — Japanese, calendar-aware
+// ---------------------------------------------------------------------------
+
+export interface FriendlyTimeOptions {
+  /** Reference time (tests pin it). */
+  nowMs?: number;
+  /** Append the local clock ("きのう 17:40", "11月1日 09:05"). */
+  clock?: boolean;
+  /** Returned for null/unparseable input. */
+  invalid?: string;
+}
+
+function localDayIndex(ms: number): number {
+  const d = new Date(ms);
+  // Local calendar day number: only the local Y/M/D parts are used, so a
+  // DST shift cannot move a timestamp into the neighbouring day.
+  return Math.floor(
+    Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000,
+  );
+}
+
+/**
+ * Relative time for the simple UI, written the way people say it:
+ * たった今 / N 分前 / N 時間前 / きのう / N 日前 / M月D日 (YYYY年 when the
+ * year differs). "きのう" and "N 日前" follow the local calendar, not 24-hour
+ * blocks, so a session from last night reads "きのう" the next morning —
+ * except within the first 6 hours, where "N 時間前" is the clearer answer
+ * (23:00 seen at 01:00 is "2 時間前", not "きのう").
+ */
+export function formatFriendlyTime(
+  iso: string | null | undefined,
+  opts: FriendlyTimeOptions = {},
+): string {
+  const invalid = opts.invalid ?? "-";
+  if (!iso) return invalid;
+  const t = parseDbTime(iso);
+  if (Number.isNaN(t)) return invalid;
+  const now = opts.nowMs ?? Date.now();
+  const d = new Date(t);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const withClock = (s: string) => (opts.clock ? `${s} ${hm}` : s);
+
+  const diffMs = now - t;
+  if (diffMs < 60_000) return "たった今";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes} 分前`;
+  const hours = Math.floor(minutes / 60);
+  const days = localDayIndex(now) - localDayIndex(t);
+  if (days <= 0 || hours < 6) return `${hours} 時間前`;
+  if (days === 1) return withClock("きのう");
+  if (days < 7) return withClock(`${days} 日前`);
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  const date =
+    d.getFullYear() === new Date(now).getFullYear()
+      ? md
+      : `${d.getFullYear()}年${md}`;
+  return withClock(date);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal display width (ui: simple column alignment)
+// ---------------------------------------------------------------------------
+
+const WIDE_RANGES: [number, number][] = [
+  [0x1100, 0x115f], // Hangul Jamo
+  [0x2e80, 0x303e], // CJK radicals, punctuation
+  [0x3041, 0x33ff], // Hiragana, Katakana, CJK symbols
+  [0x3400, 0x4dbf], // CJK Ext A
+  [0x4e00, 0x9fff], // CJK Unified
+  [0xa000, 0xa4cf], // Yi
+  [0xac00, 0xd7a3], // Hangul syllables
+  [0xf900, 0xfaff], // CJK compatibility
+  [0xfe30, 0xfe4f], // CJK compatibility forms
+  [0xff00, 0xff60], // Fullwidth forms
+  [0xffe0, 0xffe6],
+  [0x1f300, 0x1faff], // Emoji & pictographs
+  [0x20000, 0x3fffd], // CJK Ext B+
+];
+
+function isWide(cp: number): boolean {
+  for (const [lo, hi] of WIDE_RANGES) {
+    if (cp >= lo && cp <= hi) return true;
+  }
+  return false;
+}
+
+/**
+ * Approximate terminal column width of plain (ANSI-free) text: CJK and
+ * emoji count 2, combining marks / ZWJ / variation selectors 0, and a narrow
+ * symbol followed by VS16 (U+FE0F, emoji presentation) counts 2. Used only to
+ * pad the simple UI's name column; a terminal that disagrees on an exotic
+ * code point shifts the description by a column, nothing else.
+ */
+export function displayWidth(s: string): number {
+  const cps = Array.from(s, (c) => c.codePointAt(0) ?? 0);
+  let w = 0;
+  for (let i = 0; i < cps.length; i++) {
+    const cp = cps[i];
+    if (
+      (cp >= 0x0300 && cp <= 0x036f) ||
+      cp === 0x200d ||
+      (cp >= 0xfe00 && cp <= 0xfe0f)
+    ) {
+      continue;
+    }
+    if (isWide(cp) || cps[i + 1] === 0xfe0f) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
+/** Pad plain text with spaces to `width` terminal columns (never truncates). */
+export function padDisplay(s: string, width: number): string {
+  const gap = width - displayWidth(s);
+  return gap > 0 ? s + " ".repeat(gap) : s;
+}
+
+/** Shorten an absolute path under $HOME to `~/…` for display. */
+export function tildePath(p: string, home: string): string {
+  if (!p) return "";
+  if (p === home) return "~";
+  return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+}
+
+// ---------------------------------------------------------------------------
+// UI mode (repos.yml `defaults.ui`)
+// ---------------------------------------------------------------------------
+
+export type UiMode = "classic" | "simple";
+export const UI_MODES: readonly UiMode[] = ["classic", "simple"];
+
+export function isUiMode(v: unknown): v is UiMode {
+  return typeof v === "string" && (UI_MODES as readonly string[]).includes(v);
+}
+
+/** `--ui=simple` / `--ui=classic` from argv; anything else → classic. */
+export function uiFromArgv(argv: string[]): UiMode {
+  for (const a of argv) {
+    if (a.startsWith("--ui=")) {
+      const v = a.slice("--ui=".length);
+      return isUiMode(v) ? v : "classic";
+    }
+  }
+  return "classic";
+}
+
 /** Render a DB timestamp as local "YYYY-MM-DD HH:MM"; `invalid` on failure. */
 export function formatDateTime(
   iso: string | null | undefined,

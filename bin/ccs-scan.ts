@@ -38,7 +38,7 @@ import {
 } from "./ccs-db.ts";
 import { maskSecrets } from "./ccs-secrets.ts";
 import { stripControlChars } from "./ccs-sanitize.ts";
-import { nowIso } from "./ccs-utils.ts";
+import { nowIso, type UiMode } from "./ccs-utils.ts";
 import { scanSessions } from "./ccs-scan-sessions.ts";
 
 const execFileP = promisify(execFile);
@@ -63,6 +63,8 @@ export interface ScanResult {
   durationMs: number;
   /** True when another scan held the advisory lock and this run did nothing. */
   lockSkipped?: boolean;
+  /** repos.yml `defaults.ui` as loaded by this run (set even when lock-skipped). */
+  ui?: UiMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +642,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsSkipped: 0,
       durationMs: Date.now() - started,
       lockSkipped: true,
+      ui: config.defaults.ui,
     };
   }
 
@@ -651,6 +654,9 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     // CCS_CMD > "claude") so ccs-list can apply the same chain to sessions
     // that map to no repo (review A-8). Validated at load time (review A-6).
     setMeta(handle.db, "defaults_command", config.defaults.command);
+    // repos.yml `defaults.ui`, for the `ccs --no-scan` path (bin/ccs reads it
+    // back through `ccs-list --print-ui` when no scan ran this launch).
+    setMeta(handle.db, "defaults_ui", config.defaults.ui);
 
     // Order matters (audit C-1): scanOneRepo aggregates session counts FROM
     // the sessions table, so sessions must be refreshed first — otherwise
@@ -678,6 +684,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsIndexed,
       sessionsSkipped,
       durationMs: Date.now() - started,
+      ui: config.defaults.ui,
     };
   } finally {
     handle.close();
@@ -693,15 +700,23 @@ function parseArgs(argv: string[]): {
   force: boolean;
   noSessions: boolean;
   quiet: boolean;
+  printUi: boolean;
 } {
   return {
     force: argv.includes("--force"),
     noSessions: argv.includes("--no-sessions"),
     quiet: argv.includes("--quiet"),
+    printUi: argv.includes("--print-ui"),
   };
 }
 
-async function main(): Promise<number> {
+/**
+ * Exit status plus the stdout text to flush before exiting. `--print-ui`
+ * prints `ui=<mode>` (the only stdout output ccs-scan has): bin/ccs runs the
+ * pre-scan anyway, so the launcher learns `defaults.ui` without paying for
+ * one more tsx start on every launch.
+ */
+async function main(): Promise<{ code: number; out: string }> {
   const args = parseArgs(process.argv.slice(2));
   try {
     const res = await scan({
@@ -717,18 +732,23 @@ async function main(): Promise<number> {
           `(${res.sessionsSkipped} cached) in ${secs}s\n`,
       );
     }
-    return 0;
+    return { code: 0, out: args.printUi && res.ui ? `ui=${res.ui}\n` : "" };
   } catch (err) {
     process.stderr.write(
       `[ccs-scan] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
     );
-    return 1;
+    return { code: 1, out: "" };
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().then(
-    (code) => process.exit(code),
+    ({ code, out }) => {
+      // Exit only after stdout drained: pipe writes are async on macOS, and
+      // bin/ccs reads this line through a pipe (see ccs-list's EPIPE note).
+      if (out) process.stdout.write(out, () => process.exit(code));
+      else process.exit(code);
+    },
     (err) => {
       process.stderr.write(
         `[ccs-scan] fatal: ${err instanceof Error ? err.message : String(err)}\n`,

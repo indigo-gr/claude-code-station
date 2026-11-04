@@ -852,3 +852,55 @@ describe("scan() — audit M-3 remap", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// defaults.ui → meta + --print-ui (v0.3.0)
+// ---------------------------------------------------------------------------
+
+describe("scan() — defaults.ui", () => {
+  test("stores defaults.ui in meta and returns it; the CLI prints ui=<mode> with --print-ui", async () => {
+    const sb = await makeScanSandbox();
+    const repoDir = join(sb.home, "proj");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(
+      sb.reposYml,
+      `version: 1\ndefaults:\n  ui: simple\nrepos:\n  - name: proj\n    path: ${repoDir}\n`,
+    );
+    const env = {
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+      CCS_CMD: undefined,
+      CCR_CMD: undefined,
+    };
+    const restore = applyEnv(env);
+    try {
+      const { scan } = await freshScan();
+      const res = await scan({ force: true, scanSessions: false });
+      assert.equal(res.ui, "simple");
+      const { openDb, getMeta } = await import("../bin/ccs-db.ts");
+      const h = openDb(join(sb.xdgCache, "ccs", "state.db"), { readonly: true, skipMigrate: true });
+      try {
+        assert.equal(getMeta(h.db, "defaults_ui"), "simple");
+      } finally {
+        h.close();
+      }
+
+      const cli = (args: string[]) =>
+        spawnSync("tsx", [new URL("../bin/ccs-scan.ts", import.meta.url).pathname, ...args], {
+          encoding: "utf-8",
+          env: { ...process.env, HOME: sb.home, XDG_CONFIG_HOME: sb.xdgConfig, XDG_CACHE_HOME: sb.xdgCache },
+        });
+      const printed = cli(["--quiet", "--no-sessions", "--print-ui"]);
+      assert.equal(printed.status, 0, printed.stderr);
+      assert.equal(printed.stdout, "ui=simple\n");
+      // Without the flag ccs-scan keeps stdout empty, as before.
+      const quiet = cli(["--quiet", "--no-sessions"]);
+      assert.equal(quiet.status, 0, quiet.stderr);
+      assert.equal(quiet.stdout, "");
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  });
+});

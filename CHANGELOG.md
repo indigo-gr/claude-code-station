@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-11-04
+
+### Added
+- **Friendlier look (`ui: simple`)** — `defaults.ui: simple` in repos.yml (or `ccs --ui=simple`, or `CCS_UI=simple`; flag > variable > repos.yml) opens ccs full screen with rounded frames, four labels (Claude Code をはじめる / さがす / えらぶ / 中身), a Japanese guide line that shows only Enter / ↑↓ / Esc, a ghost hint in the empty search box and a highlighted cursor line. Needs fzf 0.61+ (`--ghost`); on an older fzf the classic look opens with one line saying why. The classic look is the default and is unchanged byte for byte (list rows, preview text, fzf arguments and launcher output were compared against 0.2.4).
+  - **Groups first** — the list is ordered groups (`launch: false` headers and everything inside them) → other projects → past conversations, each under a heading row (empty sections get none). Nested entries are indented instead of drawn as a tree, and rows inside a group end with the group's name (dim), so typing the group's name narrows the list to the group, its projects and their conversations. The list keeps its order while filtering (`--no-sort`), every query edit returns the cursor to the top match (`change:first`), the cursor never rests on a heading row, and a far-right match no longer scrolls a row and hides its name (`--no-hscroll`).
+  - **Cards instead of badges** — rows carry only the name and description; the preview shows a card per row: what Enter will do, the folder (`~/…`), when it was last used, unsaved changes / handoff notes / pending items / connected services in plain words, recent topics, and — for a past conversation — the conversation itself without tool placeholders. A missing folder is said plainly, with where Enter will open instead. Times read like speech (たった今 / N 分前 / N 時間前 / きのう / N 日前 / 10月25日), calendar-aware.
+  - **Guidance at dead ends** — Enter on a heading, a group header or an empty result flashes a one-line reason in the guide line instead of doing nothing; Esc prints how to come back; with nothing to open, ccs prints how to add projects (or that there are no conversations yet, for `.` / `--resume`) instead of an empty picker; a `repos.yml` the scan cannot read is flagged in the frame and its error is printed after the picker closes. Narrow terminals (under ~100 columns) get the preview below the list.
+- `ccs-scan --print-ui` prints `ui=<mode>` (the launcher learns `defaults.ui` from the pre-scan it already runs, so the default launch costs no extra process); the value is also stored in the cache's meta table (`defaults_ui`) for `ccs --no-scan`, read back with `ccs-list --print-ui`.
+- `test/tty/ccs_tty.py` — a stdlib-only pseudo-terminal harness (small VT100 screen model, answers fzf's cursor-position query) and `test/ccs-tty.test.ts`, which run the simple look on a real fzf at 120x36 and 80x24. Skipped when python3 or fzf 0.61+ is missing.
+
+### Changed
+- The first-run `repos.yml` template mentions `# ui: simple` (commented out).
+- `defaults.ui` must be `simple` or `classic`; any other value is a config error (no silent fallback).
+
 ## [0.2.4] — 2026-10-21
 
 ### Added

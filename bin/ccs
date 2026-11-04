@@ -99,6 +99,8 @@ Usage:
   ccs --resume        Only past sessions
   ccs --refresh       Force pre-scan before showing list
   ccs --no-scan       Skip implicit pre-scan (use stale DB)
+  ccs --ui=simple     Friendlier full-screen look (Japanese text, fzf 0.61+);
+                      --ui=classic forces the default look
   ccs init            Create ~/.config/ccs/repos.yml from the template
   ccs init --auto-discover [--depth N]
                       Scan \$HOME for git repos (default depth 5) and pick
@@ -119,6 +121,8 @@ Environment:
                       command. Per-repo command in repos.yml always wins.
                       Example: export CCS_CMD="opr claude"
   CCR_CMD             Deprecated — still honored with a warning if CCS_CMD unset
+  CCS_UI              simple | classic — overrides repos.yml defaults.ui
+                      (the --ui= flag wins over both)
 
 Examples:
   ccs                                     # Full launcher
@@ -188,6 +192,7 @@ LIST_FLAGS=()
 PASS_ARGS=()
 DO_REFRESH=0
 NO_SCAN=0
+UI_FLAG=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -196,6 +201,13 @@ for arg in "$@"; do
     --resume)     LIST_FLAGS+=("--sessions-only") ;;
     --refresh)    DO_REFRESH=1 ;;
     --no-scan)    NO_SCAN=1 ;;
+    --ui=*)
+      UI_FLAG="${arg#--ui=}"
+      if [[ "$UI_FLAG" != "simple" && "$UI_FLAG" != "classic" ]]; then
+        echo "❌ --ui must be simple or classic (got: ${UI_FLAG})" >&2
+        exit 2
+      fi
+      ;;
     --help|-h)    print_help; exit 0 ;;
     --version|-v) echo "ccs v${VERSION}"; exit 0 ;;
     *)            PASS_ARGS+=("$arg") ;;
@@ -204,16 +216,90 @@ done
 
 check_deps
 
-# ── Pre-scan ─────────────────────────────────────────────────────────────────
-if (( DO_REFRESH )); then
-  "${TSX}" "${CCS_SCAN}" --force --quiet || {
-    echo "[ccs] refresh failed, continuing with stale DB" >&2
-  }
-elif (( ! NO_SCAN )); then
-  "${TSX}" "${CCS_SCAN}" --quiet || {
-    echo "[ccs] scan failed, continuing with stale DB" >&2
-  }
+# ── fzf version helpers ──────────────────────────────────────────────────────
+# fzf_at_least MAJOR MINOR — true when the installed fzf is that version or
+# newer. Unparseable / missing version → false (callers fall back safely).
+fzf_at_least() {
+  local v
+  v=$(fzf --version 2>/dev/null) || return 1
+  [[ "$v" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  local maj=$((10#${BASH_REMATCH[1]})) min=$((10#${BASH_REMATCH[2]}))
+  (( maj > $1 || (maj == $1 && min >= $2) ))
+}
+
+# ── UI mode (classic | simple) ───────────────────────────────────────────────
+# Priority: --ui= flag > CCS_UI env > repos.yml defaults.ui > classic. The
+# repos.yml value arrives on the pre-scan's stdout (`ui=<mode>`, --print-ui),
+# so the default launch costs no extra process; only when no scan ran (or it
+# failed) is it read back from the cache the last scan wrote.
+UI_REQ="${UI_FLAG}"
+if [[ -z "$UI_REQ" && -n "${CCS_UI:-}" ]]; then
+  case "${CCS_UI}" in
+    simple|classic) UI_REQ="${CCS_UI}" ;;
+    *) echo "[ccs] CCS_UI must be simple or classic (got: ${CCS_UI}) — ignored" >&2 ;;
+  esac
 fi
+
+# ── Pre-scan ─────────────────────────────────────────────────────────────────
+# The scan's stderr is held until the look is known: the classic look prints
+# it exactly as before (then the same "continuing with stale DB" line); the
+# simple look keeps it for after the picker closes, where it can be read.
+UI_CFG=""
+SCAN_RAN=0
+SCAN_FAILED=0
+SCAN_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/ccs-scan-err.XXXXXX")
+trap 'rm -f "$SCAN_ERR_FILE"' EXIT
+if (( DO_REFRESH || ! NO_SCAN )); then
+  SCAN_RAN=1
+  SCAN_ARGS=(--quiet --print-ui)
+  (( DO_REFRESH )) && SCAN_ARGS=(--force "${SCAN_ARGS[@]}")
+  if SCAN_OUT=$("${TSX}" "${CCS_SCAN}" "${SCAN_ARGS[@]}" 2>"$SCAN_ERR_FILE"); then
+    case "$SCAN_OUT" in
+      *ui=simple*)  UI_CFG="simple" ;;
+      *ui=classic*) UI_CFG="classic" ;;
+    esac
+  else
+    SCAN_FAILED=1
+  fi
+fi
+
+UI="${UI_REQ:-${UI_CFG}}"
+if [[ -z "$UI" ]]; then
+  UI=$("${TSX}" "${CCS_LIST}" --print-ui 2>/dev/null) || UI="classic"
+fi
+[[ "$UI" == "simple" ]] || UI="classic"
+
+# The simple look's flags (--style, the four labels, --ghost) need fzf 0.61+.
+# On an older fzf the classic look opens instead, with one line saying why.
+if [[ "$UI" == "simple" ]] && ! fzf_at_least 0 61; then
+  FZF_V=$(fzf --version 2>/dev/null | awk '{print $1}')
+  echo "[ccs] やさしい見た目（ui: simple）には fzf 0.61 以上が要ります（いまの fzf: ${FZF_V:-不明}）。ふつうの見た目で開きます。fzf を新しくするには: brew upgrade fzf" >&2
+  UI="classic"
+fi
+
+if [[ "$UI" == "classic" ]]; then
+  cat "$SCAN_ERR_FILE" >&2
+  if (( SCAN_FAILED )); then
+    if (( DO_REFRESH )); then
+      echo "[ccs] refresh failed, continuing with stale DB" >&2
+    else
+      echo "[ccs] scan failed, continuing with stale DB" >&2
+    fi
+  fi
+fi
+
+# simple: what to say about the scan once the picker has closed (empty when
+# the scan was quiet). Printed by print_scan_notes.
+print_scan_notes() {
+  [[ "$UI" == "simple" ]] || return 0
+  if (( SCAN_FAILED )); then
+    echo "[ccs] 設定ファイル（~/.config/ccs/repos.yml）を読めなかったので、前の一覧を出しました。下の行を直してから、もう一度 ccs と打ってください。" >&2
+    sed 's/^/    /' "$SCAN_ERR_FILE" >&2
+  elif [[ -s "$SCAN_ERR_FILE" ]]; then
+    echo "[ccs] 設定ファイルについてのお知らせです（このままでも使えます）。" >&2
+    sed 's/^/    /' "$SCAN_ERR_FILE" >&2
+  fi
+}
 
 # ── fzf bindings ─────────────────────────────────────────────────────────────
 # Row layout (tab-separated columns):
@@ -223,6 +309,21 @@ LIST_ARGS_STR=""
 for f in "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}"; do
   LIST_ARGS_STR+=" ${f}"
 done
+if [[ "$UI" == "simple" ]]; then
+  LIST_FLAGS+=("--ui=simple")
+  LIST_ARGS_STR+=" --ui=simple"
+fi
+
+# Header flashes and notices, per look (simple = Japanese, plain words).
+if [[ "$UI" == "simple" ]]; then
+  MSG_COPIED_CMD='📋 開くためのコマンドをコピーしました'
+  MSG_COPIED_ID='📋 会話の番号（またはフォルダの場所）をコピーしました'
+  MSG_NO_REPO_DELETE='[ccs] プロジェクトは一覧から消せません。外すときは ~/.config/ccs/repos.yml を直してください（何かキーを押すと戻ります）'
+else
+  MSG_COPIED_CMD='📋 Copied command to clipboard — ⏎: launch | ^Y: copy again'
+  MSG_COPIED_ID='📋 Copied ID/path to clipboard — ⏎: launch | ^I: copy again'
+  MSG_NO_REPO_DELETE='[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'
+fi
 
 CLIP_BINDS=()
 if [[ -n "$CLIP_CMD" ]]; then
@@ -239,7 +340,7 @@ if [[ -n "$CLIP_CMD" ]]; then
       resume:*) uuid=\${kk#resume:}; printf 'cd %q && %s --resume %q' \"\$cwd\" \"\$cmd\" \"\$uuid\" | ${CLIP_CMD} ;;
       new:*)    printf 'cd %q && %s' \"\$cwd\" \"\$cmd\" | ${CLIP_CMD} ;;
     esac
-  )+change-header(📋 Copied command to clipboard — ⏎: launch | ^Y: copy again)")
+  )+change-header(${MSG_COPIED_CMD})")
   # ctrl-i: copy UUID (resume) or repo path (new, group header)
   CLIP_BINDS+=(--bind "ctrl-i:execute-silent(
     kk={4};
@@ -247,7 +348,7 @@ if [[ -n "$CLIP_CMD" ]]; then
       resume:*)      printf '%s' \"\${kk#resume:}\" | ${CLIP_CMD} ;;
       new:*|group:*) printf '%s' {5} | ${CLIP_CMD} ;;
     esac
-  )+change-header(📋 Copied ID/path to clipboard — ⏎: launch | ^I: copy again)")
+  )+change-header(${MSG_COPIED_ID})")
 fi
 
 # ctrl-d: delete session (resume only). Repo (new) rows and group headers
@@ -257,7 +358,7 @@ DELETE_BIND=(--bind "ctrl-d:execute(
   kk={4};
   case \"\$kk\" in
     resume:*)      bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
-    new:*|group:*) echo '[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'; read -r -n1 _ ;;
+    new:*|group:*) echo '${MSG_NO_REPO_DELETE}'; read -r -n1 _ ;;
   esac
 )+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
@@ -269,14 +370,18 @@ DELETE_BIND=(--bind "ctrl-d:execute(
 # argument, so the `)` of the case patterns cannot end it early. fzf runs the
 # command with $SHELL -c; the test itself goes through `bash -c` so a
 # non-POSIX login shell (fish) cannot break Enter on every row.
-fzf_has_transform() {
-  local v
-  v=$(fzf --version 2>/dev/null) || return 1
-  [[ "$v" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
-  (( 10#${BASH_REMATCH[1]} > 0 || 10#${BASH_REMATCH[2]} >= 45 ))
-}
 GROUP_BINDS=()
-if fzf_has_transform; then
+if [[ "$UI" == "simple" ]]; then
+  # simple: Enter on a heading, a group header or an empty result says why
+  # nothing opened (a one-line header flash) instead of doing nothing; any
+  # cursor move puts the usual guide line back (focus). fzf >= 0.61 here.
+  MSG_ON_GROUP='  ここは見出しです。下の行をえらんでください'
+  MSG_ON_SEPARATOR='  ここは区切りの行です。上か下の行をえらんでください'
+  MSG_NO_MATCH='  見つかりません。delete キーで文字を消してください'
+  for key in enter double-click; do
+    GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo \"change-header(${MSG_ON_GROUP})\" ;; separator:*) echo \"change-header(${MSG_ON_SEPARATOR})\" ;; \"\") echo \"change-header(${MSG_NO_MATCH})\" ;; *) echo accept ;; esac' _ {4}")
+  done
+elif fzf_at_least 0 45; then
   for key in enter double-click; do
     GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo ignore ;; *) echo accept ;; esac' _ {4}")
   done
@@ -294,7 +399,88 @@ else
   HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del[resume] Esc:quit'
 fi
 
+# ── Launch fzf (simple) ──────────────────────────────────────────────────────
+# Same rows, same bindings and the same post-pick path as the classic look;
+# only the frame, the words and where the badges live differ (the list shows
+# column 1 only — ccs-list puts the whole simple line there).
+#   --no-sort      the list keeps its order while filtering: typing a group's
+#                  name shows the group, then its projects, then their
+#                  conversations — a score sort put the conversations first
+#   --header-border=none / preview below under 50 columns
+#                  keep 8 list rows visible on an 80x24 terminal (5 with a
+#                  boxed guide line and a 45% preview)
+#   --no-hscroll   a match far right (the group's name after a description)
+#                  must not scroll the row and hide the project's own name
+#   change:first   fzf keeps the cursor's row number across a query change;
+#                  every edit goes back to the top match instead
+#   result:…down   the cursor never rests on a heading row after the list
+#                  (re)loads or a filter finishes
+if [[ "$UI" == "simple" ]]; then
+  SIMPLE_HEADER='  Enter: ひらく   ↑↓ かマウス: えらぶ   Esc: やめる'
+  LIST_LABEL='  えらぶ  '
+  if (( SCAN_FAILED )); then
+    LIST_LABEL='  えらぶ  ⚠️ 設定ファイルを読めませんでした（Esc でやめると理由が出ます）  '
+  fi
+  LIST_FAILED=0
+  ROWS=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]}" 2>/dev/null) || LIST_FAILED=1
+  # A bash match, not `printf | grep -q`: grep -q exits at the first hit,
+  # printf then dies of SIGPIPE, and pipefail turns that into "no rows".
+  if [[ "$ROWS" != *$'\t'new:* && "$ROWS" != *$'\t'resume:* ]]; then
+    print_scan_notes
+    if (( LIST_FAILED )); then
+      echo "まだ一覧の準備ができていません。ccs --refresh と打ってください。"
+      exit 0
+    fi
+    case " ${LIST_FLAGS[*]} " in
+      *" --current-only "*)
+        echo "このフォルダでの前の会話は、まだありません。全部の一覧は ccs と打つと出ます。" ;;
+      *" --sessions-only "*)
+        echo "前の会話は、まだありません。ccs と打つと、プロジェクトをえらんで新しく始められます。" ;;
+      *)
+        echo "まだ一覧に出すプロジェクトがありません。"
+        echo "  ・ホームのフォルダから選んで足すには: ccs init --auto-discover"
+        echo "  ・自分で書くときは ~/.config/ccs/repos.yml を開いて、repos: の下にフォルダを足してください" ;;
+    esac
+    exit 0
+  fi
+  FZF_RC=0
+  SELECTED=$(printf '%s\n' "$ROWS" | fzf \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --no-sort --no-hscroll \
+    --style=full:rounded --border=rounded \
+    --border-label='  Claude Code をはじめる  ' --border-label-pos=3 \
+    --list-label="${LIST_LABEL}" --input-label='  さがす  ' --preview-label='  中身  ' \
+    --header="${SIMPLE_HEADER}" --header-border=none \
+    --ghost='ここに文字を打つと、しぼりこめます' \
+    --prompt='🔎 ' --pointer='▶' --highlight-line \
+    --info=inline-right --layout=reverse --height=100% \
+    --color='label:blue:bold,border:gray,header:gray,pointer:blue,hl:red,hl+:red' \
+    --preview="'${TSX}' '${CCS_PREVIEW}' {4} {5} --ui=simple" \
+    --preview-window='right,50%,wrap,<50(down,40%,wrap)' \
+    "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
+    "${DELETE_BIND[@]}" \
+    "${REFRESH_BIND[@]}" \
+    "${GROUP_BINDS[@]}" \
+    --bind "focus:change-header(${SIMPLE_HEADER})" \
+    --bind "zero:change-header(${MSG_NO_MATCH})" \
+    --bind "change:first" \
+    --bind "result:transform:bash -c 'case \$1 in separator:*) echo down ;; esac' _ {4}" \
+  ) || FZF_RC=$?
+  print_scan_notes
+  if (( FZF_RC != 0 )) || [[ -z "$SELECTED" ]]; then
+    if (( FZF_RC == 2 )); then
+      echo "[ccs] 一覧をうまく開けませんでした。今の見た目で開くには: ccs --ui=classic" >&2
+    else
+      echo "やめました。もう一度ひらくときは ccs と打ってください。"
+    fi
+    exit 0
+  fi
+fi
+
 # ── Launch fzf ───────────────────────────────────────────────────────────────
+if [[ "$UI" == "classic" ]]; then
 SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   --ansi \
   --delimiter=$'\t' \
@@ -312,6 +498,7 @@ SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   --prompt='ccs> ' \
   --tabstop=4 \
 ) || exit 0
+fi
 
 [[ -z "$SELECTED" ]] && exit 0
 
@@ -384,8 +571,12 @@ esac
 # path ("$HOME"/*): a bare prefix match would also accept sibling dirs like
 # /Users/xEVIL (audit L-1).
 if [[ "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ]]; then
-  echo "⚠️  cwd is outside \$HOME: ${ROW_CWD}" >&2
-  echo "Launching in current directory instead." >&2
+  if [[ "$UI" == "simple" ]]; then
+    echo "⚠️  ホームの外のフォルダ（${ROW_CWD}）は開けないので、いまいるフォルダで開きます" >&2
+  else
+    echo "⚠️  cwd is outside \$HOME: ${ROW_CWD}" >&2
+    echo "Launching in current directory instead." >&2
+  fi
   ROW_CWD="."
 fi
 
@@ -396,19 +587,41 @@ fi
 
 # ── cd ───────────────────────────────────────────────────────────────────────
 if ! cd "$ROW_CWD" 2>/dev/null; then
-  echo "⚠️  Directory ${ROW_CWD} not found. Launching in $(pwd) instead." >&2
+  if [[ "$UI" == "simple" ]]; then
+    echo "⚠️  フォルダ ${ROW_CWD} が見つからないので、いまいるフォルダ（$(pwd)）で開きます" >&2
+  else
+    echo "⚠️  Directory ${ROW_CWD} not found. Launching in $(pwd) instead." >&2
+  fi
 fi
+
+# $PWD with $HOME shown as ~ (simple look). A function, not
+# ${PWD/#$HOME/\~}: bash 3.2 — still /bin/bash on macOS — prints the backslash.
+tilde_pwd() {
+  case "$PWD" in
+    "$HOME") printf '~' ;;
+    "$HOME"/*) printf '~%s' "${PWD#"$HOME"}" ;;
+    *) printf '%s' "$PWD" ;;
+  esac
+}
 
 # ── Execute ──────────────────────────────────────────────────────────────────
 # Direct invocation (NOT exec) so shell functions / aliases like `opr` work.
 # shellcheck disable=SC2086
 case "$KIND" in
   resume)
-    echo "🔄 Resuming session ${KEY} in $(pwd)..."
+    if [[ "$UI" == "simple" ]]; then
+      echo "🔄 前の会話のつづきを開きます（$(tilde_pwd)）"
+    else
+      echo "🔄 Resuming session ${KEY} in $(pwd)..."
+    fi
     ${ROW_CMD} --resume "${KEY}" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
     ;;
   new)
-    echo "🚀 Launching ${KEY} in $(pwd)..."
+    if [[ "$UI" == "simple" ]]; then
+      echo "🚀 Claude Code を開きます（$(tilde_pwd)）"
+    else
+      echo "🚀 Launching ${KEY} in $(pwd)..."
+    fi
     ${ROW_CMD} "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
     ;;
 esac

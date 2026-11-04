@@ -24,15 +24,29 @@ const MAX_MSG_LEN = 200;
 // drift apart (review A-1/A-2). The preview passes includeToolBlocks below
 // because tool activity is part of the conversation flow it renders.
 
-export async function renderSessionPreview(sessionId: string): Promise<void> {
+export interface SessionPreviewOptions {
+  /**
+   * ui: simple — print only the conversation, under a Japanese heading and
+   * with "あなた" / "Claude" speakers (the caller already drew the card with
+   * the folder and time); errors are one Japanese line each.
+   */
+  simple?: boolean;
+}
+
+export async function renderSessionPreview(
+  sessionId: string,
+  opts: SessionPreviewOptions = {},
+): Promise<void> {
+  const simple = opts.simple ?? false;
+  const say = (classic: string, ja: string) => console.log(simple ? ja : classic);
   if (!sessionId) {
-    console.log("No session ID provided");
+    say("No session ID provided", "会話の記録が見つかりません");
     return;
   }
 
   // UUID validation (injection prevention)
   if (!UUID_RE.test(sessionId)) {
-    console.log("Invalid session ID format");
+    say("Invalid session ID format", "会話の記録が見つかりません");
     return;
   }
 
@@ -54,12 +68,12 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
       }
     }
   } catch {
-    console.log("Cannot read projects directory");
+    say("Cannot read projects directory", "会話の記録の置き場を読めませんでした");
     return;
   }
 
   if (!targetFile) {
-    console.log("Session file not found");
+    say("Session file not found", "会話の記録のファイルが見つかりません（消された会話かもしれません）");
     return;
   }
 
@@ -67,11 +81,15 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
   try {
     const stats = await stat(targetFile);
     if (stats.size > MAX_JSONL_SIZE) {
-      console.log(`⚠️ File too large (${Math.round(stats.size / 1024 / 1024)}MB). Skipping preview.`);
+      const mb = Math.round(stats.size / 1024 / 1024);
+      say(
+        `⚠️ File too large (${mb}MB). Skipping preview.`,
+        `長い会話なので、ここには中身を出しません（${mb}MB）。Enter で開けます`,
+      );
       return;
     }
   } catch {
-    console.log("Cannot stat session file");
+    say("Cannot stat session file", "会話の記録のファイルを読めませんでした");
     return;
   }
 
@@ -95,12 +113,21 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
         (entry.type === "user" || entry.type === "assistant") &&
         entry.message?.content
       ) {
+        // The simple look leaves out the "[tool: …]" / "[tool result]"
+        // placeholders: they are machinery, not the conversation a person
+        // remembers (a tool-result-only turn then has no text and is skipped).
         const text = extractText(entry.message.content, {
-          includeToolBlocks: true,
+          includeToolBlocks: !simple,
         });
         if (text) {
           messages.push({
-            role: entry.type === "user" ? "👤" : "🤖",
+            role: simple
+              ? entry.type === "user"
+                ? "👤 あなた:"
+                : "🤖 Claude:"
+              : entry.type === "user"
+                ? "👤"
+                : "🤖",
             text: maskSecrets(truncate(text, MAX_MSG_LEN)),
           });
           // Memory optimization: keep at most 2x display limit
@@ -112,6 +139,20 @@ export async function renderSessionPreview(sessionId: string): Promise<void> {
     } catch {
       // skip
     }
+  }
+
+  if (simple) {
+    console.log("  ──── これまでの会話 ────");
+    console.log();
+    if (messages.length === 0) {
+      console.log("  （まだやりとりはありません）");
+      return;
+    }
+    for (const msg of messages.slice(-MAX_PREVIEW_MESSAGES)) {
+      console.log(`  ${msg.role} ${msg.text}`);
+      console.log();
+    }
+    return;
   }
 
   // Header — cwd/gitBranch/version are untrusted JSONL fields read straight
