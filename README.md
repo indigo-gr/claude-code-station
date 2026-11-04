@@ -47,10 +47,17 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 ### Quick install (npm, recommended) / クイックインストール（npm直接・推奨）
 
 ```bash
-npm install -g claude-code-station
+npm install -g @indigo-gr/claude-code-station
 ```
 
-Installs from the [npm registry](https://www.npmjs.com/package/claude-code-station). All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / npm レジストリから取得。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+Installs from the [npm registry](https://www.npmjs.com/package/@indigo-gr/claude-code-station). All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / npm レジストリから取得。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+
+Up to 0.3.1 the package was published unscoped as `claude-code-station` (now deprecated). If you installed it under that name, switch once — the `ccs` command, `~/.config/ccs/repos.yml` and the cache stay as they are. / 0.3.1 まではスコープなしの `claude-code-station` で出していた（今は deprecate 済み）。その名前で入れていたら一度だけ入れ替える（`ccs` のコマンド・`~/.config/ccs/repos.yml`・キャッシュはそのまま）。
+
+```bash
+npm uninstall -g claude-code-station
+npm install -g @indigo-gr/claude-code-station
+```
 
 #### From GitHub (latest unreleased) / GitHub直接（未リリース版を使いたい時）
 
