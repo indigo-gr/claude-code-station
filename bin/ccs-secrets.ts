@@ -23,7 +23,7 @@
  *   google-oauth  = Google OAuth client secret (GOCSPX-)
  *   sendgrid      = SendGrid API key (SG.xxx.yyy)
  *   npm-token     = npm automation/publish token (npm_)
- *   slack-webhook = Slack incoming-webhook URL (hooks.slack.com/services/...)
+ *   slack-webhook = Slack incoming-webhook URL (a hooks.slack.com/services/ path)
  *   aws-access    = AWS long-lived access key ID (AKIA prefix)
  *   aws-sts       = AWS STS temporary session credentials (ASIA prefix)
  *   google-api    = Google API key (AIza prefix)

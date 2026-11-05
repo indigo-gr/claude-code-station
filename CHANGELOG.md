@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-11-06
+
+### Changed
+- Republished to update the package's public contact details on npm. No functional changes.
+
+### Security
+- Lockfile: `tsx` 4.23.15, which brings `esbuild` 0.28.2 ([GHSA-g7r4-m6w7-qqqr](https://github.com/advisories/GHSA-g7r4-m6w7-qqqr), a path traversal in esbuild's development server on Windows). ccs never runs that server — tsx only uses esbuild to transform code — so ccs was not affected. A fresh `npm install -g` already resolved the newer tsx; this updates the lockfile used by installs from the repository (`install.sh --with-deps`).
+
 ## [0.3.2] — 2026-11-05
 
 ### Changed

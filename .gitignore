@@ -2,8 +2,20 @@ node_modules/
 *.log
 .DS_Store
 
-# Local Claude Code workspace (handoffs, agent outputs, local notes) — never publish
-.claude/
+# Claude Code: local-only files (handoffs, agent outputs, local settings) — never commit
+**/.claude/settings.local.json
+**/.claude/agent-workspace/
+**/.claude/tmp/
+**/.claude/worktrees/
+**/.claude/backups/
+**/.claude/handoff/
+CLAUDE.local.md
+.serena/
+
+# Secrets
+.env
+.env.*
+*.env
 
 # Local clone of the distribution repository
 dist/

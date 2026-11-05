@@ -405,7 +405,7 @@ async function scanOneRepo(
   } catch (err) {
     // Mask before persisting AND before logging: git subprocess errors can
     // contain remote URLs with embedded credentials
-    // (e.g. https://user:token@github.com/...).
+    // (an https remote whose userinfo part holds a user and a token).
     const errMsg = err instanceof Error ? err.message : String(err);
     const maskedErr = maskSecrets(errMsg);
     stats.scan_error = maskedErr;
