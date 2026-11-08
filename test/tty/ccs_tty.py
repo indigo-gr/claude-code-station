@@ -6,7 +6,16 @@ fixed size, answers the cursor-position query fzf's renderer sends, feeds the
 output through a small VT100 screen model, and follows a script of steps.
 
 Usage:
-    ccs_tty.py --cols 120 --rows 36 --script steps.json -- cmd arg...
+    ccs_tty.py --cols 120 --rows 36 [--ambiguous 2] [--wide "©"] \\
+               --script steps.json -- cmd arg...
+
+--ambiguous and --wide set how many cells the modelled TERMINAL gives a
+character, independently of what fzf believes (fzf reads RUNEWIDTH_EASTASIAN
+from the environment the caller passes). A terminal and fzf that disagree are
+what breaks a frame, so the two are separate on purpose:
+    --ambiguous 2   East Asian "Ambiguous" characters take 2 cells (box
+                    drawing included), like a terminal set to double width
+    --wide CHARS    these characters take 2 cells, whatever their class
 
 steps.json is a list of objects, run in order:
     {"wait": "text", "timeout": 10}   wait until the screen contains text
@@ -17,9 +26,12 @@ steps.json is a list of objects, run in order:
     {"snap": "name"}                  record the screen under `name`
     {"exit": 10}                      wait (seconds) for the process to end
 
-Prints one JSON object: {"snaps": {name: [lines]}, "exit": code|null,
-"tail": [last screen lines], "error": str|null}. A failed wait is reported
-in "error" with the screen at that moment, never as an exception.
+Prints one JSON object: {"snaps": {name: [lines]}, "frames": {name: [problems
+with the rounded boxes on that screen]}, "wraps": {name: autowraps so far},
+"times": {name: seconds since the start}, "exit": code|null, "tail": [last
+screen lines], "error": str|null}. A failed
+wait is reported in "error" with the screen at that moment, never as an
+exception.
 """
 
 from __future__ import annotations
@@ -38,7 +50,7 @@ import time
 import unicodedata
 
 
-def char_width(ch: str) -> int:
+def char_width(ch: str, ambiguous: int = 1, wide: str = "") -> int:
     cp = ord(ch)
     if cp == 0:
         return 0
@@ -46,16 +58,70 @@ def char_width(ch: str) -> int:
         return 0
     if 0xFE00 <= cp <= 0xFE0F:  # variation selectors (fzf's runewidth: 0)
         return 0
-    if unicodedata.east_asian_width(ch) in ("W", "F"):
+    if ch in wide:
         return 2
+    eaw = unicodedata.east_asian_width(ch)
+    if eaw in ("W", "F"):
+        return 2
+    if eaw == "A":
+        return ambiguous
     return 1
+
+
+# What may sit on the left or right edge of a box: the border itself, or the
+# scrollbar fzf draws over it.
+BOX_EDGE = set("│┃║▌▐▏▕█░▒▓╎┆┊")
+
+
+def frame_problems(grid: list[list[str]]) -> list[str]:
+    """Check every rounded box by cell position: corners and edges line up.
+
+    Works on the cells, not on the text: a wide character leaves an empty cell
+    behind it, so a string index would not tell a column.
+    """
+    problems: list[str] = []
+    rows = len(grid)
+    closed: set[tuple[int, int]] = set()
+    for r, row in enumerate(grid):
+        opened: list[int] = []
+        for c, ch in enumerate(row):
+            if ch == "╭":
+                opened.append(c)
+            elif ch == "╮":
+                if not opened:
+                    problems.append(f"row {r}: ╮ at column {c} with no ╭ on its left")
+                    continue
+                left = opened.pop()
+                bottom = next((b for b in range(r + 1, rows) if grid[b][left] == "╰"), None)
+                if bottom is None:
+                    problems.append(f"row {r}: box at columns {left}-{c} has no ╰ under column {left}")
+                    continue
+                closed.add((bottom, left))
+                if grid[bottom][c] != "╯":
+                    found = "".join(grid[bottom]).rstrip()
+                    problems.append(f"row {bottom}: expected ╯ at column {c}, got {grid[bottom][c]!r} in {found!r}")
+                for m in range(r + 1, bottom):
+                    for edge in (left, c):
+                        if grid[m][edge] not in BOX_EDGE:
+                            problems.append(f"row {m}: expected an edge at column {edge}, got {grid[m][edge]!r}")
+        for left in opened:
+            problems.append(f"row {r}: ╭ at column {left} has no ╮ on its right")
+    # A label wider than the box overwrites its top corners: the top border
+    # then has nothing to check, and only the bottom corners are left to tell.
+    for r, row in enumerate(grid):
+        for c, ch in enumerate(row):
+            if ch == "╰" and (r, c) not in closed:
+                problems.append(f"row {r}: ╰ at column {c} has no ╭ above it")
+    return problems
 
 
 class Screen:
     """Just enough of a VT100/xterm screen for fzf's renderers."""
 
-    def __init__(self, cols: int, rows: int) -> None:
+    def __init__(self, cols: int, rows: int, ambiguous: int = 1, wide: str = "") -> None:
         self.cols, self.rows = cols, rows
+        self.ambiguous, self.wide = ambiguous, wide
+        self.wraps = 0
         self.grid = [[" "] * cols for _ in range(rows)]
         self.r = self.c = 0
         self.top, self.bottom = 0, rows - 1
@@ -86,17 +152,19 @@ class Screen:
             self.r = min(self.rows - 1, self.r + 1)
 
     def put(self, ch: str) -> None:
-        w = char_width(ch)
+        w = char_width(ch, self.ambiguous, self.wide)
         if w == 0:
             return
         if self.pending_wrap:
             self.c = 0
             self.linefeed()
             self.pending_wrap = False
+            self.wraps += 1
         if w == 2 and self.c == self.cols - 1:
             self.grid[self.r][self.c] = " "
             self.c = 0
             self.linefeed()
+            self.wraps += 1
         self.grid[self.r][self.c] = ch
         if w == 2:
             self.grid[self.r][self.c + 1] = ""
@@ -283,6 +351,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cols", type=int, default=120)
     ap.add_argument("--rows", type=int, default=36)
+    ap.add_argument("--ambiguous", type=int, choices=(1, 2), default=1)
+    ap.add_argument("--wide", default="")
     ap.add_argument("--script", required=True)
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args()
@@ -295,10 +365,11 @@ def main() -> int:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", a.rows, a.cols, 0, 0))
     os.kill(pid, signal.SIGWINCH)
 
-    scr = Screen(a.cols, a.rows)
+    scr = Screen(a.cols, a.rows, a.ambiguous, a.wide)
     decoder_buf = b""
     exit_code: int | None = None
-    result: dict = {"snaps": {}, "exit": None, "tail": [], "error": None}
+    started = time.time()
+    result: dict = {"snaps": {}, "frames": {}, "wraps": {}, "times": {}, "exit": None, "tail": [], "error": None}
 
     def pump(timeout: float) -> bool:
         """Read what is available; False once the child closed the pty."""
@@ -370,6 +441,9 @@ def main() -> int:
                         break
             elif "snap" in st:
                 result["snaps"][st["snap"]] = scr.lines()
+                result["frames"][st["snap"]] = frame_problems(scr.grid)
+                result["wraps"][st["snap"]] = scr.wraps
+                result["times"][st["snap"]] = round(time.time() - started, 3)
             elif "exit" in st:
                 end = time.time() + st["exit"]
                 while time.time() < end:

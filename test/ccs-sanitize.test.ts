@@ -86,3 +86,16 @@ describe("sanitizeSessionCwd (audit H-1)", () => {
     assert.equal(sanitizeSessionCwd("relative/path"), null);
   });
 });
+
+describe("sanitizeSessionCwd and two dots", () => {
+  for (const cwd of ["/a/../b", "/a/..", "/..", "/../a", "/a/b/../../c", "/a/../"]) {
+    test(`a .. segment is refused: ${cwd}`, () => {
+      assert.equal(sanitizeSessionCwd(cwd), null);
+    });
+  }
+  for (const cwd of ["/a/b", "/a/b/", "/a/./b", "/a//b", "/a/..b", "/a/b..", "/a/...", "/..a/b", "/a/b../c", "/制作/チーム"]) {
+    test(`an ordinary path passes as written: ${cwd}`, () => {
+      assert.equal(sanitizeSessionCwd(cwd), cwd);
+    });
+  }
+});

@@ -46,6 +46,11 @@ export function truncate(s: string, max: number): string {
   return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
 }
 
+/** A repos.yml icon as drawn: never a tab or an escape, 📁 when nothing is left. */
+export function displayIcon(icon: string | null | undefined): string {
+  return stripControlChars(icon ?? "") || "📁";
+}
+
 // ---------------------------------------------------------------------------
 // Repo display name & nesting
 // ---------------------------------------------------------------------------

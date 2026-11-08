@@ -20,6 +20,7 @@ import { getPaths } from "./ccs-config.ts";
 import { openDb, reposV3Columns, type DbHandle } from "./ccs-db.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
 import {
+  displayIcon,
   formatRelativeTime,
   formatDateTime,
   formatFriendlyTime,
@@ -29,6 +30,7 @@ import {
   tildePath,
   uiFromArgv,
 } from "./ccs-utils.ts";
+import { stripControlChars, stripControlCharsKeepLines } from "./ccs-sanitize.ts";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -225,9 +227,9 @@ function renderRepoPreview(name: string, cwd: string): void {
     // showing the name.
     const displayName = repoDisplayName(repo);
     const nameHint = displayName !== repo.name ? `  ${dim(`(${repo.name})`)}` : "";
-    console.log(`${hdr(`${repo.icon || "📁"} ${displayName}`)}${nameHint}`);
+    console.log(`${hdr(`${displayIcon(repo.icon)} ${displayName}`)}${nameHint}`);
     console.log(dim(repo.path));
-    if (repo.description) console.log(repo.description);
+    if (repo.description) console.log(stripControlCharsKeepLines(repo.description));
     console.log("");
 
     // --- Git ---
@@ -337,7 +339,7 @@ function renderRepoPreview(name: string, cwd: string): void {
       const tags = JSON.parse(repo.tags_json || "[]") as unknown;
       if (Array.isArray(tags) && tags.length > 0) {
         console.log(divider("Tags"));
-        console.log(tags.map(String).join(", "));
+        console.log(tags.map((t) => stripControlChars(String(t))).join(", "));
       }
     } catch {
       // ignore
@@ -395,7 +397,7 @@ function renderGroupPreview(name: string, cwd: string): void {
       return;
     }
 
-    console.log(`${hdr(`${group.icon || "📁"} ${repoDisplayName(group)}`)}`);
+    console.log(`${hdr(`${displayIcon(group.icon)} ${repoDisplayName(group)}`)}`);
     console.log(dim(group.path));
     if (group.description) console.log(truncate(group.description, 200));
     console.log("");
@@ -418,7 +420,7 @@ function renderGroupPreview(name: string, cwd: string): void {
     entries.forEach((r, i) => {
       const rel = truncate(relative(group.path, r.path), 60) + "/";
       const tag = r.launch === 0 ? `  ${dim("(group)")}` : "";
-      console.log(`  ${r.icon || "📁"} ${names[i].padEnd(width)}  ${dim(rel)}${tag}`);
+      console.log(`  ${displayIcon(r.icon)} ${names[i].padEnd(width)}  ${dim(rel)}${tag}`);
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

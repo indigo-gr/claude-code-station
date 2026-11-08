@@ -20,7 +20,10 @@ import {
   writeFile,
   chmod,
   access,
+  cp,
+  symlink,
 } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -29,6 +32,9 @@ import { fileURLToPath } from "node:url";
 import { openDb, upsertRepo } from "../bin/ccs-db.ts";
 
 const CCS_BIN = fileURLToPath(new URL("../bin/ccs", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const VERSION = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8")).version as string;
+const HOLDER = "INDIGO GROUP LLC.";
 const DELETE_SH = fileURLToPath(new URL("../bin/ccs-delete.sh", import.meta.url));
 
 const UUID = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -434,7 +440,7 @@ function runSimple(
   sb: PickSandbox,
   pick: string,
   args: string[],
-  opts: { fzfVersion?: string; env?: Record<string, string | undefined> } = {},
+  opts: { fzfVersion?: string; env?: Record<string, string | undefined>; bin?: string } = {},
 ): { stdout: string; stderr: string; code: number } {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -446,15 +452,20 @@ function runSimple(
     FAKE_FZF_ARGS: sb.fzfArgs,
     FAKE_FZF_VERSION: opts.fzfVersion ?? "0.74.5",
     FAKE_CLAUDE_LOG: sb.claudeLog,
+    // The label depends on the width. Without this it would follow the terminal
+    // the test suite happens to run in (bin/ccs asks /dev/tty).
+    COLUMNS: "120",
   };
   delete env.CCS_CMD;
   delete env.CCR_CMD;
   delete env.CCS_UI;
+  delete env.CCS_NO_UPDATE_CHECK;
+  delete env.CCS_UPDATE_REGISTRY;
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     if (v === undefined) delete env[k];
     else env[k] = v;
   }
-  const res = spawnSync("bash", [CCS_BIN, ...args], { encoding: "utf-8", env });
+  const res = spawnSync("bash", [opts.bin ?? CCS_BIN, ...args], { encoding: "utf-8", env });
   return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.status ?? -1 };
 }
 
@@ -465,7 +476,7 @@ async function fzfArgs(sb: PickSandbox): Promise<string[]> {
 
 const isSimpleArgs = (a: string[]) =>
   a.includes("--style=full:rounded") &&
-  a.includes("--border-label=  Claude Code をはじめる  ") &&
+  a.includes(`--border-label=  Claude Code をはじめる  ccs v${VERSION}  Copyright © ${HOLDER}  `) &&
   a.includes("--list-label=  えらぶ  ") &&
   a.includes("--input-label=  さがす  ") &&
   a.includes("--preview-label=  中身  ") &&
@@ -628,6 +639,414 @@ describe("bin/ccs --ui=simple (stub fzf)", () => {
         /設定ファイル（~\/\.config\/ccs\/repos\.yml）を読めなかったので、前の一覧を出しました。下の行を直してから、もう一度 ccs と打ってください。\n {4}\[ccs-scan\] fatal: .*unsupported version/,
       );
       assert.doesNotMatch(simple.stderr, /continuing with stale DB/);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bin/ccs — version and copyright in the frame, stub fzf
+// ---------------------------------------------------------------------------
+
+/** Terminal cells of a label: the Japanese title is double width, © is not. */
+const cells = (s: string) => [...s].reduce((n, c) => n + (c.codePointAt(0)! >= 0x3000 ? 2 : 1), 0);
+
+/** The frame needs 2 cells on the left and 2 on the right beside the label. */
+const widthFor = (label: string) => cells(label) + 4;
+
+function labelForms(look: "simple" | "classic", version: string): string[] {
+  const pad = look === "simple" ? "  " : " ";
+  const tag = `ccs v${version}`;
+  const forms = [
+    `${pad}${tag}  Copyright © ${HOLDER}${pad}`,
+    `${pad}${tag}  © ${HOLDER}${pad}`,
+    `${pad}${tag}${pad}`,
+  ];
+  if (look === "simple") forms.unshift(`${pad}Claude Code をはじめる  ${tag}  Copyright © ${HOLDER}${pad}`);
+  return forms;
+}
+
+function borderLabel(args: string[]): string | undefined {
+  return args.find((a) => a.startsWith("--border-label="))?.slice("--border-label=".length);
+}
+
+const PACKAGE_NAME = "@indigo-gr/claude-code-station";
+let buildCount = 0;
+
+/**
+ * A copy of bin/ with its own package.json, to run other version numbers.
+ * `manifest`: the file's exact text (null = no file). A string with no newline
+ * or brace is taken as a version number of this package.
+ */
+async function makeBuild(root: string, manifest: string | null): Promise<string> {
+  const dir = join(root, `build-${++buildCount}`);
+  await cp(join(REPO_ROOT, "bin"), join(dir, "bin"), { recursive: true });
+  await symlink(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
+  if (manifest !== null) {
+    const text = /^[0-9]/.test(manifest)
+      ? JSON.stringify({ name: PACKAGE_NAME, version: manifest }, null, 2) + "\n"
+      : manifest;
+    await writeFile(join(dir, "package.json"), text);
+  }
+  return join(dir, "bin", "ccs");
+}
+
+describe("bin/ccs version and copyright label (stub fzf)", () => {
+  for (const look of ["simple", "classic"] as const) {
+    const forms = labelForms(look, VERSION);
+    for (const [i, form] of forms.entries()) {
+      test(`${look}: the longest label that fits, at its exact width (form ${i + 1})`, async () => {
+        const sb = await makePickSandbox();
+        try {
+          const fits = widthFor(form);
+          runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { env: { COLUMNS: String(fits) } });
+          assert.equal(borderLabel(await fzfArgs(sb)), form, `${fits} columns`);
+          if (i + 1 < forms.length) {
+            runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { env: { COLUMNS: String(fits - 1) } });
+            assert.equal(borderLabel(await fzfArgs(sb)), forms[i + 1], `${fits - 1} columns`);
+          }
+        } finally {
+          await sb.cleanup();
+        }
+      });
+    }
+
+    test(`${look}: the label sits at the same place and the words come from package.json`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        for (const version of ["7.8.9", "123.456.789"]) {
+          const bin = await makeBuild(sb.root, version);
+          for (const form of labelForms(look, version)) {
+            runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin, env: { COLUMNS: String(widthFor(form)) } });
+            const a = await fzfArgs(sb);
+            assert.equal(borderLabel(a), form);
+            assert.ok(a.includes("--border-label-pos=3"));
+          }
+          assert.equal(runSimple(sb, "", ["--version"], { bin }).stdout.trim(), `ccs v${version}`);
+        }
+      } finally {
+        await sb.cleanup();
+      }
+    });
+  }
+
+  test("a width that is not a number falls back to asking the terminal, and never breaks", async () => {
+    const sb = await makePickSandbox();
+    try {
+      for (const columns of ["abc", "0", "-5", "12x", ""]) {
+        const res = runSimple(sb, "new:Studio-web", ["--no-scan", "--ui=simple"], { env: { COLUMNS: columns } });
+        assert.equal(res.code, 0, `COLUMNS=${columns}: ${res.stderr}`);
+        assert.ok(borderLabel(await fzfArgs(sb))?.includes(`ccs v${VERSION}`), `COLUMNS=${columns}`);
+      }
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("--help and --version name the version and the holder", async () => {
+    const sb = await makePickSandbox();
+    try {
+      const help = runSimple(sb, "", ["--help"]);
+      assert.equal(help.code, 0);
+      assert.ok(help.stdout.includes(`ccs v${VERSION}`), help.stdout);
+      assert.ok(help.stdout.includes(`Copyright © ${HOLDER} MIT License.`), help.stdout);
+      assert.ok(help.stdout.includes("CCS_NO_UPDATE_CHECK"), help.stdout);
+      assert.equal(runSimple(sb, "", ["--version"]).stdout.trim(), `ccs v${VERSION}`);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bin/ccs — the update notice from the cache, stub fzf
+// ---------------------------------------------------------------------------
+// stdout is a pipe here, so bin/ccs never starts the check itself. The check on
+// a real pty, against a fake registry, is in ccs-tty.test.ts.
+
+const UPGRADE = "npm install -g @indigo-gr/claude-code-station";
+
+async function writeUpdateCache(sb: PickSandbox, text: string): Promise<void> {
+  await mkdir(join(sb.home, ".cache", "ccs"), { recursive: true });
+  await writeFile(join(sb.home, ".cache", "ccs", "update-check"), text);
+}
+const freshCache = (latest: string) => `latest=${latest}\nchecked=${Math.floor(Date.now() / 1000)}\n`;
+
+function hasNotice(res: { stderr: string }, a: string[]): boolean {
+  return res.stderr.includes(UPGRADE) || a.some((x) => x.includes("が出ています"));
+}
+
+describe("bin/ccs update notice (stub fzf)", () => {
+  test("simple: the frame says so while open, the command is printed after it closes", async () => {
+    const sb = await makePickSandbox();
+    try {
+      await writeUpdateCache(sb, freshCache("99.0.0"));
+      const res = runSimple(sb, "new:Studio-web", ["--no-scan", "--ui=simple"]);
+      assert.equal(res.code, 0, res.stderr);
+      assert.ok((await fzfArgs(sb)).includes("--list-label=  えらぶ  ccs v99.0.0 が出ています  "));
+      assert.ok(res.stderr.includes(`[ccs] 新しい ccs v99.0.0 が出ています（いまは v${VERSION}）。上げるには: ${UPGRADE}`), res.stderr);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("simple: also printed when the picker is closed without choosing", async () => {
+    const sb = await makePickSandbox();
+    try {
+      await writeUpdateCache(sb, freshCache("99.0.0"));
+      const res = runSimple(sb, "no-such-row", ["--no-scan", "--ui=simple"]);
+      assert.equal(res.code, 0, res.stderr);
+      assert.ok(res.stderr.includes(UPGRADE), res.stderr);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("simple: under 44 columns the frame stays quiet, the command is still printed", async () => {
+    const sb = await makePickSandbox();
+    try {
+      await writeUpdateCache(sb, freshCache("99.0.0"));
+      runSimple(sb, "new:Studio-web", ["--no-scan", "--ui=simple"], { env: { COLUMNS: "44" } });
+      assert.ok((await fzfArgs(sb)).includes("--list-label=  えらぶ  ccs v99.0.0 が出ています  "));
+      const res = runSimple(sb, "new:Studio-web", ["--no-scan", "--ui=simple"], { env: { COLUMNS: "43" } });
+      assert.ok((await fzfArgs(sb)).includes("--list-label=  えらぶ  "));
+      assert.ok(res.stderr.includes(UPGRADE), res.stderr);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("classic: one line with the command", async () => {
+    const sb = await makePickSandbox();
+    try {
+      await writeUpdateCache(sb, freshCache("99.0.0"));
+      const res = runSimple(sb, "new:Studio-web", ["--no-scan", "--ui=classic"]);
+      assert.equal(res.code, 0, res.stderr);
+      assert.equal(
+        res.stderr.split("\n").filter((l) => l.includes(UPGRADE)).length,
+        1,
+        res.stderr,
+      );
+      assert.ok(res.stderr.includes(`[ccs] Update v${VERSION} -> v99.0.0: ${UPGRADE}`), res.stderr);
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  for (const look of ["simple", "classic"]) {
+    test(`${look}: newer only, by number and not by text`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        const bin = await makeBuild(sb.root, "0.10.2");
+        for (const [latest, expected] of [
+          ["0.10.3", true],
+          ["0.11.0", true],
+          ["1.0.0", true],
+          ["00.10.3", true],
+          ["0.10.2", false],
+          ["0.10.1", false],
+          ["0.9.99", false],
+          ["0.0.0", false],
+        ] as const) {
+          await writeUpdateCache(sb, freshCache(latest));
+          const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin });
+          assert.equal(res.code, 0, res.stderr);
+          assert.equal(hasNotice(res, await fzfArgs(sb)), expected, `latest ${latest} on 0.10.2`);
+        }
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    test(`${look}: a cache that is not a plain X.Y.Z shows nothing and runs nothing`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        const pwned = join(sb.home, "pwned");
+        for (const text of [
+          "",
+          "garbage",
+          "latest=\nchecked=1\n",
+          "latest=99.0.0-beta.1\nchecked=1\n",
+          "latest=99.0\nchecked=1\n",
+          "latest=99.0.0.1\nchecked=1\n",
+          "latest=1000000000.0.0\nchecked=1\n",
+          "latest=99.0.0;touch pwned\nchecked=1\n",
+          "latest=$(touch pwned)\nchecked=1\n",
+          "latest=`touch pwned`\nchecked=1\n",
+          "latest=99.0.0'\nchecked=1\n",
+          "latest=\u001b[31m99.0.0\nchecked=1\n",
+          "\u0000\u0001\u0002",
+        ]) {
+          await writeUpdateCache(sb, text);
+          const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`]);
+          assert.equal(res.code, 0, `${JSON.stringify(text)}: ${res.stderr}`);
+          assert.equal(hasNotice(res, await fzfArgs(sb)), false, JSON.stringify(text));
+          assert.equal(await exists(pwned), false, JSON.stringify(text));
+        }
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    test(`${look}: the off switch hides a notice the cache would give`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        await writeUpdateCache(sb, freshCache("99.0.0"));
+        for (const off of ["1", "0", "yes"]) {
+          const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { env: { CCS_NO_UPDATE_CHECK: off } });
+          assert.equal(hasNotice(res, await fzfArgs(sb)), false, `CCS_NO_UPDATE_CHECK=${off}`);
+        }
+        const empty = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { env: { CCS_NO_UPDATE_CHECK: "" } });
+        assert.equal(hasNotice(empty, await fzfArgs(sb)), true, "an empty value is not set");
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    test(`${look}: a prerelease gets no notice`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        await writeUpdateCache(sb, freshCache("99.0.0"));
+        const bin = await makeBuild(sb.root, "1.0.0-beta.1");
+        const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin });
+        assert.equal(res.code, 0, res.stderr);
+        assert.equal(hasNotice(res, await fzfArgs(sb)), false);
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    // A copy install sits in someone else's directory: the package.json beside
+    // bin/ may belong to another project, or be anything at all.
+    for (const [name, text] of [
+      ["another package's", JSON.stringify({ name: "someone-else", version: "5.5.5" }, null, 2) + "\n"],
+      [
+        "another package's that depends on this one",
+        JSON.stringify({ name: "someone-else", version: "5.5.5", dependencies: { [PACKAGE_NAME]: "^1.0.0" } }, null, 2) + "\n",
+      ],
+      ["a nameless", JSON.stringify({ version: "5.5.5" }, null, 2) + "\n"],
+      ["a version-less", JSON.stringify({ name: PACKAGE_NAME }, null, 2) + "\n"],
+      ["a broken", '{"name": "@indigo-gr/claude\n{{{ not json'],
+      ["an empty", ""],
+      ["a binary", "\u0000\u0001\u0002\ufffd"],
+    ] as const) {
+      test(`${look}: ${name} package.json beside bin/ means 0.0.0-dev, no notice, no stop`, async () => {
+        const sb = await makePickSandbox();
+        try {
+          await writeUpdateCache(sb, freshCache("99.0.0"));
+          const bin = await makeBuild(sb.root, text === "" ? "\n" : text);
+          const version = runSimple(sb, "", ["--version"], { bin });
+          assert.equal(version.code, 0, version.stderr);
+          assert.equal(version.stdout.trim(), "ccs v0.0.0-dev");
+          const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin });
+          assert.equal(res.code, 0, res.stderr);
+          // Node itself refuses to load a module under a package.json it cannot
+          // parse, so the simple look may not reach fzf at all. It must still end
+          // cleanly, and whatever it does show must not borrow a version.
+          const args = await fzfArgs(sb).catch(() => [] as string[]);
+          if (args.length) assert.ok(borderLabel(args)?.includes("ccs v0.0.0-dev"));
+          else assert.ok(res.stdout.includes("ccs --refresh"), res.stdout);
+          assert.equal(hasNotice(res, args), false);
+        } finally {
+          await sb.cleanup();
+        }
+      });
+    }
+
+    // install.sh and the README's manual install copy bin/ without package.json.
+    test(`${look}: a copy install runs as 0.0.0-dev and gets no notice`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        await writeUpdateCache(sb, freshCache("99.0.0"));
+        const bin = await makeBuild(sb.root, null);
+        assert.equal(runSimple(sb, "", ["--version"], { bin }).stdout.trim(), "ccs v0.0.0-dev");
+        const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin });
+        assert.equal(res.code, 0, res.stderr);
+        assert.ok(borderLabel(await fzfArgs(sb))?.includes("ccs v0.0.0-dev"));
+        assert.equal(hasNotice(res, await fzfArgs(sb)), false);
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    test(`${look}: a directory or an unreadable file where the cache goes`, async () => {
+      const sb = await makePickSandbox();
+      const cache = join(sb.home, ".cache", "ccs", "update-check");
+      try {
+        await mkdir(cache, { recursive: true });
+        let res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`]);
+        assert.equal(res.code, 0, res.stderr);
+        assert.equal(hasNotice(res, await fzfArgs(sb)), false);
+        await rm(cache, { recursive: true });
+        await writeUpdateCache(sb, freshCache("99.0.0"));
+        await chmod(cache, 0o000);
+        res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`]);
+        assert.equal(res.code, 0, res.stderr);
+      } finally {
+        await chmod(cache, 0o600).catch(() => {});
+        await sb.cleanup();
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// bin/ccs — what may become the version, stub fzf
+// ---------------------------------------------------------------------------
+
+describe("bin/ccs reads the version strictly (stub fzf)", () => {
+  const OWN = `"name": "${PACKAGE_NAME}"`;
+  const pkg = (versionLine: string) => `{\n  ${OWN},\n  ${versionLine}\n}\n`;
+
+  for (const [name, text] of [
+    ["a shell command substitution", pkg('"version": "$(touch pwned)"')],
+    ["backticks", pkg('"version": "`touch pwned`"')],
+    ["a semicolon", pkg('"version": "1.2.3;touch pwned"')],
+    ["a space", pkg('"version": "1.2.3 x"')],
+    ["a quote", pkg(`"version": "1.2.3'x"`)],
+    ["an escape sequence", pkg('"version": "1.2.3\u001b[31m"')],
+    ["a slash", pkg('"version": "../../x"')],
+    ["an empty string", pkg('"version": ""')],
+    ["a number", pkg('"version": 1')],
+    ["NUL before the name", `\u0000{\n  "name": "someone\u0000-else",\n  "version": "5.5.5"\n}\n`],
+    ["NUL inside the version", pkg('"version": "1.2.3\u0000$(touch pwned)"')],
+  ] as const) {
+    test(`a version with ${name} is not used`, async () => {
+      const sb = await makePickSandbox();
+      try {
+        const bin = await makeBuild(sb.root, text);
+        const res = runSimple(sb, "", ["--version"], { bin });
+        assert.equal(res.code, 0, res.stderr);
+        assert.equal(res.stderr, "", "no warning from the read");
+        // NUL is dropped by bash: "1.2.3$(touch pwned)" still fails the pattern.
+        assert.equal(res.stdout.trim(), "ccs v0.0.0-dev", JSON.stringify(text));
+        assert.equal(await exists(join(sb.root, "pwned")), false);
+        assert.equal(await exists(join(sb.home, "pwned")), false);
+      } finally {
+        await sb.cleanup();
+      }
+    });
+  }
+
+  test("NUL elsewhere in this package's own file does not stop it", async () => {
+    const sb = await makePickSandbox();
+    try {
+      const bin = await makeBuild(sb.root, `{\n  ${OWN},\n  "description": "a\u0000b",\n  "version": "7.8.9"\n}\n`);
+      const res = runSimple(sb, "", ["--version"], { bin });
+      assert.equal(res.code, 0, res.stderr);
+      assert.equal(res.stderr, "");
+      assert.equal(res.stdout.trim(), "ccs v7.8.9");
+    } finally {
+      await sb.cleanup();
+    }
+  });
+
+  test("a prerelease with build metadata is read as written", async () => {
+    const sb = await makePickSandbox();
+    try {
+      const bin = await makeBuild(sb.root, pkg('"version": "1.2.3-rc.1+build.5"'));
+      assert.equal(runSimple(sb, "", ["--version"], { bin }).stdout.trim(), "ccs v1.2.3-rc.1+build.5");
     } finally {
       await sb.cleanup();
     }

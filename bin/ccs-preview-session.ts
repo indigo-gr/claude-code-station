@@ -8,6 +8,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { maskSecrets } from "./ccs-secrets.ts";
+import { stripControlChars } from "./ccs-sanitize.ts";
 import {
   extractText,
   truncate,
@@ -18,6 +19,11 @@ import {
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const MAX_PREVIEW_MESSAGES = 20;
 const MAX_MSG_LEN = 200;
+
+/** Hide secrets before cutting: a key across the cut no longer matches its pattern. */
+function safeText(text: string, max: number): string {
+  return truncate(maskSecrets(stripControlChars(text)), max);
+}
 
 // extractText / truncate / UUID_RE / MAX_JSONL_SIZE come from ccs-utils.ts —
 // shared with the scanner so the preview and topic extraction can no longer
@@ -128,7 +134,7 @@ export async function renderSessionPreview(
               : entry.type === "user"
                 ? "👤"
                 : "🤖",
-            text: maskSecrets(truncate(text, MAX_MSG_LEN)),
+            text: safeText(text, MAX_MSG_LEN),
           });
           // Memory optimization: keep at most 2x display limit
           if (messages.length > MAX_PREVIEW_MESSAGES * 2) {
@@ -160,9 +166,9 @@ export async function renderSessionPreview(
   // treatment as message text: maskSecrets for credential leakage (audit
   // M-2), truncate to strip control chars / escape sequences (audit NEW-1).
   console.log("━━━ Session Info ━━━");
-  console.log(`📁 ${maskSecrets(truncate(cwd, 200))}`);
-  if (gitBranch) console.log(`🌿 ${maskSecrets(truncate(gitBranch, 100))}`);
-  if (version) console.log(`📌 Claude ${maskSecrets(truncate(version, 50))}`);
+  console.log(`📁 ${safeText(cwd, 200)}`);
+  if (gitBranch) console.log(`🌿 ${safeText(gitBranch, 100)}`);
+  if (version) console.log(`📌 Claude ${safeText(version, 50)}`);
   console.log(`💬 ${messages.length} messages`);
   console.log("━━━ Conversation ━━━");
   console.log();

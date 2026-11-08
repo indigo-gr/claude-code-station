@@ -30,6 +30,7 @@ import { openDb, getMeta, reposV3Columns } from "./ccs-db.ts";
 import { getPaths } from "./ccs-config.ts";
 import { SHELL_METACHARS } from "./ccs-sanitize.ts";
 import {
+  displayIcon,
   truncate,
   formatRelativeTime,
   formatDateTime,
@@ -268,7 +269,7 @@ function repoToRow({ repo: r, parent, prefix }: GroupedRepo): string {
     parentName && parentName !== displayName
       ? `  \x1b[2m‹${parentName}›\x1b[0m`
       : "";
-  const label = `${prefix}${r.icon || "📁"} ${displayName}${parentHint}${LABEL_SEP}`;
+  const label = `${prefix}${displayIcon(r.icon)} ${displayName}${parentHint}${LABEL_SEP}`;
   const desc = truncate(r.description || "", DESC_MAX);
   if (r.launch === 0) {
     // Group header (`launch: false`): display-only, so no badges (the header
@@ -301,6 +302,10 @@ interface SessionRowFull {
   repo_command: string | null;
 }
 
+function isWellFormedRow(row: string): boolean {
+  return row.split("\t").length === 6 && !/[\n\r\x1f]/.test(row);
+}
+
 function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
   // Mapped sessions use the registered repo icon + name — the unique `name`,
   // deliberately not the repos.yml `label`, so session rows read the same as
@@ -318,7 +323,7 @@ function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
     : s.cwd
       ? truncate(s.cwd.replace(homedir(), "~"), DESC_MAX)
       : "(unknown)";
-  const mapIcon = s.repo_display ? s.repo_icon || "📁" : "❓";
+  const mapIcon = s.repo_display ? displayIcon(s.repo_icon) : "❓";
   const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
   const desc = truncate(s.topic || "", DESC_MAX);
   const badges = `[${formatDateTime(s.last_activity_at)}]`;
@@ -660,7 +665,13 @@ function main(): number {
       lines.push(...sessionRows);
     }
 
-    process.stdout.write(lines.join("\n") + (lines.length > 0 ? "\n" : ""));
+    // Last check: bin/ccs takes the columns by position and runs column 6, so a
+    // row of any other shape is dropped, never handed over.
+    const rows = lines.filter(isWellFormedRow);
+    if (rows.length !== lines.length) {
+      process.stderr.write(`[ccs-list] skipped ${lines.length - rows.length} malformed row(s)\n`);
+    }
+    process.stdout.write(rows.join("\n") + (rows.length > 0 ? "\n" : ""));
     return 0;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

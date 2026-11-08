@@ -15,7 +15,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import {
   closeSync,
   existsSync,
@@ -81,12 +81,25 @@ const PREVIEW_FILE_LIMIT = 10;
 // Utilities
 // ---------------------------------------------------------------------------
 
+const SAFE_GIT_ARGS = [
+  "--no-optional-locks",
+  "-c",
+  "diff.autoRefreshIndex=false",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+];
+
 async function runGit(
   cwd: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string } | null> {
   try {
-    const res = await execFileP("git", args, {
+    // A repo's own .git/config can name programs. These are the ones a scan
+    // would run: an fsmonitor, and the post-index-change hook when status or
+    // diff rewrites the index. A scan only reads, so neither rewrites it.
+    const res = await execFileP("git", [...SAFE_GIT_ARGS, ...args], {
       cwd,
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
@@ -216,12 +229,24 @@ async function readFirstLine(filePath: string): Promise<string | null> {
   }
 }
 
+/** A symlink is followed only when it ends up inside the repo. */
+async function realPathInside(path: string, realRoot: string): Promise<string | null> {
+  const real = await realpath(path);
+  return real === realRoot || real.startsWith(`${realRoot}/`) ? real : null;
+}
+
 async function listDirPreview(
   dirPath: string,
+  repoPath: string,
 ): Promise<{ count: number; previews: PreviewFile[] }> {
   if (!existsSync(dirPath)) return { count: 0, previews: [] };
   let entries: string[];
+  let realRoot: string;
   try {
+    realRoot = await realpath(repoPath);
+    if ((await realPathInside(dirPath, realRoot)) === null) {
+      return { count: 0, previews: [] };
+    }
     entries = await readdir(dirPath);
   } catch {
     return { count: 0, previews: [] };
@@ -230,8 +255,9 @@ async function listDirPreview(
 
   const results = await Promise.all(
     visible.map(async (name): Promise<PreviewFile | null> => {
-      const full = join(dirPath, name);
       try {
+        const full = await realPathInside(join(dirPath, name), realRoot);
+        if (full === null) return null;
         const st = await stat(full);
         if (!st.isFile()) return null;
         const line = await readFirstLine(full);
@@ -391,11 +417,11 @@ async function scanOneRepo(
     }
 
     // --- Workspace dirs ---
-    const handoff = await listDirPreview(join(repo.path, "handoff"));
+    const handoff = await listDirPreview(join(repo.path, "handoff"), repo.path);
     stats.handoff_count = handoff.count;
     handoffPreviews = handoff.previews;
 
-    const pending = await listDirPreview(join(repo.path, "pendings"));
+    const pending = await listDirPreview(join(repo.path, "pendings"), repo.path);
     stats.pending_count = pending.count;
     pendingPreviews = pending.previews;
 
@@ -647,7 +673,15 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     };
   }
 
-  const handle = openDb(paths.stateDb);
+  // A DB that cannot open must not leave the lock behind: every later scan
+  // would say "another scan is in progress" and hide the real error.
+  let handle: ReturnType<typeof openDb>;
+  try {
+    handle = openDb(paths.stateDb);
+  } catch (err) {
+    releaseLock();
+    throw err;
+  }
 
   try {
     syncReposToDb(handle.db, config.repos);

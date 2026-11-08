@@ -27,9 +27,9 @@ echo ""
 MISSING=()
 if command -v node &>/dev/null; then
   NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
-  (( NODE_MAJOR >= 20 )) || MISSING+=("node >= 20 (found $(node -v))")
+  (( NODE_MAJOR >= 22 )) || MISSING+=("node >= 22 (found $(node -v))")
 else
-  MISSING+=("node >= 20")
+  MISSING+=("node >= 22")
 fi
 # fzf >= 0.42.0 required for the change-header binding used by Ctrl-Y/Ctrl-I toasts.
 if command -v fzf &>/dev/null; then
@@ -110,7 +110,7 @@ if echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 else
   echo ""
   echo "Add this to ~/.zshrc or ~/.bashrc:"
-  echo "  export PATH=\"\$HOME/.claude/scripts:\$PATH\""
+  echo "  export PATH=\"\$PATH:\$HOME/.claude/scripts\""
 fi
 
 echo ""

@@ -18,8 +18,24 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 # Single source of truth: read version from package.json next to bin/.
 # Falls back to "0.0.0-dev" for copy-install layouts (install.sh drops bin/
 # scripts into ~/.claude/scripts/ without package.json) or if the read fails.
-VERSION=$(awk -F'"' '/"version":/{print $4; exit}' "${SCRIPT_DIR}/../package.json" 2>/dev/null)
-VERSION="${VERSION:-0.0.0-dev}"
+# Only this package's own file counts: install.sh copies into ~/.claude/scripts/,
+# where ../package.json can belong to something else entirely, and its version
+# must not reach the screen or the update check. A bash match, no extra process.
+CCS_PACKAGE='@indigo-gr/claude-code-station'
+CCS_INSTALL_CMD="npm install -g ${CCS_PACKAGE}"
+VERSION="0.0.0-dev"
+read_package_version() {
+  local file="${SCRIPT_DIR}/../package.json" json=""
+  local name_re='"name"[[:space:]]*:[[:space:]]*"([^"]*)"'
+  local version_re='"version"[[:space:]]*:[[:space:]]*"([0-9A-Za-z.+-]+)"'
+  [[ -f "$file" && -r "$file" ]] || return 0
+  json=$(<"$file") || return 0
+  [[ "$json" =~ $name_re ]] || return 0
+  [[ "${BASH_REMATCH[1]}" == "$CCS_PACKAGE" ]] || return 0
+  [[ "$json" =~ $version_re ]] || return 0
+  VERSION="${BASH_REMATCH[1]}"
+}
+read_package_version 2>/dev/null || true
 
 # Prefer a package-local tsx over the PATH one: the npm install brings tsx
 # as a dependency (../node_modules from the package's bin/), and the copy
@@ -38,6 +54,8 @@ CCS_SCAN="${SCRIPT_DIR}/ccs-scan.ts"
 CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.ts"
 CCS_DELETE="${SCRIPT_DIR}/ccs-delete.sh"
 CCS_INIT="${SCRIPT_DIR}/ccs-init.ts"
+CCS_UPDATE="${SCRIPT_DIR}/ccs-update-check.ts"
+COPYRIGHT='Copyright © INDIGO GROUP LLC.'
 
 # ── CCR_CMD -> CCS_CMD migration shim ────────────────────────────────────────
 if [[ -n "${CCR_CMD:-}" && -z "${CCS_CMD:-}" ]]; then
@@ -72,7 +90,6 @@ check_deps() {
   fi
   command -v node &>/dev/null  || missing+=("node")
   command -v claude &>/dev/null || missing+=("claude (Claude Code CLI)")
-  command -v tput &>/dev/null  || missing+=("tput")
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "❌ Missing dependencies:" >&2
@@ -123,6 +140,9 @@ Environment:
   CCR_CMD             Deprecated — still honored with a warning if CCS_CMD unset
   CCS_UI              simple | classic — overrides repos.yml defaults.ui
                       (the --ui= flag wins over both)
+  CCS_NO_UPDATE_CHECK Any non-empty value stops the update check and its notice
+                      (no network request, the cache is not read)
+  CCS_UPDATE_REGISTRY Registry to ask instead of https://registry.npmjs.org
 
 Examples:
   ccs                                     # Full launcher
@@ -132,7 +152,9 @@ Examples:
   ccs --dangerously-skip-permissions      # Pass-through flag to claude
 
 Config: ~/.config/ccs/repos.yml
-Cache:  ~/.cache/ccs/state.db
+Cache:  ~/.cache/ccs/state.db, ~/.cache/ccs/update-check
+
+${COPYRIGHT} MIT License.
 HELP
 }
 
@@ -277,8 +299,23 @@ if [[ "$UI" == "simple" ]] && ! fzf_at_least 0 61; then
   UI="classic"
 fi
 
+# better-sqlite3 ships prebuilt modules for the common platforms; anywhere else
+# one has to be built from source, which ccs does not do or test.
+native_module_missing() {
+  grep -Eq 'Cannot find module .*better-sqlite3' "$SCAN_ERR_FILE" 2>/dev/null
+}
+print_native_module_hint() {
+  native_module_missing || return 0
+  if [[ "$UI" == "simple" ]]; then
+    echo "[ccs] この環境（$(uname -s)-$(uname -m)）向けの部品（better-sqlite3）が入っていません。ソースから作る必要があります。" >&2
+  else
+    echo "[ccs] better-sqlite3 has no prebuilt module for this platform ($(uname -s)-$(uname -m)); it has to be built from source." >&2
+  fi
+}
+
 if [[ "$UI" == "classic" ]]; then
   cat "$SCAN_ERR_FILE" >&2
+  print_native_module_hint
   if (( SCAN_FAILED )); then
     if (( DO_REFRESH )); then
       echo "[ccs] refresh failed, continuing with stale DB" >&2
@@ -292,7 +329,9 @@ fi
 # the scan was quiet). Printed by print_scan_notes.
 print_scan_notes() {
   [[ "$UI" == "simple" ]] || return 0
-  if (( SCAN_FAILED )); then
+  if native_module_missing; then
+    print_native_module_hint
+  elif (( SCAN_FAILED )); then
     echo "[ccs] 設定ファイル（~/.config/ccs/repos.yml）を読めなかったので、前の一覧を出しました。下の行を直してから、もう一度 ccs と打ってください。" >&2
     sed 's/^/    /' "$SCAN_ERR_FILE" >&2
   elif [[ -s "$SCAN_ERR_FILE" ]]; then
@@ -392,12 +431,110 @@ REFRESH_BIND=(--bind "ctrl-r:execute('${TSX}' '${CCS_SCAN}' --force --quiet)+rel
 
 # ── Header (adaptive to terminal width) ──────────────────────────────────────
 # Note: ^D deletes SESSIONS only; repos are managed via ~/.config/ccs/repos.yml
-COLS=$(tput cols 2>/dev/null || echo 80)
+# Asks the terminal itself: `tput cols 2>/dev/null` inside $() sees no terminal
+# on stdout or stderr and answers 80 at any width. COLUMNS wins when exported.
+terminal_cols() {
+  local size=""
+  if [[ "${COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$COLUMNS"
+    return 0
+  fi
+  size=$(stty size 2>/dev/null </dev/tty) || size=""
+  size="${size##* }"
+  if [[ "$size" =~ ^[1-9][0-9]*$ ]]; then echo "$size"; else echo 80; fi
+}
+COLS=$(terminal_cols)
 if (( COLS >= 80 )); then
   HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: del session (edit repos.yml to remove a repo) | Esc: cancel'
 else
   HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del[resume] Esc:quit'
 fi
+
+# ── Version and copyright (fzf border label) ─────────────────────────────────
+# The frame already exists in both looks, so the label costs no list row, and
+# change-header cannot replace it. fzf draws a label that is too long over the
+# frame's corners, so take the longest form that fits: the title goes first, then
+# the word Copyright, and the version stays. Computed once at start, like the
+# header above. Separators are plain spaces: `·` and `→` are East Asian Ambiguous.
+#   label_fits: 2 for the corner and first dash on the left, 2 on the right so
+#   the label never touches the closing corner.
+label_fits() { (( COLS >= $1 + 4 )); }
+VERSION_TAG="ccs v${VERSION}"
+COPYRIGHT_SHORT='© INDIGO GROUP LLC.'
+TITLE='Claude Code をはじめる'
+TAG_W=${#VERSION_TAG} COPYRIGHT_W=29 COPYRIGHT_SHORT_W=19 TITLE_W=22
+if [[ "$UI" == "simple" ]]; then
+  PAD='  '
+else
+  PAD=' '
+fi
+PAD_W=$(( ${#PAD} * 2 ))
+if [[ "$UI" == "simple" ]] && label_fits $(( PAD_W + TITLE_W + 2 + TAG_W + 2 + COPYRIGHT_W )); then
+  BORDER_LABEL="${PAD}${TITLE}  ${VERSION_TAG}  ${COPYRIGHT}${PAD}"
+elif label_fits $(( PAD_W + TAG_W + 2 + COPYRIGHT_W )); then
+  BORDER_LABEL="${PAD}${VERSION_TAG}  ${COPYRIGHT}${PAD}"
+elif label_fits $(( PAD_W + TAG_W + 2 + COPYRIGHT_SHORT_W )); then
+  BORDER_LABEL="${PAD}${VERSION_TAG}  ${COPYRIGHT_SHORT}${PAD}"
+else
+  BORDER_LABEL="${PAD}${VERSION_TAG}${PAD}"
+fi
+
+# ── Update notice ────────────────────────────────────────────────────────────
+# Startup only reads the cache (no process but `date`). When the cache is a day
+# old, ccs-update-check.ts refreshes it in the background for the NEXT launch:
+# never waited for, silent, with its own time limit. Only a plain X.Y.Z on both
+# sides compares, so a prerelease or a dev checkout gets no notice, and the
+# cache's text is safe to put in an fzf option. Set UPDATE_LATEST when the npm
+# latest is newer than this version.
+UPDATE_LATEST=""
+UPDATE_INTERVAL=86400
+version_is_newer() { # version_is_newer CANDIDATE CURRENT (both X.Y.Z)
+  local a b ai bi i
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    ai=$((10#${a[$i]})) bi=$((10#${b[$i]}))
+    (( ai > bi )) && return 0
+    (( ai < bi )) && return 1
+  done
+  return 1
+}
+check_for_update() {
+  [[ -z "${CCS_NO_UPDATE_CHECK:-}" ]] || return 0
+  local plain='^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$'
+  [[ "$VERSION" =~ $plain ]] || return 0
+
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/ccs/update-check"
+  local key value latest="" checked=0
+  if [[ -f "$cache" && -r "$cache" ]]; then
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+      case "$key" in
+        latest)  latest="$value" ;;
+        checked) checked="$value" ;;
+      esac
+    done < "$cache"
+  fi
+  if [[ "$latest" =~ $plain ]] && version_is_newer "$latest" "$VERSION"; then
+    UPDATE_LATEST="$latest"
+  fi
+
+  # stdout not a terminal = a script or a test, not someone at the picker.
+  [[ -t 1 ]] || return 0
+  [[ "$checked" =~ ^[0-9]{1,12}$ ]] || checked=0
+  local age=$(( $(date +%s) - 10#$checked ))
+  if (( age >= UPDATE_INTERVAL || age < 0 )); then
+    ( "${TSX}" "${CCS_UPDATE}" "${CCS_PACKAGE}" </dev/null >/dev/null 2>&1 & )
+  fi
+  return 0
+}
+check_for_update || true
+
+# simple: the frame says a new version is out; how to get it is printed once the
+# picker has closed, where it can be read and copied.
+print_update_note() {
+  [[ -n "$UPDATE_LATEST" ]] || return 0
+  echo "[ccs] 新しい ccs v${UPDATE_LATEST} が出ています（いまは v${VERSION}）。上げるには: ${CCS_INSTALL_CMD}" >&2
+}
 
 # ── Launch fzf (simple) ──────────────────────────────────────────────────────
 # Same rows, same bindings and the same post-pick path as the classic look;
@@ -415,11 +552,18 @@ fi
 #                  every edit goes back to the top match instead
 #   result:…down   the cursor never rests on a heading row after the list
 #                  (re)loads or a filter finishes
+#   zero/result    with no match fzf fires zero, result, focus, in that order,
+#                  and focus would put the guide line back over the no-match
+#                  message. So zero unbinds focus and result rebinds it once
+#                  there are rows; the result binding already runs bash, so a
+#                  cursor move still costs no process
 if [[ "$UI" == "simple" ]]; then
   SIMPLE_HEADER='  Enter: ひらく   ↑↓ かマウス: えらぶ   Esc: やめる'
   LIST_LABEL='  えらぶ  '
   if (( SCAN_FAILED )); then
     LIST_LABEL='  えらぶ  ⚠️ 設定ファイルを読めませんでした（Esc でやめると理由が出ます）  '
+  elif [[ -n "$UPDATE_LATEST" ]] && (( COLS >= 44 )); then
+    LIST_LABEL="  えらぶ  ccs v${UPDATE_LATEST} が出ています  "
   fi
   LIST_FAILED=0
   ROWS=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]}" 2>/dev/null) || LIST_FAILED=1
@@ -450,7 +594,7 @@ if [[ "$UI" == "simple" ]]; then
     --with-nth=1 \
     --no-sort --no-hscroll \
     --style=full:rounded --border=rounded \
-    --border-label='  Claude Code をはじめる  ' --border-label-pos=3 \
+    --border-label="${BORDER_LABEL}" --border-label-pos=3 \
     --list-label="${LIST_LABEL}" --input-label='  さがす  ' --preview-label='  中身  ' \
     --header="${SIMPLE_HEADER}" --header-border=none \
     --ghost='ここに文字を打つと、しぼりこめます' \
@@ -464,11 +608,12 @@ if [[ "$UI" == "simple" ]]; then
     "${REFRESH_BIND[@]}" \
     "${GROUP_BINDS[@]}" \
     --bind "focus:change-header(${SIMPLE_HEADER})" \
-    --bind "zero:change-header(${MSG_NO_MATCH})" \
+    --bind "zero:unbind(focus)+change-header(${MSG_NO_MATCH})" \
     --bind "change:first" \
-    --bind "result:transform:bash -c 'case \$1 in separator:*) echo down ;; esac' _ {4}" \
+    --bind "result:transform:bash -c 'case \$1 in separator:*) echo \"rebind(focus)+down\" ;; ?*) echo \"rebind(focus)\" ;; esac' _ {4}" \
   ) || FZF_RC=$?
   print_scan_notes
+  print_update_note
   if (( FZF_RC != 0 )) || [[ -z "$SELECTED" ]]; then
     if (( FZF_RC == 2 )); then
       echo "[ccs] 一覧をうまく開けませんでした。今の見た目で開くには: ccs --ui=classic" >&2
@@ -481,6 +626,12 @@ fi
 
 # ── Launch fzf ───────────────────────────────────────────────────────────────
 if [[ "$UI" == "classic" ]]; then
+# The picker opens below this line (--height), and the header beside the preview
+# is too narrow for the command, so the notice goes above the frame. It costs no
+# list row and stays in the scrollback after the picker closes.
+if [[ -n "$UPDATE_LATEST" ]]; then
+  echo "[ccs] Update v${VERSION} -> v${UPDATE_LATEST}: ${CCS_INSTALL_CMD}" >&2
+fi
 SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   --ansi \
   --delimiter=$'\t' \
@@ -495,6 +646,7 @@ SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
   --height='80%' \
   --layout=reverse \
   --border \
+  --border-label="${BORDER_LABEL}" --border-label-pos=3 \
   --prompt='ccs> ' \
   --tabstop=4 \
 ) || exit 0
@@ -530,6 +682,13 @@ KEY="${KIND_KEY#*:}"
 
 if [[ -z "$ROW_CMD" ]]; then
   echo "❌ Could not parse selection" >&2
+  exit 1
+fi
+
+# Defense-in-depth copy of the policy ccs-config.ts enforces on command at load
+# time. Extra columns would also land here, joined by \x1f, and be refused.
+if [[ "$ROW_CMD" =~ [\;\&\|\<\>\$\`\"\'\\] || "$ROW_CMD" =~ [[:cntrl:]] ]]; then
+  echo "❌ Refusing the selected row's command (shell metacharacters/control chars)" >&2
   exit 1
 fi
 
@@ -569,8 +728,8 @@ esac
 
 # Path validation (traversal prevention). Must be $HOME itself or a child
 # path ("$HOME"/*): a bare prefix match would also accept sibling dirs like
-# /Users/xEVIL (audit L-1).
-if [[ "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ]]; then
+# /Users/xEVIL (audit L-1). A `..` segment could walk back out of $HOME.
+if [[ ( "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ) || "/${ROW_CWD}/" == */../* ]]; then
   if [[ "$UI" == "simple" ]]; then
     echo "⚠️  ホームの外のフォルダ（${ROW_CWD}）は開けないので、いまいるフォルダで開きます" >&2
   else
@@ -614,7 +773,9 @@ case "$KIND" in
     else
       echo "🔄 Resuming session ${KEY} in $(pwd)..."
     fi
+    set -f # split ROW_CMD into words, but expand no wildcard in it
     ${ROW_CMD} --resume "${KEY}" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+    set +f
     ;;
   new)
     if [[ "$UI" == "simple" ]]; then
@@ -622,6 +783,8 @@ case "$KIND" in
     else
       echo "🚀 Launching ${KEY} in $(pwd)..."
     fi
+    set -f # split ROW_CMD into words, but expand no wildcard in it
     ${ROW_CMD} "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+    set +f
     ;;
 esac

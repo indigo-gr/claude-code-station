@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-11-08
+
+0.4.0 was tagged in the work repository but never published; its changes ship in 0.4.1.
+
+### Added
+- **Version and copyright on screen** — both looks show `ccs v<version>` and `Copyright © INDIGO GROUP LLC.` in the frame's top border (fzf's border label: after the title in the simple look, new in the classic look). The label costs no list row and survives `change-header`. On a narrow terminal the label shortens instead of running over the frame's corners: the title goes first (simple), then the word `Copyright` (`© INDIGO GROUP LLC.`), and the version stays. `ccs --help` prints the copyright too.
+- **Update notice** — when npm's latest is newer than the running version, the classic look prints one line with the upgrade command above the picker. The simple look says so in the list's frame and prints the command after the picker closes. No notice for a prerelease on either side, or when nothing is known about the latest version.
+  - **What goes over the network**: at most once a day (an hour after a failed attempt), a background process sends one HTTPS GET to `https://registry.npmjs.org/-/package/%40indigo-gr%2Fclaude-code-station/dist-tags`. It carries no ccs version, repo, session or machine details. See "Update check" in the README.
+  - **It cannot slow or stop ccs**: the launcher only reads the last answer from `~/.cache/ccs/update-check` and never waits for the request, which has a 3-second limit. Offline, ccs behaves as before.
+  - **Turn it off** with `CCS_NO_UPDATE_CHECK=1` (no request, the cache is not read). `CCS_UPDATE_REGISTRY` points the check at another registry.
+- `author` in `package.json`.
+
+### Changed
+- The copyright holder is now INDIGO GROUP LLC. (`LICENSE`, `package.json`, README, on screen). The license stays MIT.
+- `tput` is no longer required.
+- **Works on npm 12 as is, and needs Node 22** — npm 12 blocks dependency install scripts by default, also for a global install, so with `better-sqlite3` 11 the plain `npm install -g` reported success and left a `ccs` that could not start (this applies to earlier versions of ccs). `better-sqlite3` 13 ships prebuilt native modules, so no script is needed. It requires Node 22 or newer, and so does ccs now (`engines`, `install.sh`, README). On a platform with no prebuilt module, `ccs` says so. An existing `state.db` is reused.
+
+### Fixed
+- **Terminal width** — `tput cols 2>/dev/null` inside `$()` answered 80 at any width, so the classic look's short guide line for narrow terminals never appeared. ccs now asks the terminal with `stty size` (an exported `COLUMNS` wins), so terminals under 80 columns get that short guide line.
+- **Copy install** — without a `package.json` next to `bin/` (`install.sh`, the README's manual install), `ccs` exited with code 2 and no message before doing anything. It now runs as `ccs v0.0.0-dev`, and a copy install gets no update check or notice.
+- **Another package's version** — `ccs` took its version from whatever `package.json` sat above `bin/`, so a copy install could show another project's version. It now reads the file only when its `name` is this package; otherwise, or when the file cannot be read or parsed, it runs as `ccs v0.0.0-dev`.
+- **Simple look**: the no-match message stayed only some of the time, because the guide line overwrote it; it now stays until the search matches again.
+- A scan that fails on opening the cache no longer leaves its lock behind (later scans said "another scan is in progress" for 5 minutes and hid the real error).
+- The install instructions add `~/.claude/scripts` to the end of `PATH`, so it cannot shadow system commands. If you followed the earlier instruction, you may want to change that line in your shell profile.
+
+### Security
+- **A repos.yml field can no longer choose the command** — a tab, newline or unit separator in `icon` moved the row's columns, so picking that repo (or one of its sessions) ran what the field named instead of the repo's command. Icons are now cleaned wherever they are drawn, `ccs-list` drops a row of the wrong shape, and `bin/ccs` refuses a command with shell metacharacters or control characters.
+- **Wildcards in `command`** are passed as written (`claude *` gets the argument `*`). Splitting into words is unchanged.
+- **A session's cwd** with a `..` segment is no longer taken from the session file, so it can neither open outside `$HOME` nor reach the clipboard through `^Y`.
+- **The preview hides secrets before cutting text**, so a key across the cut no longer shows its beginning (messages, `cwd`, `gitBranch`, `version`).
+- **The scan stays inside a repo**: a file in `handoff/` or `pendings/`, or the folder itself, is not read when it is a symlink out of the repo. A symlink that stays inside the repo still works.
+- **The scan runs nothing a repo configures**: git runs with `core.fsmonitor` off and no hooks, and a scan no longer rewrites a repo's index.
+- **Display text** loses C1 controls and text-direction marks too; `description`, `tags` and `icon` are now cleaned in the classic preview as well. Emoji and Japanese text are unchanged.
+
 ## [0.3.3] — 2026-11-06
 
 ### Changed

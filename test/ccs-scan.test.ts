@@ -597,6 +597,7 @@ describe("scan() — 2026-06-12 review regressions", () => {
     git("init", "-q");
     git("config", "user.email", "test@example.com");
     git("config", "user.name", "Test");
+    git("config", "commit.gpgsign", "false"); // never the developer's signing setup
     await writeFile(join(repoDir, "f.txt"), "x");
     git("add", "f.txt");
     const commit = git("commit", "-q", "-m", "subject\twith\ttabs");

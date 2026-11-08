@@ -1,7 +1,7 @@
 # Claude Code Station — ccs
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node 20+](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
+[![Node 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org/)
 
 A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Pick a project to launch fresh **or** resume any past session — all from a single fuzzy finder, across every repo you own.
 
@@ -38,7 +38,7 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 
 ### Prerequisites / 前提条件
 
-- [Node.js](https://nodejs.org/) **20+**
+- [Node.js](https://nodejs.org/) **22+**. `better-sqlite3` ships prebuilt modules for macOS and Linux (glibc, musl) on x64 and arm64; anywhere else it has to be built from source (not tested) / それ以外の環境はソースから作る必要がある（未確認）
 - [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023). With **0.45+** Enter on a group header (`launch: false`) keeps the list open; on older fzf it just closes ccs without launching anything / 0.45 以上なら、グループ見出しの上で Enter を押してもリストは開いたまま（それより古い fzf では何も起動せずに閉じる）
   - The friendlier look (`ui: simple`, below) needs **fzf ≥ 0.61.0** (`--ghost`; the frame and labels need 0.58+). On an older fzf ccs opens the classic look and says so in one line / やさしい見た目（`ui: simple`）は fzf 0.61.0 以上。古い fzf ではいつもの見た目で開き、1 行で知らせる
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
@@ -62,7 +62,7 @@ npm install -g @indigo-gr/claude-code-station
 #### From GitHub (latest unreleased) / GitHub直接（未リリース版を使いたい時）
 
 ```bash
-npm install -g github:indigo-gr/claude-code-station
+npm install -g --allow-git=root github:indigo-gr/claude-code-station
 ```
 
 ### Copy install (checkout) / コピーインストール
@@ -84,7 +84,7 @@ cp bin/ccs bin/ccs-*.ts bin/ccs-*.sh ~/.claude/scripts/
 chmod +x ~/.claude/scripts/ccs ~/.claude/scripts/ccs-delete.sh
 
 # Add to ~/.zshrc or ~/.bashrc
-export PATH="$HOME/.claude/scripts:$PATH"
+export PATH="$PATH:$HOME/.claude/scripts"
 ```
 
 ---
@@ -331,6 +331,18 @@ Schema details: [`docs/design/sqlite-schema.md`](docs/design/sqlite-schema.md).
 
 ---
 
+## Update check / 更新の確認
+
+ccs tells you when npm has a newer version. The classic look prints one line with the upgrade command above the picker. The simple look says so in the list's frame and prints the command after the picker closes. / npm に新しいバージョンがあると知らせる。classic は一覧の上に上げ方を 1 行、simple は枠に知らせを出し、閉じた後に上げ方を出す。
+
+- **What is sent, and where** — one HTTPS `GET https://registry.npmjs.org/-/package/%40indigo-gr%2Fclaude-code-station/dist-tags`, at most once a day (an hour after a failed attempt). It carries no ccs version, repo, session or machine details; the registry sees only the request itself, your IP address and Node's default User-Agent. / 送るのは公開情報を読む GET が 1 日に 1 回まで（失敗の後は 1 時間後）。ccs のバージョン・リポジトリ・会話・マシンの情報は送らない。npm が受け取るのはリクエストそのもの・IP アドレス・Node の既定の User-Agent だけ
+- **Never in the way** — the check runs in the background with a 3-second limit and its answer is used on the next launch; startup only reads `~/.cache/ccs/update-check` (or `$XDG_CACHE_HOME/ccs/update-check`). Offline, or when the answer is unusable, ccs behaves as before. HTTP proxy settings are not used, so behind a proxy the check simply fails quietly. / 確認は裏で行い、結果は次の起動で使う。起動を遅らせず、オフラインでも止まらない。プロキシの設定は使わないので、プロキシの内側では確認が静かに失敗する
+- **When there is no notice** — when you are on the latest version or newer, when npm's latest is a prerelease, and when your own version is a prerelease or a copy install (`0.0.0-dev`). A failed check shows no notice of its own, but a version found by an earlier check is still reported. / 最新かそれより新しい時・npm の latest がプレリリースの時・手元がプレリリースかコピーインストールの時は知らせない。確認の失敗だけでは知らせないが、前回までに見つけたバージョンは知らせる
+- **Turn it off** — set `CCS_NO_UPDATE_CHECK=1` (any non-empty value): no request, and the cache is not read. / `CCS_NO_UPDATE_CHECK=1`（空でない値）で止まる。通信せず、キャッシュも読まない
+- **Another registry** — `CCS_UPDATE_REGISTRY=https://registry.example.com` asks that server instead. / `CCS_UPDATE_REGISTRY` で問い合わせ先を替えられる
+
+---
+
 ## Migration from ccr v0.1.x / ccr v0.1.x からの移行
 
 Existing sessions are stored under `~/.claude/projects/*/*.jsonl` — **nothing to migrate manually**. ccs auto-discovers them on first scan.
@@ -403,4 +415,10 @@ Issues and PRs welcome. See [`REVIEW.md`](REVIEW.md) for review standards and [`
 
 ## License / ライセンス
 
-MIT. See [LICENSE](LICENSE).
+MIT. Copyright © INDIGO GROUP LLC. See [LICENSE](LICENSE). / ライセンスは MIT、著作権者は INDIGO GROUP LLC.
+
+The version on screen leads to everything about that release / 画面のバージョンから、そのリリースの中身をたどれる:
+
+- **Source** — git tag `vX.Y.Z` in [indigo-gr/claude-code-station](https://github.com/indigo-gr/claude-code-station/tags) / ソースは同じ番号の tag
+- **Changes** — the `[X.Y.Z]` section of [CHANGELOG.md](CHANGELOG.md) / 変更点は CHANGELOG の同じ番号の節
+- **Terms** — [LICENSE](LICENSE) at that tag / 配布条件はその tag の LICENSE

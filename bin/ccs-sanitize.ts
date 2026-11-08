@@ -26,10 +26,16 @@ export function hasShellMetachars(value: string): boolean {
   return SHELL_METACHARS.test(value);
 }
 
-// All C0 control characters plus DEL. \n and \t are NOT exempted: every ccs
-// display surface is single-line-per-field (TSV rows, preview lines), and the
-// TSV protocol between ccs-list and fzf breaks on embedded tabs/newlines.
-const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]+/g;
+// All C0 control characters, DEL and C1 (U+0080-U+009F: a terminal may read
+// U+009B as ESC [), plus the marks that reorder displayed text (U+061C,
+// U+200E-F, U+202A-E, U+2066-9). Emoji joiners and variation selectors stay.
+// \n and \t are NOT exempted: every ccs display surface is
+// single-line-per-field (TSV rows, preview lines), and the TSV protocol between
+// ccs-list and fzf breaks on embedded tabs/newlines.
+const CONTROL_CHARS_RE =
+  /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
+const CONTROL_CHARS_EXCEPT_NEWLINE_RE =
+  /[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
 
 /**
  * Strip C0 control characters (incl. ESC) and DEL from display text,
@@ -39,6 +45,11 @@ const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]+/g;
  */
 export function stripControlChars(text: string): string {
   return text.replace(CONTROL_CHARS_RE, " ").replace(/\s+/g, " ").trim();
+}
+
+/** The same cleaning for text shown as several lines: only newlines survive. */
+export function stripControlCharsKeepLines(text: string): string {
+  return text.replace(CONTROL_CHARS_EXCEPT_NEWLINE_RE, " ");
 }
 
 /**
@@ -53,5 +64,8 @@ export function sanitizeSessionCwd(cwd: string): string | null {
   if (cwd.length === 0) return null;
   if (hasShellMetachars(cwd)) return null;
   if (!cwd.startsWith("/")) return null;
+  // A `..` segment walks out of the checks made on the prefix (the $HOME gate
+  // in bin/ccs), and this value also reaches the clipboard through Ctrl-Y.
+  if (cwd.split("/").includes("..")) return null;
   return cwd;
 }
