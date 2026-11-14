@@ -86,7 +86,8 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # parameter via better-sqlite3 (audit M-3) and reports failures instead of
   # swallowing them (audit L-3).
   if [[ "$TSX" != "tsx" ]] || command -v tsx &>/dev/null; then
-    if ! "${TSX}" "${SCRIPT_DIR}/ccs-delete-session.ts" "$SESSION_ID"; then
+    # Through ccs-tsx.sh: started from ccs's own folder (see that file).
+    if ! CCS_TSX_REAL="$TSX" bash "${SCRIPT_DIR}/ccs-tsx.sh" "${SCRIPT_DIR}/ccs-delete-session.ts" "$SESSION_ID"; then
       echo "[ccs] warning: cache row cleanup failed — a stale row may remain until the next refresh" >&2
     fi
   else

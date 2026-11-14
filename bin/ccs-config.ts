@@ -45,10 +45,31 @@ export interface RepoEntry {
   configHash: string;
 }
 
+/**
+ * Terminal apps `ccs open --new-window` can open (defaults.terminal). Only
+ * apps whose way of opening was tried on a real Mac are listed, and the list
+ * is only added to (iTerm2 did not run the launcher file when tried).
+ */
+export const TERMINAL_APPS = ["terminal"] as const;
+export type TerminalApp = (typeof TERMINAL_APPS)[number];
+
+export function isTerminalApp(v: unknown): v is TerminalApp {
+  return typeof v === "string" && (TERMINAL_APPS as readonly string[]).includes(v);
+}
+
 export interface CcsConfig {
   version: 1;
   /** ui: list/preview look — "classic" (default) or "simple" (friendly, Japanese). */
   defaults: { command: string; ui: UiMode };
+  /** The other `defaults.*` keys (kept apart so `defaults` stays as the contract tests pin it). */
+  settings: {
+    /** defaults.terminal: the app `ccs open --new-window` opens; null = not chosen. */
+    terminal: TerminalApp | null;
+    /** defaults.update_check: false stops the update check like CCS_NO_UPDATE_CHECK. */
+    updateCheck: boolean;
+    /** defaults.groups_dir, `~` expanded and resolved; null = off. */
+    groupsDir: string | null;
+  };
   repos: RepoEntry[];
 }
 
@@ -60,12 +81,57 @@ export interface ConfigPaths {
   readme: string;
 }
 
+/**
+ * Why repos.yml failed ccs's checks, as a word machines can match on
+ * (docs/design/machine-interface.md: the `config` check of `ccs doctor` and
+ * the `detail` of `config_invalid`). Words are only ever added.
+ */
+export type ConfigErrorCode =
+  | "config_not_readable"
+  | "yaml_parse_error"
+  | "not_a_mapping"
+  | "unsupported_version"
+  | "defaults_invalid"
+  | "command_unsafe"
+  | "repos_empty"
+  | "entry_invalid"
+  | "name_unsafe"
+  | "duplicate_name"
+  | "path_outside_home"
+  | "path_unsafe"
+  | "custom_too_large";
+
 export class ConfigError extends Error {
-  constructor(message: string) {
+  /** The reason word. Errors built without one count as entry_invalid. */
+  readonly code: ConfigErrorCode;
+  /** Index into repos[] when one entry is at fault. */
+  readonly entryIndex: number | undefined;
+  constructor(
+    message: string,
+    code: ConfigErrorCode = "entry_invalid",
+    entryIndex?: number,
+  ) {
     super(message);
     this.name = "ConfigError";
+    this.code = code;
+    this.entryIndex = entryIndex;
   }
 }
+
+/**
+ * Something about repos.yml worth knowing that does not stop ccs. The launcher
+ * prints `message`; the machine interface counts by `code` and prints nothing
+ * (the message names paths and repos).
+ */
+export interface ConfigWarning {
+  code: "unknown_key" | "path_missing";
+  message: string;
+}
+
+export type WarningSink = (w: ConfigWarning) => void;
+
+/** The launcher's sink: each warning as one stderr line, as before. */
+const consoleSink: WarningSink = (w) => console.warn(w.message);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -133,7 +199,7 @@ export function getPaths(): ConfigPaths {
   };
 }
 
-function expandPath(p: string): string {
+export function expandPath(p: string): string {
   const home = homedir();
   if (p === "~") return home;
   if (p.startsWith("~/")) return join(home, p.slice(2));
@@ -150,7 +216,7 @@ function expandPath(p: string): string {
 //      realpath of $HOME — otherwise `~/escape -> /` style symlinks smuggle
 //      the repo outside $HOME while passing the lexical check. Both sides are
 //      realpath'd so macOS /var -> /private/var aliasing compares cleanly.
-function isUnderHome(absPath: string): boolean {
+export function isUnderHome(absPath: string): boolean {
   const home = homedir();
   const lexical = resolve(absPath);
   if (lexical !== home && !lexical.startsWith(home + "/")) return false;
@@ -174,7 +240,7 @@ function isUnderHome(absPath: string): boolean {
 // ccs-sanitize.ts for the policy rationale.
 
 function rejectShellMetachars(
-  field: string,
+  field: "path" | "cwd" | "command",
   value: string,
   idx: number,
   reposYmlPath: string,
@@ -182,6 +248,8 @@ function rejectShellMetachars(
   if (SHELL_METACHARS.test(value)) {
     throw new ConfigError(
       `${reposYmlPath}: repos[${idx}].${field} contains shell metacharacter(s): ${JSON.stringify(value)}`,
+      field === "command" ? "command_unsafe" : "path_unsafe",
+      idx,
     );
   }
 }
@@ -241,14 +309,55 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   );
 }
 
+/** True when an array or object contains itself (directly or deeper down). */
+function containsItself(value: unknown, path: Set<object> = new Set()): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (path.has(value)) return true;
+  path.add(value);
+  const kids = Array.isArray(value) ? value : Object.values(value);
+  for (const kid of kids) {
+    if (containsItself(kid, path)) return true;
+  }
+  path.delete(value);
+  return false;
+}
+
+/**
+ * A repo-entry flag (disabled, launch, lead, scan): absent means the default,
+ * anything but a YAML true/false is an error. Boolean() would read a quoted
+ * "false" as true and flip the flag without a word.
+ */
+function readBoolean(
+  raw: Record<string, unknown>,
+  key: string,
+  fallback: boolean,
+  index: number,
+  reposYmlPath: string,
+): boolean {
+  const value = raw[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") {
+    throw new ConfigError(
+      `${reposYmlPath}: repos[${index}].${key} must be true or false (got ${JSON.stringify(value)})`,
+      "entry_invalid",
+      index,
+    );
+  }
+  return value;
+}
+
 function warnUnknownKeys(
   obj: Record<string, unknown>,
   known: Set<string>,
   context: string,
+  sink: WarningSink,
 ): void {
   for (const key of Object.keys(obj)) {
     if (!known.has(key)) {
-      console.warn(`[ccs] unknown key "${key}" in ${context} (ignored)`);
+      sink({
+        code: "unknown_key",
+        message: `[ccs] unknown key "${key}" in ${context} (ignored)`,
+      });
     }
   }
 }
@@ -290,18 +399,23 @@ function resolveRepoEntry(
   index: number,
   defaultsCommand: string | undefined,
   reposYmlPath: string,
+  sink: WarningSink,
 ): RepoEntry {
   if (!isPlainObject(raw)) {
     throw new ConfigError(
       `${reposYmlPath}: repos[${index}] must be an object`,
+      "entry_invalid",
+      index,
     );
   }
-  warnUnknownKeys(raw, KNOWN_REPO_KEYS, `repos[${index}]`);
+  warnUnknownKeys(raw, KNOWN_REPO_KEYS, `repos[${index}]`, sink);
 
   const name = raw.name;
   if (typeof name !== "string" || name.length === 0) {
     throw new ConfigError(
       `${reposYmlPath}: repos[${index}].name is required and must be a non-empty string`,
+      "entry_invalid",
+      index,
     );
   }
   // Same policy as path/cwd/command (audit NEW-3): the name lands in fzf's
@@ -310,30 +424,24 @@ function resolveRepoEntry(
   if (SHELL_METACHARS.test(name)) {
     throw new ConfigError(
       `${reposYmlPath}: repos[${index}].name contains shell metacharacter(s) or control char(s): ${JSON.stringify(name)}`,
+      "name_unsafe",
+      index,
     );
   }
 
-  const disabled =
-    raw.disabled === undefined ? false : Boolean(raw.disabled);
+  const disabled = readBoolean(raw, "disabled", false, index, reposYmlPath);
 
   // launch — `launch: false` makes the entry a display-only group header:
   // listed, with the repos inside its path nested under it, but never
-  // launched. Strictly typed, unlike disabled/scan: Boolean("false") is true,
-  // so a quoted value would silently turn the header back into a launcher.
-  let launch = true;
-  if (raw.launch !== undefined) {
-    if (typeof raw.launch !== "boolean") {
-      throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].launch must be true or false (got ${JSON.stringify(raw.launch)})`,
-      );
-    }
-    launch = raw.launch;
-  }
+  // launched.
+  const launch = readBoolean(raw, "launch", true, index, reposYmlPath);
   // A header exists to hold its children, which nest by path — without one
   // it would have nothing under it (command/cwd, by contrast, go unused).
   if (!launch && raw.path === undefined) {
     throw new ConfigError(
       `${reposYmlPath}: repos[${index}].path is required when launch is false`,
+      "entry_invalid",
+      index,
     );
   }
 
@@ -343,19 +451,24 @@ function resolveRepoEntry(
     if (typeof raw.path !== "string") {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].path must be a string`,
+        "entry_invalid",
+        index,
       );
     }
     resolvedPath = resolve(expandPath(raw.path));
     if (!isUnderHome(resolvedPath)) {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].path "${raw.path}" is outside $HOME (security)`,
+        "path_outside_home",
+        index,
       );
     }
     rejectShellMetachars("path", resolvedPath, index, reposYmlPath);
     if (!disabled && !existsSync(resolvedPath)) {
-      console.warn(
-        `[ccs] path not found: ${raw.path} (repos[${index}] "${name}") — set disabled: true to silence`,
-      );
+      sink({
+        code: "path_missing",
+        message: `[ccs] path not found: ${raw.path} (repos[${index}] "${name}") — set disabled: true to silence`,
+      });
     }
   }
 
@@ -365,12 +478,16 @@ function resolveRepoEntry(
     if (typeof raw.cwd !== "string") {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].cwd must be a string`,
+        "entry_invalid",
+        index,
       );
     }
     resolvedCwd = resolve(expandPath(raw.cwd));
     if (!isUnderHome(resolvedCwd)) {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].cwd "${raw.cwd}" is outside $HOME (security)`,
+        "path_outside_home",
+        index,
       );
     }
     rejectShellMetachars("cwd", resolvedCwd, index, reposYmlPath);
@@ -382,6 +499,8 @@ function resolveRepoEntry(
     if (typeof raw.command !== "string") {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].command must be a string`,
+        "entry_invalid",
+        index,
       );
     }
     command = raw.command;
@@ -395,9 +514,11 @@ function resolveRepoEntry(
   // metachar here would break the last line of defense.
   rejectShellMetachars("command", command, index, reposYmlPath);
 
-  // description
+  // description — a blank `description:` (YAML null) means unset, not "null".
   const description =
-    raw.description === undefined ? "" : String(raw.description);
+    raw.description === undefined || raw.description === null
+      ? ""
+      : String(raw.description);
 
   // label — display name for the NEW row and the preview title; `name` stays
   // the unique key (row key, DB, session rows). Display-only like
@@ -410,23 +531,16 @@ function resolveRepoEntry(
     if (typeof raw.label !== "string") {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].label must be a string`,
+        "entry_invalid",
+        index,
       );
     }
     label = raw.label;
   }
 
   // lead — the entry that leads its group (a director, a coordinator): listed
-  // first among its siblings, and marked 👑 in the simple look. Strictly
-  // typed like `launch`, so a quoted "false" cannot turn into true.
-  let lead = false;
-  if (raw.lead !== undefined) {
-    if (typeof raw.lead !== "boolean") {
-      throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].lead must be true or false (got ${JSON.stringify(raw.lead)})`,
-      );
-    }
-    lead = raw.lead;
-  }
+  // first among its siblings, and marked 👑 in the simple look.
+  const lead = readBoolean(raw, "lead", false, index, reposYmlPath);
 
   // tags
   let tags: string[] = [];
@@ -434,16 +548,19 @@ function resolveRepoEntry(
     if (!Array.isArray(raw.tags) || !raw.tags.every((t) => typeof t === "string")) {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].tags must be an array of strings`,
+        "entry_invalid",
+        index,
       );
     }
     tags = [...raw.tags];
   }
 
   // scan
-  const scan = raw.scan === undefined ? true : Boolean(raw.scan);
+  const scan = readBoolean(raw, "scan", true, index, reposYmlPath);
 
-  // icon
-  const icon = raw.icon === undefined ? "📁" : String(raw.icon);
+  // icon — a blank `icon:` (YAML null) means unset, so the default shows.
+  const icon =
+    raw.icon === undefined || raw.icon === null ? "📁" : String(raw.icon);
 
   // custom
   let custom: Record<string, unknown> = {};
@@ -451,6 +568,8 @@ function resolveRepoEntry(
     if (!isPlainObject(raw.custom)) {
       throw new ConfigError(
         `${reposYmlPath}: repos[${index}].custom must be an object`,
+        "entry_invalid",
+        index,
       );
     }
     // Reject bloated `custom` blobs before they reach downstream code.
@@ -458,7 +577,9 @@ function resolveRepoEntry(
     const customJson = JSON.stringify(raw.custom);
     if (customJson.length > 64_000) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].custom exceeds 64KB JSON size limit (got ${customJson.length} bytes)`,
+        `${reposYmlPath}: repos[${index}].custom exceeds the 64KB limit (measured as 64,000 characters of JSON; got ${customJson.length})`,
+        "custom_too_large",
+        index,
       );
     }
     custom = { ...raw.custom };
@@ -486,9 +607,27 @@ function resolveRepoEntry(
 // Top-level load
 // ---------------------------------------------------------------------------
 
-export function loadConfig(): CcsConfig {
-  ensureConfigDir();
+export interface LoadConfigOptions {
+  /** false: create nothing (no template, no README); only the cache dir. */
+  scaffold?: boolean;
+  /** Where warnings go (default: one stderr line each). */
+  sink?: WarningSink;
+}
+
+/**
+ * The launcher's load: scaffolds a missing config (first run), then parses it,
+ * printing each warning on stderr. Throws ConfigError.
+ *
+ * With `scaffold: false` (the machine interface's scan) nothing but the cache
+ * directory is created, and a missing repos.yml is config_not_readable.
+ */
+export function loadConfig(opts: LoadConfigOptions = {}): CcsConfig {
   const paths = getPaths();
+  if (opts.scaffold === false) {
+    mkdirSync(paths.cacheDir, { recursive: true, mode: 0o700 });
+  } else {
+    ensureConfigDir();
+  }
 
   let source: string;
   try {
@@ -496,40 +635,119 @@ export function loadConfig(): CcsConfig {
   } catch (err) {
     throw new ConfigError(
       `${paths.reposYml}: cannot read config file (${(err as Error).message})`,
+      "config_not_readable",
     );
   }
+  return parseConfigSource(
+    source,
+    paths.reposYml,
+    opts.sink ?? consoleSink,
+    opts.scaffold !== false,
+  );
+}
+
+/** What readConfig found: no file at all, or the parsed config. */
+export type ReadConfigResult =
+  | { found: false }
+  | { found: true; config: CcsConfig; warnings: ConfigWarning[]; source: string };
+
+/**
+ * The read-only load for the machine interface (`ccs doctor`, `ccs list
+ * --json`): creates nothing (no directory, no template, no README) and prints
+ * nothing — warnings come back to the caller. A missing repos.yml is
+ * `{ found: false }`, not an error. Throws ConfigError like loadConfig.
+ */
+export function readConfig(): ReadConfigResult {
+  const paths = getPaths();
+  if (!existsSync(paths.reposYml)) return { found: false };
+  let source: string;
+  try {
+    source = readFileSync(paths.reposYml, "utf-8");
+  } catch (err) {
+    throw new ConfigError(
+      `${paths.reposYml}: cannot read config file (${(err as Error).message})`,
+      "config_not_readable",
+    );
+  }
+  const warnings: ConfigWarning[] = [];
+  const config = parseConfigSource(source, paths.reposYml, (w) => warnings.push(w), false);
+  return { found: true, config, warnings, source };
+}
+
+/**
+ * Validate and resolve the text of a repos.yml. Throws ConfigError.
+ *
+ * `yamlWarnings: false` keeps the YAML parser's own warnings (an unknown tag,
+ * …) off stderr: Node prints them with the offending line, and that line is
+ * repos.yml's content. The machine interface always passes false.
+ */
+export function parseConfigSource(
+  source: string,
+  reposYmlPath: string,
+  sink: WarningSink = consoleSink,
+  yamlWarnings = true,
+): CcsConfig {
+  const paths = { reposYml: reposYmlPath };
 
   let parsed: unknown;
   try {
-    parsed = parseYaml(source);
+    parsed = yamlWarnings ? parseYaml(source) : parseYaml(source, { logLevel: "error" });
   } catch (err) {
     throw new ConfigError(
       `${paths.reposYml}: YAML parse error: ${(err as Error).message}`,
+      "yaml_parse_error",
     );
   }
 
   if (!isPlainObject(parsed)) {
     throw new ConfigError(
       `${paths.reposYml}: top-level must be a mapping/object`,
+      "not_a_mapping",
     );
   }
 
-  warnUnknownKeys(parsed, KNOWN_TOP_KEYS, "top-level");
+  // An anchor used inside itself (`disabled: &x [*x]`) gives a value that
+  // contains itself; every later check (JSON.stringify, the entry hash) would
+  // crash on it instead of naming the key.
+  if (Array.isArray(parsed.repos)) {
+    parsed.repos.forEach((entry, i) => {
+      if (containsItself(entry)) {
+        throw new ConfigError(
+          `${paths.reposYml}: repos[${i}] has a value that refers to itself (a YAML anchor used inside itself)`,
+          "entry_invalid",
+          i,
+        );
+      }
+    });
+  }
+  if (containsItself(parsed)) {
+    throw new ConfigError(
+      `${paths.reposYml}: a value refers to itself (a YAML anchor used inside itself)`,
+      "yaml_parse_error",
+    );
+  }
+
+  warnUnknownKeys(parsed, KNOWN_TOP_KEYS, "top-level", sink);
 
   // version
   if (parsed.version !== 1) {
     throw new ConfigError(
       `${paths.reposYml}: unsupported version: ${String(parsed.version)}, only 1 is supported`,
+      "unsupported_version",
     );
   }
 
   // defaults
   let defaultsCommand: string | undefined;
   let defaultsUi: UiMode = "classic";
+  let defaultsTerminal: TerminalApp | null = null;
+  let defaultsUpdateCheck = true;
+  let defaultsGroupsDir: string | null = null;
   if (parsed.defaults !== undefined) {
     if (!isPlainObject(parsed.defaults)) {
       throw new ConfigError(
         `${paths.reposYml}: defaults must be an object`,
+        "defaults_invalid",
       );
     }
     const defaults = parsed.defaults;
@@ -537,6 +755,7 @@ export function loadConfig(): CcsConfig {
       if (typeof defaults.command !== "string") {
         throw new ConfigError(
           `${paths.reposYml}: defaults.command must be a string`,
+          "defaults_invalid",
         );
       }
       defaultsCommand = defaults.command;
@@ -548,9 +767,56 @@ export function loadConfig(): CcsConfig {
       if (!isUiMode(defaults.ui)) {
         throw new ConfigError(
           `${paths.reposYml}: defaults.ui must be one of ${UI_MODES.join(" / ")} (got ${JSON.stringify(defaults.ui)})`,
+          "defaults_invalid",
         );
       }
       defaultsUi = defaults.ui;
+    }
+    // terminal — `ccs open --new-window` picks its app from this list only.
+    if (defaults.terminal !== undefined && defaults.terminal !== null) {
+      if (!isTerminalApp(defaults.terminal)) {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.terminal must be one of ${TERMINAL_APPS.join(" / ")} (got ${JSON.stringify(defaults.terminal)})`,
+          "defaults_invalid",
+        );
+      }
+      defaultsTerminal = defaults.terminal;
+    }
+    // update_check — true or false only, as strict as the entry flags: a
+    // quoted "false" must not silently leave the check on.
+    if (defaults.update_check !== undefined && defaults.update_check !== null) {
+      if (typeof defaults.update_check !== "boolean") {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.update_check must be true or false (got ${JSON.stringify(defaults.update_check)})`,
+          "defaults_invalid",
+        );
+      }
+      defaultsUpdateCheck = defaults.update_check;
+    }
+    // groups_dir — a folder of group definition files other tools keep
+    // (ccs-groups.ts). Held to the same rules as a repo `path`: under $HOME,
+    // no shell metacharacters.
+    if (defaults.groups_dir !== undefined && defaults.groups_dir !== null) {
+      if (typeof defaults.groups_dir !== "string" || defaults.groups_dir === "") {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.groups_dir must be a folder path`,
+          "defaults_invalid",
+        );
+      }
+      const dir = resolve(expandPath(defaults.groups_dir));
+      if (!isUnderHome(dir)) {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.groups_dir "${defaults.groups_dir}" is outside $HOME (security)`,
+          "path_outside_home",
+        );
+      }
+      if (SHELL_METACHARS.test(dir)) {
+        throw new ConfigError(
+          `${paths.reposYml}: defaults.groups_dir contains shell metacharacter(s): ${JSON.stringify(defaults.groups_dir)}`,
+          "path_unsafe",
+        );
+      }
+      defaultsGroupsDir = dir;
     }
   }
 
@@ -564,6 +830,7 @@ export function loadConfig(): CcsConfig {
   if (SHELL_METACHARS.test(resolvedDefaultsCommand)) {
     throw new ConfigError(
       `${paths.reposYml}: defaults.command (resolved from defaults.command / CCS_CMD / CCR_CMD) contains shell metacharacter(s): ${JSON.stringify(resolvedDefaultsCommand)}`,
+      "command_unsafe",
     );
   }
 
@@ -571,11 +838,12 @@ export function loadConfig(): CcsConfig {
   if (!Array.isArray(parsed.repos) || parsed.repos.length === 0) {
     throw new ConfigError(
       `${paths.reposYml}: repos must be a non-empty array`,
+      "repos_empty",
     );
   }
 
   const repos: RepoEntry[] = parsed.repos.map((raw, i) =>
-    resolveRepoEntry(raw, i, defaultsCommand, paths.reposYml),
+    resolveRepoEntry(raw, i, defaultsCommand, paths.reposYml, sink),
   );
 
   // uniqueness check
@@ -586,20 +854,32 @@ export function loadConfig(): CcsConfig {
     byName.set(r.name, list);
   });
   const dupes: string[] = [];
+  let firstDupeIndex: number | undefined;
   for (const [n, idxs] of byName) {
     if (idxs.length > 1) {
       dupes.push(`"${n}" at indexes [${idxs.join(", ")}]`);
+      // The entry that repeats an earlier name (the second occurrence).
+      if (firstDupeIndex === undefined || idxs[1] < firstDupeIndex) {
+        firstDupeIndex = idxs[1];
+      }
     }
   }
   if (dupes.length > 0) {
     throw new ConfigError(
       `${paths.reposYml}: duplicate name ${dupes.join("; ")}`,
+      "duplicate_name",
+      firstDupeIndex,
     );
   }
 
   return {
     version: 1,
     defaults: { command: resolvedDefaultsCommand, ui: defaultsUi },
+    settings: {
+      terminal: defaultsTerminal,
+      updateCheck: defaultsUpdateCheck,
+      groupsDir: defaultsGroupsDir,
+    },
     repos,
   };
 }

@@ -941,12 +941,12 @@ describe("bin/ccs update notice (stub fzf)", () => {
           assert.equal(version.stdout.trim(), "ccs v0.0.0-dev");
           const res = runSimple(sb, "new:Studio-web", ["--no-scan", `--ui=${look}`], { bin });
           assert.equal(res.code, 0, res.stderr);
-          // Node itself refuses to load a module under a package.json it cannot
-          // parse, so the simple look may not reach fzf at all. It must still end
-          // cleanly, and whatever it does show must not borrow a version.
-          const args = await fzfArgs(sb).catch(() => [] as string[]);
-          if (args.length) assert.ok(borderLabel(args)?.includes("ccs v0.0.0-dev"));
-          else assert.ok(res.stdout.includes("ccs --refresh"), res.stdout);
+          // Node refuses to load a module under a package.json it cannot parse.
+          // bin/package.json keeps it from reading this one, so the picker opens
+          // here as anywhere else, and what it shows must not borrow a version.
+          const args = await fzfArgs(sb);
+          assert.ok(borderLabel(args)?.includes("ccs v0.0.0-dev"));
+          assert.ok(!res.stdout.includes("ccs --refresh"), res.stdout);
           assert.equal(hasNotice(res, args), false);
         } finally {
           await sb.cleanup();

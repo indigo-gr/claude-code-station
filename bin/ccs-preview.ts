@@ -17,7 +17,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative } from "node:path";
 import { getPaths } from "./ccs-config.ts";
-import { openDb, reposV3Columns, type DbHandle } from "./ccs-db.ts";
+import { getMeta, openDb, reposV3Columns, type DbHandle } from "./ccs-db.ts";
+import { groupsFromMeta } from "./ccs-groups.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
 import {
   displayIcon,
@@ -362,7 +363,72 @@ function renderRepoPreview(name: string, cwd: string): void {
 // Group-header preview (repos.yml `launch: false`)
 // ---------------------------------------------------------------------------
 
+/**
+ * A logical group's header (`group:@<id>`, from defaults.groups_dir): its
+ * label and the entries listed under it. Both looks. Never throws. False
+ * when the cache holds no such group (a repos.yml header may be named `@…`).
+ */
+function renderLogicalGroup(id: string, simple: boolean): boolean {
+  const paths = getPaths();
+  let handle: DbHandle | null = null;
+  try {
+    handle = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
+    const db = handle.db;
+    const group = groupsFromMeta(getMeta(db, "logical_groups")).find((g) => g.id === id);
+    if (!group) return false;
+    const listed = db
+      .prepare(
+        `SELECT name, path, description, icon, ${reposV3Columns(db)}
+           FROM repos WHERE disabled = 0`,
+      )
+      .all() as GroupMemberView[];
+    const entries = group.members
+      .map((n) => listed.find((r) => r.name === n))
+      .filter((r): r is GroupMemberView => r !== undefined);
+    const title = truncate(group.label, 60);
+    if (simple) {
+      cardTitle(`🗂 グループ「${title}」`);
+      console.log("  ここは見出しです。開くときは、下のプロジェクトをえらんでください");
+      console.log("");
+      if (entries.length === 0) {
+        console.log("  このグループには、一覧に出るプロジェクトがありません");
+        return true;
+      }
+      cardField(
+        "🗂 ",
+        `中のプロジェクト（${entries.length}）`,
+        entries.map((r) => {
+          const desc = r.description ? `  ${dim(truncate(r.description, 40))}` : "";
+          return `${truncate(r.icon || "", 8) || "📁"} ${repoDisplayName(r)}${desc}`;
+        }),
+      );
+      return true;
+    }
+    console.log(hdr(`🗂 ${title}`));
+    console.log("");
+    console.log(divider("Group"));
+    console.log("Logical group (defaults.groups_dir) — not launchable.");
+    console.log("Pick one of the entries below to start a session.");
+    console.log("");
+    console.log(divider(`Entries (${entries.length})`));
+    for (const r of entries) {
+      const desc = r.description ? `  ${dim(truncate(r.description, 60))}` : "";
+      console.log(`  ${displayIcon(r.icon)} ${repoDisplayName(r)}${desc}`);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      handle?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function renderGroupPreview(name: string, cwd: string): void {
+  if (name.startsWith("@") && renderLogicalGroup(name.slice(1), false)) return;
   const paths = getPaths();
   if (!existsSync(paths.stateDb)) {
     console.log(`${hdr("📁 " + name)}`);
@@ -613,6 +679,7 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
 }
 
 function renderSimpleGroupCard(name: string): void {
+  if (name.startsWith("@") && renderLogicalGroup(name.slice(1), true)) return;
   withDb((db) => {
     const listed = db
       .prepare(

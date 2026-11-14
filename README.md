@@ -205,6 +205,27 @@ repos:
   └ 🌐 Web team  ‹Studio› │    Website web/
 ```
 
+### Groups from other tools (`groups_dir`) / ほかの道具のグループ定義
+
+Projects that live in unrelated folders can be listed together under one header, following group definition files another tool keeps. Off unless you set it. / フォルダがばらばらのプロジェクトを、ほかの道具が持つグループの定義ファイルに従って 1 つの見出しの下に並べる。書かなければ使わない。
+
+```yaml
+defaults:
+  groups_dir: ~/tools/groups   # a folder of *.json files; must be under $HOME
+```
+
+Each `*.json` directly in that folder (in name order, at most 200, each up to 256 KB) is read for five keys only, and nothing is ever written there: / フォルダの直下の `*.json` から 5 つのキーだけを読み、ccs はこのフォルダに書かない。
+
+```json
+{ "version": 1, "id": "team-x", "label": "Team X", "kind": "logical",
+  "members": [{ "path": "~/x/beta" }, { "path": "~/w/alpha" }] }
+```
+
+- Only `version: 1` and `kind: "logical"` are used. A `physical` group is skipped: its projects already nest by `path` (`launch: false` headers). / 使うのは `version: 1` と `kind: "logical"` だけ。`physical` はフォルダの入れ子で並ぶので読まない
+- `members[].path` (`~` expanded) is matched to the `path` of your `repos.yml` entries; the header lists the matches in the file's order, with their own names and icons. Members not in `repos.yml` are not shown. A project may appear both in its own place and under the header. / `members[].path` を `repos.yml` の `path` と比べ、当たった項目をその順に並べる（名前とアイコンは `repos.yml` の物）
+- In the classic look the headers come after all projects; in the simple look after the `launch: false` headers. Enter on a header does nothing. / classic は全部のプロジェクトの後、simple は `launch: false` の見出しの後
+- Broken or unknown files are skipped, never stopping the list; `ccs doctor` counts them (`groups_dir`: `group_files_skipped`), and `ccs list --json` gives the groups in `groups[]`. The scan reads the folder, so changes show after the next scan (`ccs --refresh` or `Ctrl-R`). / 読めないファイルは飛ばす（一覧は止めない）。`ccs doctor` が数を出す
+
 ### Friendlier look (`ui: simple`) / やさしい見た目
 
 For people who are new to the terminal, `defaults.ui: simple` switches ccs to a full-screen look with rounded frames and plain Japanese words. The default (`classic`) does not change. / ターミナルに慣れていない人向けに、`defaults.ui: simple` で全画面・角の丸い枠・日本語の言葉の見た目に切り替わる。既定（`classic`）は変わらない。
@@ -266,6 +287,7 @@ Notion:   ✅ abc123
 | `--ui=simple` / `--ui=classic` | Friendlier look / classic look for this launch (wins over `CCS_UI` and `defaults.ui`) / この起動だけ見た目を切り替える |
 | `--help` / `-h` | Help / ヘルプ |
 | `--version` / `-v` | Version / バージョン |
+| `doctor` / `list` / `sessions` / `repo` / `config` / `open` as the first argument | Commands for scripts and tools, see [below](#for-scripts-and-tools--スクリプトや道具から呼ぶ) / スクリプト向けの口（最初の引数の時だけ） |
 | _anything else_ | Passed through to the launched command / 起動コマンドへパススルー |
 
 ### Keyboard / キーボード
@@ -317,6 +339,50 @@ ccs .
 
 ---
 
+## For scripts and tools / スクリプトや道具から呼ぶ
+
+Commands for GUI launchers, scripts and other tools. They never open fzf, read stdin or ask anything, so they run without a terminal (`ccs open --here` alone starts Claude Code in the terminal it runs in). They do not go to the network (no update check) and never create the `repos.yml` template. The read commands (`doctor`, `list`, `config get`) write nothing to ccs's config or cache folders; they may put a temporary file in `TMPDIR` and remove it before they end. `sessions` refreshes the cache the way opening the list does; `repo add`, `repo remove` and `config set` write `repos.yml`. The full contract is [`docs/design/machine-interface.md`](docs/design/machine-interface.md). / GUI のランチャー・スクリプト・ほかの道具が呼ぶ口。fzf を開かず、標準入力を読まず、問いかけないので、端末が無くても動く（`ccs open --here` だけは、走らせた端末で Claude Code を起こす）。ネットに出ず（更新の確認もしない）、`repos.yml` のひな形を作らない。読む口（`doctor`・`list`・`config get`）は設定とキャッシュの置き場に何も書かない（`TMPDIR` に一時の物を作ることがあり、終わる時に消す）。`sessions` は一覧を開く時と同じにキャッシュを更新し、`repo add`・`repo remove`・`config set` は `repos.yml` を書く。約束の全体は上の資料。
+
+| Command | What it does |
+|---|---|
+| `ccs doctor [--json]` | Does ccs work here? Checks Node, tsx, ccs's own modules, better-sqlite3, fzf, `claude`, `repos.yml`, the cache and the terminal app for `open --new-window`. Exit 0 works, 1 does not, 2 bad arguments, 3 could not tell. / ccs がここで動くか。終了コード 0 動く・1 動かない・2 引数の誤り・3 確かめられない |
+| `ccs list --json [--with-paths]` | The entries of `repos.yml` after ccs's checks, in file order: name, label, description, icon, kind (`repo` / `group`), launch, lead, disabled, parent, tags, and whether the folder exists. Paths only with `--with-paths`. / ccs の検証を通した `repos.yml` の一覧。パスは `--with-paths` の時だけ |
+| `ccs sessions --json [--project NAME] [--limit N] [--with-titles] [--no-scan]` | Past conversations per project, newest first, at most `N` (default 5, up to 50) each: the session UUID and when it was last active, plus `more` (how many were left out). Titles (the first request, one line, at most 80 characters) only with `--with-titles`; never the summary, the folder or the conversation. / プロジェクトごとの前の会話（新しい順・既定 5 件）。題は `--with-titles` の時だけ |
+| `ccs repo add PATH [--name NAME] [--description TEXT] [--with-paths] [--json]` | Adds a folder under `$HOME` to `repos.yml` (at the end, in the block form, the path written as `~/…`). The name defaults to the folder's name (`-2`, `-3`… when taken). Creates a minimal `repos.yml` when there is none. / `$HOME` の下のフォルダを `repos.yml` に足す |
+| `ccs repo remove NAME [--json]` | Takes the entry out of `repos.yml`. The folder, its conversations and the cache are not touched. The last entry cannot be removed. / 台帳から外す（フォルダは消さない） |
+| `ccs config get [--with-paths] [--json]` | The settings `config set` can change, with their current values and the values allowed. / 変えられる設定の今の値と、受ける値 |
+| `ccs config set [--repo NAME] KEY VALUE [--json]` | Changes one setting: `defaults.ui` (`classic` / `simple`), `defaults.terminal` (`terminal`, or `""` to unset), `defaults.update_check` (`true` / `false`), or with `--repo` an entry's `label` / `description` (`""` removes it). Launch commands, paths and the other keys are not settable here — edit the file for those. / 決まった値から選ぶ設定と、項目の表示名・説明だけを変える |
+| `ccs open (--repo NAME \| --session UUID) [--here \| --new-window] [--terminal APP] [--json] [-- ARGS…]` | Starts Claude Code without the list, through the same checks as a picked row (the folder under `$HOME`, the command's characters, the session ID's form). `--here` (the default) runs it in this terminal; `--new-window` (macOS) opens a new window of `defaults.terminal` and returns at once. Unlike the list, `open` never falls back to the current folder: it refuses. / 一覧を開かずに起こす。`--here` はこの端末で、`--new-window`（macOS）は新しいウィンドウで |
+
+- **These words are commands only as the first argument**: `doctor`, `list`, `sessions`, `repo`, `config`, `open`. Until 0.4.x they went to the launched command (`ccs doctor` opened the list and started `claude doctor`). To pass one on, put a flag first: `ccs --new doctor`. / 最初の引数の時だけ ccs の口になる。起動するコマンドに渡したい時は前にフラグを置く
+- **With `--json`**, stdout carries exactly one JSON object, on failure too, with `schema_version`, `product_version`, `command`, `status` and `reasons` (`[{ "vocab", "code" }]`). Match on the exit code and on those words; messages on stderr are for people and may change. Without `--json`, `repo` and `config set` print nothing on stdout and one line on stderr. / `--json` の時は標準出力に JSON を 1 つだけ出す（失敗の時も）。機械は終了コードと語で分ける
+- **What is never printed**: secrets, the commands repos launch with, `custom`, user and host names. `doctor` prints no repo name or path at all — only words, counts and versions. Paths only with `--with-paths`, conversation titles only with `--with-titles`. / 秘密・起動コマンド・`custom`・ユーザー名とホスト名は出さない。パスは `--with-paths`、会話の題は `--with-titles` の時だけ
+- **How `repos.yml` is written** — one writer at a time (`repos.yml.lock`), the previous text kept in `repos.yml.bak`, the file written in place (a symlinked `repos.yml` stays a symlink), checked again, and put back when that check fails. A one-line `repos:` list (`repos: [ … ]`) is not added to (`flow_style_repos`). Names and paths are written only when they need no YAML quotes (`needs_quoting` otherwise). Comments and the order of keys are kept; spaces before an end-of-line comment may be reduced to one. / 書く時はロック・`.bak`・その場で書く・書いた後に検証・落ちたら元に戻す
+- **`ccs open --new-window`** writes a one-shot launcher file in `TMPDIR` (it deletes itself when it starts) and hands it to the terminal app with `open -a`; no AppleScript, so no Automation permission is asked for. The new window runs `ccs open --here` with the same checks. Choose the app first: `ccs config set defaults.terminal terminal` (macOS Terminal; other apps are added once their way of opening has been tried). The exit code of `--here` after Claude Code started is Claude Code's own; scripts should use `--new-window`. / 端末のアプリは先に `defaults.terminal` で決める。`--here` の起こした後の終了コードは Claude Code の物
+- **Called from a GUI app**, `PATH` is often short and `node` or `claude` is not found (`dependency_missing`). Pass the user's shell `PATH` to ccs. / GUI のアプリから呼ぶと `PATH` が短く `node` が見つからないことがある。利用者のシェルの `PATH` を渡す
+
+| Exit | `status` | Meaning |
+|:---:|---|---|
+| 0 | `ok` | Done (`doctor`: ccs works) |
+| 1 | `failed` | Failed (`doctor`: ccs does not work); also `config_locked`, `config_changed` — try again |
+| 2 | `usage` | Bad arguments (`list` / `sessions` without `--json` too) |
+| 3 | `unverifiable` | Could not tell (no permission, a check timed out) |
+| 4 | `missing_prerequisite` | Not run: something it needs is missing (no `repos.yml`, a broken one, no cache, no terminal, no Node) — not used by `doctor` |
+| 5 | `not_found` | No such entry or session |
+| 6 | `rejected` | Refused by a check (outside `$HOME`, a name already taken, a value not allowed, …) |
+| 7 | `partial` | Written, failed the check, and could not be put back: the previous text is in `repos.yml.bak` |
+| 130 | `interrupted` | Stopped by Ctrl-C (a write in progress is undone) |
+
+```bash
+ccs doctor --json | jq -r '.status, (.checks[] | select(.status != "ok") | "\(.name): \(.code)")'
+ccs list --json | jq -r '.repos[] | select(.kind == "repo" and (.disabled | not)) | .name'
+ccs sessions --json --project studio-web --limit 3 | jq -r '.projects[].sessions[].uuid'
+ccs repo add ~/projects/studio/web --json | jq -r '.status'
+ccs open --repo studio-web --new-window
+```
+
+---
+
 ## State cache / 状態キャッシュ
 
 ccs keeps a SQLite cache at `~/.cache/ccs/state.db` (or `$XDG_CACHE_HOME/ccs/state.db`) with repo metadata, git state badges, session summaries, and handoff/pending file lists.
@@ -338,7 +404,7 @@ ccs tells you when npm has a newer version. The classic look prints one line wit
 - **What is sent, and where** — one HTTPS `GET https://registry.npmjs.org/-/package/%40indigo-gr%2Fclaude-code-station/dist-tags`, at most once a day (an hour after a failed attempt). It carries no ccs version, repo, session or machine details; the registry sees only the request itself, your IP address and Node's default User-Agent. / 送るのは公開情報を読む GET が 1 日に 1 回まで（失敗の後は 1 時間後）。ccs のバージョン・リポジトリ・会話・マシンの情報は送らない。npm が受け取るのはリクエストそのもの・IP アドレス・Node の既定の User-Agent だけ
 - **Never in the way** — the check runs in the background with a 3-second limit and its answer is used on the next launch; startup only reads `~/.cache/ccs/update-check` (or `$XDG_CACHE_HOME/ccs/update-check`). Offline, or when the answer is unusable, ccs behaves as before. HTTP proxy settings are not used, so behind a proxy the check simply fails quietly. / 確認は裏で行い、結果は次の起動で使う。起動を遅らせず、オフラインでも止まらない。プロキシの設定は使わないので、プロキシの内側では確認が静かに失敗する
 - **When there is no notice** — when you are on the latest version or newer, when npm's latest is a prerelease, and when your own version is a prerelease or a copy install (`0.0.0-dev`). A failed check shows no notice of its own, but a version found by an earlier check is still reported. / 最新かそれより新しい時・npm の latest がプレリリースの時・手元がプレリリースかコピーインストールの時は知らせない。確認の失敗だけでは知らせないが、前回までに見つけたバージョンは知らせる
-- **Turn it off** — set `CCS_NO_UPDATE_CHECK=1` (any non-empty value): no request, and the cache is not read. / `CCS_NO_UPDATE_CHECK=1`（空でない値）で止まる。通信せず、キャッシュも読まない
+- **Turn it off** — set `CCS_NO_UPDATE_CHECK=1` (any non-empty value), or put `update_check: false` under `defaults:` in `repos.yml` (`ccs config set defaults.update_check false`): no request, and the cache is not read. The variable wins over the file (`update_check: true` does not turn a set variable back on). Useful when another tool manages ccs's updates. / `CCS_NO_UPDATE_CHECK=1`（空でない値）か `repos.yml` の `defaults.update_check: false` で止まる。通信せず、キャッシュも読まない
 - **Another registry** — `CCS_UPDATE_REGISTRY=https://registry.example.com` asks that server instead. / `CCS_UPDATE_REGISTRY` で問い合わせ先を替えられる
 
 ---

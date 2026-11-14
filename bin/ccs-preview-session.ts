@@ -15,6 +15,7 @@ import {
   MAX_JSONL_SIZE,
   UUID_RE,
 } from "./ccs-utils.ts";
+import { pathToFileURL } from "node:url";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const MAX_PREVIEW_MESSAGES = 20;
@@ -181,7 +182,9 @@ export async function renderSessionPreview(
 }
 
 // CLI bootstrap: only run when invoked directly (not when imported)
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not `file://${argv[1]}`: a folder with a space (or any
+// character a URL escapes) in its name would never match.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const sessionId = process.argv[2];
   if (!sessionId) {
     console.log("Usage: ccs-preview-session.ts <session-uuid>");

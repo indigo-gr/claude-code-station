@@ -3,6 +3,10 @@
 # https://github.com/indigo-gr/claude-code-station
 
 set -euo pipefail
+# bash 5 turns checkwinsize on by default, also in scripts: after any program
+# run in the foreground it resets COLUMNS to the terminal's width, so an
+# exported COLUMNS would lose to the real width (see terminal_cols).
+shopt -u checkwinsize
 
 # Resolve $0 through symlinks before taking dirname: `npm install -g
 # github:indigo-gr/claude-code-station` links this script into the global
@@ -49,6 +53,14 @@ else
   TSX="tsx"
 fi
 
+# Every module starts through ccs-tsx.sh, from ccs's own folder: Node reads
+# the package.json above the CURRENT folder for tsx's preload, and a broken
+# one there would stop every module (the user's folder goes on in CCS_CWD).
+# TSX stays the tsx to check for; TSX_RUN is how a module is started.
+export CCS_TSX_REAL="$TSX"
+CCS_TSX_SH="${SCRIPT_DIR}/ccs-tsx.sh"
+TSX_RUN=(bash "$CCS_TSX_SH")
+
 CCS_LIST="${SCRIPT_DIR}/ccs-list.ts"
 CCS_SCAN="${SCRIPT_DIR}/ccs-scan.ts"
 CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.ts"
@@ -62,6 +74,431 @@ if [[ -n "${CCR_CMD:-}" && -z "${CCS_CMD:-}" ]]; then
   echo "[ccs] CCR_CMD is deprecated, please rename to CCS_CMD (using CCR_CMD value for now)" >&2
   export CCS_CMD="${CCR_CMD}"
 fi
+
+# ── Machine interface: doctor, list, sessions, repo, config, open ────────────
+# Words for GUI launchers, scripts and other tools (docs/design/
+# machine-interface.md). Only as the FIRST argument: `ccs --new doctor` still
+# passes `doctor` on to the launched command. Handled before the dependency
+# check and the update check: these commands never open fzf, read stdin, go
+# to the network or create the config template or the cache. Exit codes and
+# the JSON shape are the contract; stderr is for people and never carries a
+# repo path or name.
+CCS_MACHINE="${SCRIPT_DIR}/ccs-machine.ts"
+CCS_DOCTOR="${SCRIPT_DIR}/ccs-doctor.ts"
+NODE_MIN_MAJOR=22      # package.json engines.node
+FZF_MIN=(0 42)         # README and install.sh
+FZF_HEADERS_MIN=(0 45) # fzf's transform action (group headers stay open)
+CHECK_TIMEOUT=5        # node --version, fzf --version
+DOCTOR_STAGE2_TIMEOUT=20
+
+# The values a hand-built answer may carry: words, a version, a time.
+json_version() { # json_version VALUE → "VALUE" or null
+  if [[ "$1" =~ ^[0-9A-Za-z.+-]{1,32}$ ]]; then printf '"%s"' "$1"; else printf 'null'; fi
+}
+utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# The outer object (machine-interface.md 1.3), for the cases where no .ts
+# module can answer. Words only, so printf is enough.
+machine_outer() { # machine_outer COMMAND STATUS
+  printf '"schema_version":"1.0.0","product_id":"ccs","product_version":%s,"command":"%s","written_at":"%s","status":"%s"' \
+    "$(json_version "$VERSION")" "$1" "$(utc_now)" "$2"
+}
+machine_fail() { # machine_fail COMMAND JSON(0|1) STATUS EXIT CODE [DETAIL] [NOTE]
+  local detail=""
+  [[ -z "${6:-}" ]] || detail=",\"detail\":\"$6\""
+  if [[ "$2" == 1 ]]; then
+    printf '{%s,"reasons":[{"vocab":"ccs.cli","code":"%s"%s}]}\n' "$(machine_outer "$1" "$3")" "$5" "$detail"
+  fi
+  echo "[ccs] ${1}: ${3}: ${5}${6:+ (${6})}${7:+ — ${7}}" >&2
+  exit "$4"
+}
+args_want_json() { # args_want_json ARGS... — `--json` before a bare `--`
+  local a
+  for a in "$@"; do
+    [[ "$a" == "--" ]] && return 1
+    [[ "$a" == "--json" ]] && return 0
+  done
+  return 1
+}
+
+# run_timed SECONDS OUT ERR CMD... — run CMD with stdin from /dev/null, its
+# output in the two files, for at most SECONDS. Sets TIMED_RC and TIMED_OUT.
+# A polling loop, not timeout(1): macOS has none, and a background `sleep`
+# would outlive the command.
+# While it runs, this shell's own stderr goes to /dev/null: bash reports a job
+# it had to kill ("<script path>: line N: PID Terminated …"), and that line
+# names the install path. The command's stderr goes to ERR either way.
+run_timed() {
+  local limit=$1 out=$2 err=$3 pid ticks=0
+  shift 3
+  TIMED_OUT=0 TIMED_RC=0
+  exec 3>&2 2>/dev/null
+  "$@" >"$out" 2>"$err" </dev/null &
+  pid=$!
+  MACHINE_CHILD=$pid
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( ticks >= limit * 10 )); then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 0.2
+      kill -KILL "$pid" 2>/dev/null || true
+      TIMED_OUT=1
+      break
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$pid" 2>/dev/null || TIMED_RC=$?
+  exec 2>&3 3>&-
+  MACHINE_CHILD=""
+}
+
+# machine_tmp_dir NAME — a fresh 0700 folder for this run in TMPDIR, or in
+# /tmp when TMPDIR is missing or not writable. Sets MACHINE_TMP and
+# MACHINE_TMP_BASE (the folder it was made in). The .ts modules run with
+# TMPDIR set to MACHINE_TMP, so what tsx puts in its temporary folder goes
+# when the folder is removed at exit.
+machine_tmp_dir() {
+  local base
+  for base in "${TMPDIR:-/tmp}" /tmp; do
+    base="${base%/}"
+    [[ -n "$base" ]] || continue
+    if MACHINE_TMP=$(mktemp -d "${base}/$1.XXXXXX" 2>/dev/null); then
+      MACHINE_TMP_BASE="$base"
+      return 0
+    fi
+  done
+  return 1
+}
+
+version_at_least() { # version_at_least X.Y MAJOR MINOR
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  local maj=$((10#${BASH_REMATCH[1]})) min=$((10#${BASH_REMATCH[2]}))
+  (( maj > $2 || (maj == $2 && min >= $3) ))
+}
+
+# Node prints these when it cannot load a module at all (doctor's `modules`).
+stage2_load_error() { # stage2_load_error STDERR_FILE → word on stdout
+  if grep -Eq 'Invalid package config|ERR_INVALID_PACKAGE_CONFIG' "$1" 2>/dev/null; then
+    echo invalid_package_config
+  elif grep -Eq 'ERR_MODULE_NOT_FOUND|Cannot find module|ERR_UNKNOWN_FILE_EXTENSION|ERR_REQUIRE_ESM|SyntaxError' "$1" 2>/dev/null; then
+    echo module_load_failed
+  fi
+}
+
+# ── ccs doctor [--json] ──
+# Stage 1 (here, in bash): what must hold before any .ts module can load.
+# Stage 2 (ccs-doctor.ts): the modules, better-sqlite3, repos.yml, the cache;
+# it prints the whole answer. If stage 2 gives none, the answer is built here
+# from stage 1. Exit 0 works, 1 does not, 2 bad arguments, 3 cannot tell.
+run_doctor() {
+  local bad=0 a
+  DOCTOR_JSON=0
+  for a in "$@"; do
+    case "$a" in
+      --json) DOCTOR_JSON=1 ;;
+      *) bad=1 ;;
+    esac
+  done
+  if (( bad )); then
+    if (( DOCTOR_JSON )); then
+      printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"unknown_option"}]}\n' \
+        "$(machine_outer doctor usage)"
+    fi
+    echo "[ccs] doctor takes only --json (usage: unknown_option)" >&2
+    exit 2
+  fi
+
+  if ! machine_tmp_dir ccs-doctor; then
+    if (( DOCTOR_JSON )); then
+      printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"internal_error"}]}\n' \
+        "$(machine_outer doctor failed)"
+    fi
+    echo "[ccs] doctor: failed: internal_error — cannot create a temporary folder (TMPDIR or /tmp)" >&2
+    exit 1
+  fi
+  DOCTOR_TMP="$MACHINE_TMP"
+  MACHINE_CHILD=""
+  trap 'rm -rf "$DOCTOR_TMP"' EXIT
+  trap 'doctor_interrupted' INT
+  doctor_interrupted() {
+    [[ -z "$MACHINE_CHILD" ]] || kill -TERM "$MACHINE_CHILD" 2>/dev/null || true
+    if (( DOCTOR_JSON )); then
+      printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"interrupted"}]}\n' \
+        "$(machine_outer doctor interrupted)"
+    fi
+    exit 130
+  }
+  local out="$DOCTOR_TMP/out" err="$DOCTOR_TMP/err" v
+
+  # node: present, and at least engines.node.
+  local c_node c_tsx c_fzf c_claude c_modules
+  if ! command -v node >/dev/null 2>&1; then
+    c_node="fail:node_missing"
+  else
+    run_timed "$CHECK_TIMEOUT" "$out" "$err" node --version
+    v=$(head -n 1 "$out" 2>/dev/null || true)
+    if (( TIMED_OUT )); then
+      c_node="unknown:check_timeout"
+    elif (( TIMED_RC == 0 )) && [[ "$v" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+      v="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+      if (( 10#${BASH_REMATCH[1]} < NODE_MIN_MAJOR )); then
+        c_node="fail:node_too_old:$v"
+      else
+        c_node="ok:ok:$v"
+      fi
+    else
+      c_node="unknown:check_crashed"
+    fi
+  fi
+
+  # tsx: the package's own, or one on PATH.
+  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
+    c_tsx="fail:tsx_missing"
+  else
+    c_tsx="ok:ok"
+  fi
+
+  # fzf: present and at least 0.42.0; under 0.45 group headers do not stay open.
+  if ! command -v fzf >/dev/null 2>&1; then
+    c_fzf="fail:fzf_missing"
+  else
+    run_timed "$CHECK_TIMEOUT" "$out" "$err" fzf --version
+    v=$(head -n 1 "$out" 2>/dev/null || true)
+    if (( TIMED_OUT )); then
+      c_fzf="unknown:check_timeout"
+    elif (( TIMED_RC == 0 )) && [[ "$v" =~ ^([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+      v="${BASH_REMATCH[1]}"
+      if ! version_at_least "$v" "${FZF_MIN[@]}"; then
+        c_fzf="fail:fzf_too_old:$v"
+      elif ! version_at_least "$v" "${FZF_HEADERS_MIN[@]}"; then
+        c_fzf="warn:fzf_too_old_for_headers:$v"
+      else
+        c_fzf="ok:ok:$v"
+      fi
+    else
+      c_fzf="unknown:check_crashed"
+    fi
+  fi
+
+  # claude: on PATH (never started).
+  if command -v claude >/dev/null 2>&1; then c_claude="ok:ok"; else c_claude="fail:claude_missing"; fi
+
+  # Stage 2, when Node and tsx can run it.
+  if [[ "$c_node" == ok:* && "$c_tsx" == ok:* ]]; then
+    local limit="$DOCTOR_STAGE2_TIMEOUT"
+    [[ "${CCS_DOCTOR_TIMEOUT:-}" =~ ^[1-9][0-9]{0,2}$ ]] && limit="$CCS_DOCTOR_TIMEOUT"
+    local mode=()
+    (( DOCTOR_JSON )) && mode=(--json)
+    run_timed "$limit" "$out" "$err" env TMPDIR="$DOCTOR_TMP" TSX_DISABLE_CACHE=1 \
+      "${TSX_RUN[@]}" "$CCS_DOCTOR" ${mode[@]+"${mode[@]}"} \
+      --node "$c_node" --tsx "$c_tsx" --fzf "$c_fzf" --claude "$c_claude"
+    if (( TIMED_OUT )); then
+      c_modules="unknown:check_timeout"
+    elif [[ "$TIMED_RC" =~ ^[013]$ && -s "$out" ]] && { (( ! DOCTOR_JSON )) || [[ "$(head -c 1 "$out")" == "{" ]]; }; then
+      cat "$out"
+      exit "$TIMED_RC"
+    else
+      v=$(stage2_load_error "$err")
+      if [[ -n "$v" ]]; then c_modules="fail:$v"; else c_modules="unknown:check_crashed"; fi
+    fi
+  else
+    c_modules="skipped:blocked"
+  fi
+
+  doctor_answer_from_stage1 "$DOCTOR_JSON" "$c_node" "$c_tsx" "$c_modules" "$c_fzf" "$c_claude"
+}
+
+# The answer without stage 2: stage 1's checks, `modules` as found, the rest
+# skipped (blocked). Same rules as ccs-doctor.ts's decide().
+doctor_answer_from_stage1() { # JSON NODE TSX MODULES FZF CLAUDE
+  local json=$1
+  shift
+  local names=(node tsx modules sqlite fzf claude config config_layout cache terminal groups_dir)
+  local values=("$1" "$2" "$3" "skipped:blocked" "$4" "$5" "skipped:blocked" "skipped:blocked" "skipped:blocked" "skipped:blocked" "skipped:blocked")
+  local required=" node tsx modules sqlite fzf claude config "
+  local i st code ver v checks="" fails="" unknowns="" rows=""
+  for i in "${!names[@]}"; do
+    IFS=: read -r st code ver <<< "${values[$i]}"
+    [[ -n "$checks" ]] && checks+=","
+    checks+="{\"name\":\"${names[$i]}\",\"status\":\"${st}\",\"code\":\"${code}\""
+    [[ -n "$ver" ]] && checks+=",\"version\":$(json_version "$ver")"
+    checks+="}"
+    if [[ "$required" == *" ${names[$i]} "* ]]; then
+      [[ "$st" == fail ]] && fails+="${fails:+,}{\"vocab\":\"ccs.health\",\"code\":\"${code}\"}"
+      [[ "$st" == unknown ]] && unknowns+="${unknowns:+,}{\"vocab\":\"ccs.health\",\"code\":\"${code}\"}"
+    fi
+    v="$(printf '%-14s%-9s%s' "${names[$i]}" "$st" "$([[ "$code" == ok ]] || echo "$code")")${ver:+  version=$ver}"
+    rows+="  ${v%"${v##*[! ]}"}"$'\n'
+  done
+  local status rc reasons
+  if [[ -n "$fails" ]]; then
+    status=failed rc=1 reasons="$fails"
+  elif [[ -n "$unknowns" ]]; then
+    status=unverifiable rc=3 reasons="$unknowns"
+  else
+    status=ok rc=0 reasons='{"vocab":"ccs.health","code":"ok"}'
+  fi
+  local os arch
+  os=$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m 2>/dev/null)
+  case "$arch" in
+    x86_64|amd64) arch=x64 ;;
+    aarch64) arch=arm64 ;;
+  esac
+  [[ "$os" =~ ^[a-z0-9_]{1,32}$ ]] || os=unknown
+  [[ "$arch" =~ ^[a-z0-9_]{1,32}$ ]] || arch=unknown
+  if [[ "$json" == 1 ]]; then
+    printf '{%s,"installed":"installed","running":"not_applicable","reasons":[%s],"checks":[%s],"platform":{"os":"%s","arch":"%s"}}\n' \
+      "$(machine_outer doctor "$status")" "$reasons" "$checks" "$os" "$arch"
+  else
+    case "$status" in
+      ok) echo "ccs doctor: ccs works (ok)" ;;
+      failed) echo "ccs doctor: ccs does not work (failed)" ;;
+      *) echo "ccs doctor: could not tell (${status})" ;;
+    esac
+    printf '%s' "$rows"
+  fi
+  exit "$rc"
+}
+
+# ── ccs list | sessions | repo | config | open ──
+# One .ts entry (ccs-machine.ts) answers all of them. Its stdout is passed on
+# as is; when it gives nothing (Node cannot load the modules), the answer is
+# built here. stderr is held so Node's own dump (it names files) stays out.
+run_machine() {
+  local word=$1
+  # `command` names the subcommand too (repo add, config get), known words only.
+  case "${1}:${2:-}" in
+    repo:add|repo:remove|config:get|config:set) word="$1 $2" ;;
+  esac
+  MACHINE_JSON=0
+  args_want_json "${@:2}" && MACHINE_JSON=1
+  if ! command -v node >/dev/null 2>&1; then
+    machine_fail "$word" "$MACHINE_JSON" missing_prerequisite 4 dependency_missing node
+  fi
+  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
+    machine_fail "$word" "$MACHINE_JSON" missing_prerequisite 4 dependency_missing tsx
+  fi
+  machine_tmp_dir ccs-machine ||
+    machine_fail "$word" "$MACHINE_JSON" failed 1 internal_error "" "cannot create a temporary folder (TMPDIR or /tmp)"
+  trap 'rm -rf "$MACHINE_TMP"' EXIT
+  MACHINE_ERR="$MACHINE_TMP/err"
+  # The child gets SIGINT too and answers it itself (130 and the outer object).
+  local rc=0 out="" got_int=0 load_error
+  trap 'got_int=1' INT
+  out=$(TMPDIR="$MACHINE_TMP" TSX_DISABLE_CACHE=1 "${TSX_RUN[@]}" "${CCS_MACHINE}" "$@" 2>"$MACHINE_ERR" </dev/null) || rc=$?
+  trap - INT
+  load_error=$(stage2_load_error "$MACHINE_ERR")
+  # The module answered: JSON on stdout, or (without --json) its own line.
+  if [[ -n "$out" ]] || { (( ! MACHINE_JSON )) && [[ -z "$load_error" ]] && (( ! got_int )); }; then
+    [[ -z "$out" ]] || printf '%s\n' "$out"
+    cat "$MACHINE_ERR" >&2
+    exit "$rc"
+  fi
+  if (( got_int )); then
+    machine_fail "$word" "$MACHINE_JSON" interrupted 130 interrupted
+  fi
+  if [[ "$load_error" == invalid_package_config ]]; then
+    machine_fail "$word" "$MACHINE_JSON" failed 1 invalid_package_config "" \
+      "a package.json above ccs cannot be parsed, so Node will not load ccs's modules; fix or remove that file"
+  fi
+  machine_fail "$word" "$MACHINE_JSON" failed 1 internal_error "" "${load_error:-no answer from the module}"
+}
+
+# ── Starting the launch command (the list and `ccs open --here`) ──
+# command_is_safe CMD — the defense-in-depth copy of the policy ccs-config.ts
+# enforces on `command` at load time (shell metacharacters, control chars).
+command_is_safe() {
+  [[ ! "$1" =~ [\;\&\|\<\>\$\`\"\'\\] && ! "$1" =~ [[:cntrl:]] ]]
+}
+# run_launch_command KIND KEY CMD [ARGS...] — run CMD in the current folder:
+# `new` as is, `resume` with --resume KEY. Direct invocation (NOT exec) so
+# shell functions / aliases like `opr` work; CMD is split into words with no
+# wildcard expansion.
+run_launch_command() {
+  local kind=$1 key=$2 cmd=$3
+  shift 3
+  set -f
+  # shellcheck disable=SC2086
+  if [[ "$kind" == resume ]]; then
+    ${cmd} --resume "$key" "$@"
+  else
+    ${cmd} "$@"
+  fi
+  set +f
+}
+
+# ── ccs open (--repo NAME | --session UUID) [--here | --new-window] … ──
+# ccs-open.ts decides (every check of the list, without its fallbacks); for
+# --here it leaves the plan in a file and this shell starts the command in
+# this terminal, after checking the plan once more. --new-window is done
+# entirely by the module (it hands a one-shot .command file to the app).
+run_open() {
+  MACHINE_JSON=0
+  args_want_json "$@" && MACHINE_JSON=1
+  if ! command -v node >/dev/null 2>&1; then
+    machine_fail open "$MACHINE_JSON" missing_prerequisite 4 dependency_missing node
+  fi
+  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
+    machine_fail open "$MACHINE_JSON" missing_prerequisite 4 dependency_missing tsx
+  fi
+  machine_tmp_dir ccs-open-plan ||
+    machine_fail open "$MACHINE_JSON" failed 1 internal_error "" "cannot create a temporary folder (TMPDIR or /tmp)"
+  OPEN_TMP="$MACHINE_TMP"
+  trap 'rm -rf "$OPEN_TMP"' EXIT
+  local tty=0 rc=0 out="" got_int=0 load_error a seen=0
+  [[ -t 0 && -t 1 ]] && tty=1
+  # Arguments after a bare `--` go to the launched command.
+  local pass=()
+  for a in "$@"; do
+    if (( seen )); then pass+=("$a"); elif [[ "$a" == "--" ]]; then seen=1; fi
+  done
+  trap 'got_int=1' INT
+  # The launcher file of --new-window must outlive this run: it goes to the
+  # folder OPEN_TMP was made in, not into OPEN_TMP (removed at exit).
+  out=$(CCS_OPEN_PLAN="$OPEN_TMP/plan" CCS_OPEN_TTY="$tty" CCS_OPEN_TMPDIR="$MACHINE_TMP_BASE" \
+    TMPDIR="$OPEN_TMP" TSX_DISABLE_CACHE=1 "${TSX_RUN[@]}" "${CCS_MACHINE}" open "$@" 2>"$OPEN_TMP/err" </dev/null) || rc=$?
+  trap - INT
+  load_error=$(stage2_load_error "$OPEN_TMP/err")
+  if [[ -n "$out" || -s "$OPEN_TMP/plan" ]] || { (( ! MACHINE_JSON )) && [[ -z "$load_error" ]] && (( ! got_int )); }; then
+    [[ -z "$out" ]] || printf '%s\n' "$out"
+    cat "$OPEN_TMP/err" >&2
+    (( rc == 0 )) && [[ -s "$OPEN_TMP/plan" ]] || exit "$rc"
+  else
+    (( got_int )) && machine_fail open "$MACHINE_JSON" interrupted 130 interrupted
+    [[ "$load_error" == invalid_package_config ]] &&
+      machine_fail open "$MACHINE_JSON" failed 1 invalid_package_config
+    machine_fail open "$MACHINE_JSON" failed 1 internal_error "" "${load_error:-no answer from the module}"
+  fi
+
+  # --here: the plan, checked again before anything runs.
+  local fields=() f
+  while IFS= read -r -d '' f; do fields+=("$f"); done < "$OPEN_TMP/plan"
+  (( ${#fields[@]} == 4 )) || machine_fail open "$MACHINE_JSON" failed 1 internal_error
+  local kind=${fields[0]} key=${fields[1]} cwd=${fields[2]} cmd=${fields[3]}
+  case "$kind" in
+    resume) [[ "$key" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+              machine_fail open "$MACHINE_JSON" rejected 6 invalid_uuid ;;
+    new) command_is_safe "$key" || machine_fail open "$MACHINE_JSON" rejected 6 unsafe_characters ;;
+    *) machine_fail open "$MACHINE_JSON" failed 1 internal_error ;;
+  esac
+  command_is_safe "$cmd" || machine_fail open "$MACHINE_JSON" rejected 6 command_unsafe
+  if [[ ( "$cwd" != "$HOME" && "$cwd" != "$HOME"/* ) || "/${cwd}/" == */../* ]]; then
+    machine_fail open "$MACHINE_JSON" rejected 6 path_outside_home
+  fi
+  cd "$cwd" 2>/dev/null || machine_fail open "$MACHINE_JSON" rejected 6 path_not_found
+  rm -rf "$OPEN_TMP"
+  trap - EXIT
+  # The exit code from here on is the launched command's (outside the table).
+  run_launch_command "$kind" "$key" "$cmd" ${pass[@]+"${pass[@]}"}
+  exit 0
+}
+
+case "${1:-}" in
+  doctor) shift; run_doctor "$@" ;;
+  open) shift; run_open "$@" ;;
+  list|sessions|repo|config) run_machine "$@" ;;
+esac
 
 # ── Clipboard helper (cross-platform) ────────────────────────────────────────
 clipboard_cmd() {
@@ -124,6 +561,35 @@ Usage:
                       which to add to repos.yml via fzf multi-select
   ccs [options]       Unknown options pass through to launched command
 
+For scripts and tools (no fzf, no questions, no network; --json prints one
+JSON answer on stdout, and the exit code says what happened):
+  ccs doctor [--json] Does ccs work here? Exit 0 works, 1 does not,
+                      2 bad arguments, 3 could not tell
+  ccs list --json [--with-paths]
+                      repos.yml entries after ccs's checks (paths only
+                      with --with-paths)
+  ccs sessions --json [--project NAME] [--limit N] [--with-titles] [--no-scan]
+                      Past conversations per project, newest first
+                      (titles only with --with-titles)
+  ccs repo add PATH [--name NAME] [--description TEXT] [--json]
+  ccs repo remove NAME [--json]
+                      Add a folder under \$HOME to repos.yml, or take an
+                      entry out (the folder is never touched)
+  ccs config get [--json]
+  ccs config set [--repo NAME] KEY VALUE [--json]
+                      KEY is defaults.ui, defaults.terminal,
+                      defaults.update_check, or label / description
+                      of the entry named by --repo
+  ccs open (--repo NAME | --session UUID) [--here | --new-window]
+                      Start Claude Code without the list: in this terminal
+                      (--here, the default), or in a new window of
+                      defaults.terminal (--new-window, macOS)
+  Exit codes: 0 ok, 1 failed, 2 bad arguments, 3 could not tell,
+  4 missing prerequisite, 5 not found, 6 refused, 7 partly done,
+  130 interrupted. doctor, list, sessions, repo, config and open are
+  commands only as the first argument; \`ccs --new doctor\` still passes
+  doctor on.
+
 Controls:
   Enter               Launch (or resume) selected entry; does nothing on a
                       group header (an entry with launch: false)
@@ -141,7 +607,8 @@ Environment:
   CCS_UI              simple | classic — overrides repos.yml defaults.ui
                       (the --ui= flag wins over both)
   CCS_NO_UPDATE_CHECK Any non-empty value stops the update check and its notice
-                      (no network request, the cache is not read)
+                      (no network request, the cache is not read); so does
+                      defaults.update_check: false in repos.yml
   CCS_UPDATE_REGISTRY Registry to ask instead of https://registry.npmjs.org
 
 Examples:
@@ -179,13 +646,13 @@ if [[ "${1:-}" == "init" ]]; then
   fi
 
   if (( ! AUTO )); then
-    "${TSX}" "${CCS_INIT}" scaffold
+    "${TSX_RUN[@]}" "${CCS_INIT}" scaffold
     exit $?
   fi
 
   check_deps
   echo "🔍 Scanning \$HOME for git repositories..." >&2
-  CANDIDATES="$("${TSX}" "${CCS_INIT}" discover ${INIT_ARGS[@]+"${INIT_ARGS[@]}"})" || exit 1
+  CANDIDATES="$("${TSX_RUN[@]}" "${CCS_INIT}" discover ${INIT_ARGS[@]+"${INIT_ARGS[@]}"})" || exit 1
   if [[ -z "$CANDIDATES" ]]; then
     echo "No new git repositories found (everything within depth is already registered)." >&2
     exit 0
@@ -201,9 +668,9 @@ if [[ "${1:-}" == "init" ]]; then
     --tabstop=4 \
   ) || exit 0
   [[ -z "$SELECTED" ]] && exit 0
-  printf '%s\n' "$SELECTED" | "${TSX}" "${CCS_INIT}" append || exit 1
+  printf '%s\n' "$SELECTED" | "${TSX_RUN[@]}" "${CCS_INIT}" append || exit 1
   # Index the new repos right away so the next `ccs` shows them with stats.
-  "${TSX}" "${CCS_SCAN}" --force --quiet || {
+  "${TSX_RUN[@]}" "${CCS_SCAN}" --force --quiet || {
     echo "[ccs] scan failed — run \`ccs --refresh\` to index the new repos" >&2
   }
   exit 0
@@ -267,27 +734,46 @@ fi
 # it exactly as before (then the same "continuing with stale DB" line); the
 # simple look keeps it for after the picker closes, where it can be read.
 UI_CFG=""
+UPDATE_CHECK_CFG="" # off = repos.yml defaults.update_check: false
 SCAN_RAN=0
 SCAN_FAILED=0
+# The trap first, so a second mktemp that fails does not leave the first file.
+SCAN_ERR_FILE="" LIST_ERR_FILE=""
+trap 'rm -f ${SCAN_ERR_FILE:+"$SCAN_ERR_FILE"} ${LIST_ERR_FILE:+"$LIST_ERR_FILE"}' EXIT
 SCAN_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/ccs-scan-err.XXXXXX")
-trap 'rm -f "$SCAN_ERR_FILE"' EXIT
+LIST_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/ccs-list-err.XXXXXX")
 if (( DO_REFRESH || ! NO_SCAN )); then
   SCAN_RAN=1
-  SCAN_ARGS=(--quiet --print-ui)
+  SCAN_ARGS=(--quiet --print-settings)
   (( DO_REFRESH )) && SCAN_ARGS=(--force "${SCAN_ARGS[@]}")
-  if SCAN_OUT=$("${TSX}" "${CCS_SCAN}" "${SCAN_ARGS[@]}" 2>"$SCAN_ERR_FILE"); then
+  if SCAN_OUT=$("${TSX_RUN[@]}" "${CCS_SCAN}" "${SCAN_ARGS[@]}" 2>"$SCAN_ERR_FILE"); then
     case "$SCAN_OUT" in
       *ui=simple*)  UI_CFG="simple" ;;
       *ui=classic*) UI_CFG="classic" ;;
+    esac
+    case "$SCAN_OUT" in
+      *update_check=off*) UPDATE_CHECK_CFG="off" ;;
+      *update_check=on*)  UPDATE_CHECK_CFG="on" ;;
     esac
   else
     SCAN_FAILED=1
   fi
 fi
 
+# No scan this launch (--no-scan, or it failed): the settings the last scan
+# stored, in one read — only when one of them is still needed.
 UI="${UI_REQ:-${UI_CFG}}"
-if [[ -z "$UI" ]]; then
-  UI=$("${TSX}" "${CCS_LIST}" --print-ui 2>/dev/null) || UI="classic"
+if [[ -z "$UI" || ( -z "$UPDATE_CHECK_CFG" && -z "${CCS_NO_UPDATE_CHECK:-}" ) ]]; then
+  SETTINGS_OUT=$("${TSX_RUN[@]}" "${CCS_LIST}" --print-settings 2>/dev/null) || SETTINGS_OUT=""
+  if [[ -z "$UI" ]]; then
+    case "$SETTINGS_OUT" in
+      *ui=simple*) UI="simple" ;;
+      *) UI="classic" ;;
+    esac
+  fi
+  case "$SETTINGS_OUT" in
+    *update_check=off*) UPDATE_CHECK_CFG="off" ;;
+  esac
 fi
 [[ "$UI" == "simple" ]] || UI="classic"
 
@@ -298,6 +784,56 @@ if [[ "$UI" == "simple" ]] && ! fzf_at_least 0 61; then
   echo "[ccs] やさしい見た目（ui: simple）には fzf 0.61 以上が要ります（いまの fzf: ${FZF_V:-不明}）。ふつうの見た目で開きます。fzf を新しくするには: brew upgrade fzf" >&2
   UI="classic"
 fi
+
+# Node takes a .ts module's type from the nearest package.json above it, and
+# refuses to load any module when that file cannot be parsed. bin/package.json
+# keeps the search inside the package, but a copy install (install.sh copies
+# only ccs*) sits under someone else's directories. No rescan or refresh can
+# get past that, so instead of an empty list and exit 0, ccs stops here with
+# one line naming the file. The reason word (invalid_package_config) is the
+# same in both looks, for scripts and the self-check to match on.
+# text_is_plain TEXT — true when TEXT holds nothing a terminal acts on: no C0
+# control or DEL, no C1 control (UTF-8 C2 80–9F), no mark that reorders text
+# (U+061C, U+200E–F, U+202A–E, U+2066–9). Byte-wise (LC_ALL=C), so it is the
+# same on every locale and bash 3.2.
+text_is_plain() {
+  local LC_ALL=C
+  [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
+  case "$1" in
+    *$'\xc2'[$'\x80'-$'\x9f']* | *$'\xd8\x9c'* | *$'\xe2\x80'[$'\x8e'$'\x8f'$'\xaa'-$'\xae']* | *$'\xe2\x81'[$'\xa6'-$'\xa9']*)
+      return 1 ;;
+  esac
+}
+
+stop_on_package_config() { # stop_on_package_config STDERR_FILE
+  local line bad="" found=0
+  local re='Invalid package config (.*package\.json)'
+  [[ -s "$1" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $re ]]; then
+      found=1 bad="${BASH_REMATCH[1]}"
+      break
+    fi
+    [[ "$line" == *ERR_INVALID_PACKAGE_CONFIG* ]] && found=1
+  done < "$1"
+  (( found )) || return 0
+  # Only a package.json at or above ccs's own folder can stop the modules:
+  # they start from that folder (ccs-tsx.sh), never from the user's. The
+  # same words in another failure's message do not stop the list.
+  if [[ -n "$bad" && "$bad" == */package.json && "${SCRIPT_DIR}/" != "${bad%/package.json}/"* ]]; then
+    return 0
+  fi
+  # The path comes from Node's message, i.e. from folder names: one a terminal
+  # would act on (ESC, C1, text-direction marks) is not printed.
+  text_is_plain "$bad" || bad=""
+  if [[ "$UI" == "simple" ]]; then
+    echo "[ccs] 一覧を開けません（invalid_package_config）: ${bad:-ccs より上のフォルダの package.json} が壊れていて、Node が ccs の部品を読めません。このファイルを直すか消してから、もう一度 ccs と打ってください。" >&2
+  else
+    echo "[ccs] cannot open the list (invalid_package_config): Node cannot parse ${bad:-a package.json above ccs}, so it will not load ccs's modules. Fix or remove that file, then run ccs again." >&2
+  fi
+  exit 1
+}
+(( SCAN_FAILED )) && stop_on_package_config "$SCAN_ERR_FILE"
 
 # better-sqlite3 ships prebuilt modules for the common platforms; anywhere else
 # one has to be built from source, which ccs does not do or test.
@@ -399,7 +935,7 @@ DELETE_BIND=(--bind "ctrl-d:execute(
     resume:*)      bash '${CCS_DELETE}' \"\${kk#resume:}\" ;;
     new:*|group:*) echo '${MSG_NO_REPO_DELETE}'; read -r -n1 _ ;;
   esac
-)+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
+)+reload(bash '${CCS_TSX_SH}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
 # enter / double-click on a group header (KIND=group, a repos.yml entry with
 # `launch: false`) keep the picker open instead of accepting the row. That
@@ -427,7 +963,7 @@ elif fzf_at_least 0 45; then
 fi
 
 # ctrl-r: force refresh
-REFRESH_BIND=(--bind "ctrl-r:execute('${TSX}' '${CCS_SCAN}' --force --quiet)+reload('${TSX}' '${CCS_LIST}'${LIST_ARGS_STR})")
+REFRESH_BIND=(--bind "ctrl-r:execute(bash '${CCS_TSX_SH}' '${CCS_SCAN}' --force --quiet)+reload(bash '${CCS_TSX_SH}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
 # ── Header (adaptive to terminal width) ──────────────────────────────────────
 # Note: ^D deletes SESSIONS only; repos are managed via ~/.config/ccs/repos.yml
@@ -501,6 +1037,9 @@ version_is_newer() { # version_is_newer CANDIDATE CURRENT (both X.Y.Z)
 }
 check_for_update() {
   [[ -z "${CCS_NO_UPDATE_CHECK:-}" ]] || return 0
+  # repos.yml defaults.update_check: false — the same stop (no network, the
+  # cache is not read, no notice).
+  [[ "$UPDATE_CHECK_CFG" != "off" ]] || return 0
   local plain='^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$'
   [[ "$VERSION" =~ $plain ]] || return 0
 
@@ -523,7 +1062,7 @@ check_for_update() {
   [[ "$checked" =~ ^[0-9]{1,12}$ ]] || checked=0
   local age=$(( $(date +%s) - 10#$checked ))
   if (( age >= UPDATE_INTERVAL || age < 0 )); then
-    ( "${TSX}" "${CCS_UPDATE}" "${CCS_PACKAGE}" </dev/null >/dev/null 2>&1 & )
+    ( "${TSX_RUN[@]}" "${CCS_UPDATE}" "${CCS_PACKAGE}" </dev/null >/dev/null 2>&1 & )
   fi
   return 0
 }
@@ -566,7 +1105,8 @@ if [[ "$UI" == "simple" ]]; then
     LIST_LABEL="  えらぶ  ccs v${UPDATE_LATEST} が出ています  "
   fi
   LIST_FAILED=0
-  ROWS=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]}" 2>/dev/null) || LIST_FAILED=1
+  ROWS=$("${TSX_RUN[@]}" "${CCS_LIST}" "${LIST_FLAGS[@]}" 2>"$LIST_ERR_FILE") || LIST_FAILED=1
+  (( LIST_FAILED )) && stop_on_package_config "$LIST_ERR_FILE"
   # A bash match, not `printf | grep -q`: grep -q exits at the first hit,
   # printf then dies of SIGPIPE, and pipefail turns that into "no rows".
   if [[ "$ROWS" != *$'\t'new:* && "$ROWS" != *$'\t'resume:* ]]; then
@@ -601,7 +1141,7 @@ if [[ "$UI" == "simple" ]]; then
     --prompt='🔎 ' --pointer='▶' --highlight-line \
     --info=inline-right --layout=reverse --height=100% \
     --color='label:blue:bold,border:gray,header:gray,pointer:blue,hl:red,hl+:red' \
-    --preview="'${TSX}' '${CCS_PREVIEW}' {4} {5} --ui=simple" \
+    --preview="bash '${CCS_TSX_SH}' '${CCS_PREVIEW}' {4} {5} --ui=simple" \
     --preview-window='right,50%,wrap,<50(down,40%,wrap)' \
     "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
     "${DELETE_BIND[@]}" \
@@ -632,12 +1172,23 @@ if [[ "$UI" == "classic" ]]; then
 if [[ -n "$UPDATE_LATEST" ]]; then
   echo "[ccs] Update v${VERSION} -> v${UPDATE_LATEST}: ${CCS_INSTALL_CMD}" >&2
 fi
-SELECTED=$("${TSX}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" | fzf \
+# The rows are read before fzf starts, so a list that cannot load at all stops
+# with its reason instead of opening empty. Any other failure prints what the
+# list said and opens with the rows it gave (each one already checked by
+# ccs-list, and checked again below before anything runs), so a row picked
+# from them launches. Until 0.4.x the list was piped into fzf and such a
+# failure ended ccs without launching, even after a pick.
+ROWS=""
+if ! ROWS=$("${TSX_RUN[@]}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" 2>"$LIST_ERR_FILE"); then
+  stop_on_package_config "$LIST_ERR_FILE"
+fi
+cat "$LIST_ERR_FILE" >&2
+SELECTED=$({ [[ -z "$ROWS" ]] || printf '%s\n' "$ROWS"; } | fzf \
   --ansi \
   --delimiter=$'\t' \
   --with-nth=1..3 \
   --header="${HEADER}" \
-  --preview="'${TSX}' '${CCS_PREVIEW}' {4} {5}" \
+  --preview="bash '${CCS_TSX_SH}' '${CCS_PREVIEW}' {4} {5}" \
   --preview-window='right:55%:wrap' \
   "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
   "${DELETE_BIND[@]}" \
@@ -687,7 +1238,7 @@ fi
 
 # Defense-in-depth copy of the policy ccs-config.ts enforces on command at load
 # time. Extra columns would also land here, joined by \x1f, and be refused.
-if [[ "$ROW_CMD" =~ [\;\&\|\<\>\$\`\"\'\\] || "$ROW_CMD" =~ [[:cntrl:]] ]]; then
+if ! command_is_safe "$ROW_CMD"; then
   echo "❌ Refusing the selected row's command (shell metacharacters/control chars)" >&2
   exit 1
 fi
@@ -764,8 +1315,8 @@ tilde_pwd() {
 }
 
 # ── Execute ──────────────────────────────────────────────────────────────────
-# Direct invocation (NOT exec) so shell functions / aliases like `opr` work.
-# shellcheck disable=SC2086
+# run_launch_command: direct invocation (NOT exec), ROW_CMD split into words
+# with no wildcard expansion — the same path `ccs open --here` takes.
 case "$KIND" in
   resume)
     if [[ "$UI" == "simple" ]]; then
@@ -773,9 +1324,6 @@ case "$KIND" in
     else
       echo "🔄 Resuming session ${KEY} in $(pwd)..."
     fi
-    set -f # split ROW_CMD into words, but expand no wildcard in it
-    ${ROW_CMD} --resume "${KEY}" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
-    set +f
     ;;
   new)
     if [[ "$UI" == "simple" ]]; then
@@ -783,8 +1331,6 @@ case "$KIND" in
     else
       echo "🚀 Launching ${KEY} in $(pwd)..."
     fi
-    set -f # split ROW_CMD into words, but expand no wildcard in it
-    ${ROW_CMD} "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
-    set +f
     ;;
 esac
+run_launch_command "$KIND" "$KEY" "$ROW_CMD" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"

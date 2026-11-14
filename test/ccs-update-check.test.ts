@@ -191,10 +191,17 @@ describe("bin/ccs-update-check.ts against a fake registry", () => {
       const reg = await startRegistry(mode, join(run.home, "log"));
       try {
         await mkdir(join(run.home, ".cache", "ccs"), { recursive: true });
-        await writeFile(run.cacheFile, "latest=1.2.3\nchecked=1\n");
-        const res = runScript(run, reg.url);
-        assert.deepEqual([res.code, res.stdout, res.stderr], [0, "", ""]);
-        assert.ok(res.ms < 6_000, `took ${res.ms} ms`);
+        // The request gives up after 3 s. The time measured here includes
+        // starting Node, which a busy machine stretches by chance; a check with
+        // no limit would be slow every time, so the bound is held over up to
+        // three attempts.
+        for (let attempt = 1; ; attempt++) {
+          await writeFile(run.cacheFile, "latest=1.2.3\nchecked=1\n");
+          const res = runScript(run, reg.url);
+          assert.deepEqual([res.code, res.stdout, res.stderr], [0, "", ""]);
+          if (res.ms < 6_000) break;
+          assert.ok(attempt < 3, `took ${res.ms} ms, three times in a row`);
+        }
         const cache = await readCache(run);
         assert.equal(cache.latest, "1.2.3");
         near(cache.checked, nowS() - DAY + HOUR, "checked");

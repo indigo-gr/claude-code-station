@@ -626,6 +626,18 @@ describe("the update check on a pty (fake registry)", { skip: reason }, () => {
     });
 
     test(`${look}: a registry that never answers does not delay the picker or its exit`, async () => {
+      // The comparison is between two start-up times, so a busy machine can
+      // lose it by chance. Waiting on the request would lose it every time (its
+      // limit is 3 s), so the claim is held over up to three attempts.
+      for (let attempt = 1; ; attempt++) {
+        const delay = await openDelayWithHangingRegistry();
+        if (delay < 2) return;
+        assert.ok(attempt < 3, `opened ${delay.toFixed(2)} s later than with the check off, three times in a row`);
+      }
+    });
+
+    /** Opens the picker with the check off and with a registry that never answers; the difference in seconds. */
+    async function openDelayWithHangingRegistry(): Promise<number> {
       const off = await makeTtySandbox();
       const sb = await makeTtySandbox();
       const reg = await startRegistry("hang", join(sb.root, "registry.log"));
@@ -642,7 +654,6 @@ describe("the update check on a pty (fake registry)", { skip: reason }, () => {
         assert.equal(r.exit, 0);
         // The request's limit is 3 s: waiting for it would show as at least that.
         const delay = r.times.first - baseline.times.first;
-        assert.ok(delay < 2, `opened ${delay.toFixed(2)} s later than with the check off`);
         assert.equal((await reg.requests()).length, 1, "the request was really made");
         const text = await waitFor("the failed attempt", async () => {
           const t = await readCache(sb);
@@ -650,12 +661,13 @@ describe("the update check on a pty (fake registry)", { skip: reason }, () => {
         });
         const expected = nowS() - DAY + HOUR;
         assert.ok(Math.abs(checkedIn(text) - expected) <= 30, text);
+        return delay;
       } finally {
         reg.stop();
         await off.cleanup();
         await sb.cleanup();
       }
-    });
+    }
 
     test(`${look}: offline, the picker opens and a known newer version still shows`, async () => {
       const sb = await makeTtySandbox();

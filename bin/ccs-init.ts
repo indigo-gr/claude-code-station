@@ -14,13 +14,15 @@
  */
 
 import { readdir } from "node:fs/promises";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { parseDocument, isSeq } from "yaml";
 
 import { ensureConfigDir, getPaths, loadConfig } from "./ccs-config.ts";
+import { EditStop, runEditSync } from "./ccs-config-edit.ts";
 import { hasShellMetachars } from "./ccs-sanitize.ts";
+import { pathToFileURL } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Discovery
@@ -144,6 +146,27 @@ export function buildCandidates(
 // ---------------------------------------------------------------------------
 
 /**
+ * `repos: [{name: a, path: ~/a}]` (one line, YAML flow style) is valid, but
+ * appending to it keeps it on one line, and tools that read repos.yml line by
+ * line (`name:` and `path:` under each `- ` item) see none of it. ccs init
+ * only writes the block form, so it refuses here and leaves the file as is.
+ * `flow_style_repos` is the reason word for scripts to match on.
+ */
+export function rejectFlowStyleRepos(repos: unknown): void {
+  if (isSeq(repos) && repos.flow) {
+    throw new Error(
+      "flow_style_repos: repos.yml lists `repos:` on one line ([...]); ccs init only adds to a block list. " +
+        "Rewrite it with one `- name: ...` / `path: ...` item per entry, then run ccs init --auto-discover again. repos.yml unchanged",
+    );
+  }
+}
+
+/** The repos.yml source's `repos:` node, for the checks before any scan. */
+function reposNodeOf(source: string): unknown {
+  return parseDocument(source).get("repos", true);
+}
+
+/**
  * Append candidates to the `repos:` sequence of a repos.yml source string.
  * parseDocument round-trips comments and the user's existing formatting —
  * never re-serialize the whole config from plain objects.
@@ -157,6 +180,7 @@ export function appendReposToYaml(
   if (!isSeq(repos)) {
     throw new Error("repos.yml: top-level `repos` sequence not found");
   }
+  rejectFlowStyleRepos(repos);
   for (const c of candidates) {
     repos.add(doc.createNode({ name: c.name, path: c.path }));
   }
@@ -168,25 +192,41 @@ export function appendReposToYaml(
 }
 
 /**
- * Write candidates into repos.yml with a `.bak` backup, then re-run the full
- * loadConfig() validation. On any validation failure the original file is
- * restored — `ccs init` must never leave a config the launcher cannot load.
+ * Write candidates into repos.yml through the common write path
+ * (ccs-config-edit: lock, check, `.bak`, write in place, check again, put the
+ * old text back on failure) — `ccs init` must never leave a config the
+ * launcher cannot load. A one-line `repos:` is refused before anything else,
+ * even when the file fails the other checks.
  */
 export function appendAndValidate(
   reposYmlPath: string,
   candidates: Candidate[],
 ): void {
-  const source = readFileSync(reposYmlPath, "utf-8");
-  const updated = appendReposToYaml(source, candidates);
-  writeFileSync(reposYmlPath + ".bak", source, { mode: 0o600 });
-  writeFileSync(reposYmlPath, updated, { mode: 0o600 });
+  rejectFlowStyleRepos(reposNodeOf(readFileSync(reposYmlPath, "utf-8")));
   try {
-    loadConfig();
+    runEditSync({
+      reposYml: reposYmlPath,
+      transform: ({ doc }) => {
+        const repos = doc.get("repos", true);
+        if (!isSeq(repos)) {
+          throw new Error("repos.yml: top-level `repos` sequence not found");
+        }
+        rejectFlowStyleRepos(repos);
+        for (const c of candidates) {
+          repos.add(doc.createNode({ name: c.name, path: c.path }));
+        }
+      },
+    });
   } catch (err) {
-    writeFileSync(reposYmlPath, source, { mode: 0o600 });
-    throw new Error(
-      `[ccs-init] validation failed after append — repos.yml restored (backup kept at .bak): ${err instanceof Error ? err.message : String(err)}`,
-    );
+    if (err instanceof EditStop && err.code === "validation_after_write_failed") {
+      throw new Error(
+        `[ccs-init] validation failed after append — repos.yml restored (backup kept at .bak): ${err.message}`,
+      );
+    }
+    if (err instanceof EditStop) {
+      throw new Error(`${err.code}: ${err.message}`);
+    }
+    throw err;
   }
 }
 
@@ -208,6 +248,8 @@ async function cliDiscover(argv: string[]): Promise<number> {
   const maxDepth = parseDepth(argv);
   ensureConfigDir();
   const config = loadConfig(); // throws ConfigError on a broken repos.yml
+  // Refuse before the $HOME scan and the picker, not after the user chose.
+  rejectFlowStyleRepos(reposNodeOf(readFileSync(getPaths().reposYml, "utf-8")));
   const existing: ExistingConfig = {
     names: new Set(config.repos.map((r) => r.name)),
     paths: new Set(config.repos.map((r) => r.path)),
@@ -274,7 +316,9 @@ async function main(): Promise<number> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not `file://${argv[1]}`: a folder with a space (or any
+// character a URL escapes) in its name would never match.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().then(
     // exitCode, not process.exit(): bin/ccs captures discover's candidates
     // with $(...), a pipe, and exiting right after the writes dropped every

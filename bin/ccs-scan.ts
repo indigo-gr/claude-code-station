@@ -28,6 +28,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 
 import { loadConfig, getPaths, type RepoEntry } from "./ccs-config.ts";
+import { groupsToMeta, readLogicalGroups } from "./ccs-groups.ts";
 import {
   openDb,
   upsertRepo,
@@ -40,6 +41,7 @@ import { maskSecrets } from "./ccs-secrets.ts";
 import { stripControlChars } from "./ccs-sanitize.ts";
 import { nowIso, type UiMode } from "./ccs-utils.ts";
 import { scanSessions } from "./ccs-scan-sessions.ts";
+import { pathToFileURL } from "node:url";
 
 const execFileP = promisify(execFile);
 
@@ -52,6 +54,12 @@ export interface ScanOptions {
   ttlSeconds?: number;
   parallelism?: number;
   scanSessions?: boolean;
+  /**
+   * The machine interface's scan (`ccs sessions`): repos.yml is read without
+   * scaffolding (no template, no README; only the cache dir) and its
+   * warnings are not printed.
+   */
+  quietConfig?: boolean;
 }
 
 export interface ScanResult {
@@ -65,6 +73,8 @@ export interface ScanResult {
   lockSkipped?: boolean;
   /** repos.yml `defaults.ui` as loaded by this run (set even when lock-skipped). */
   ui?: UiMode;
+  /** repos.yml `defaults.update_check` (set even when lock-skipped). */
+  updateCheck?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,8 +662,11 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const parallelism = opts.parallelism ?? DEFAULT_PARALLELISM;
   const scanSessionsFlag = opts.scanSessions ?? true;
 
-  // loadConfig() runs ensureConfigDir(), so cacheDir exists before the lock.
-  const config = loadConfig();
+  // loadConfig() runs ensureConfigDir() (or, quiet, creates the cache dir),
+  // so cacheDir exists before the lock.
+  const config = opts.quietConfig
+    ? loadConfig({ scaffold: false, sink: () => {} })
+    : loadConfig();
   const paths = getPaths();
 
   const releaseLock = acquireScanLock(paths.cacheDir);
@@ -670,6 +683,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       durationMs: Date.now() - started,
       lockSkipped: true,
       ui: config.defaults.ui,
+      updateCheck: config.settings.updateCheck,
     };
   }
 
@@ -692,6 +706,16 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     // repos.yml `defaults.ui`, for the `ccs --no-scan` path (bin/ccs reads it
     // back through `ccs-list --print-ui` when no scan ran this launch).
     setMeta(handle.db, "defaults_ui", config.defaults.ui);
+    // repos.yml `defaults.update_check`, read back the same way (`ccs-list
+    // --print-settings`) when no scan ran this launch.
+    setMeta(handle.db, "defaults_update_check", config.settings.updateCheck ? "on" : "off");
+    // defaults.groups_dir: the logical groups, matched to repos.yml by path,
+    // for the list to read (an empty list when the setting is off, so
+    // removing it clears the headers).
+    const groups = config.settings.groupsDir
+      ? readLogicalGroups(config.settings.groupsDir, config.repos).groups
+      : [];
+    setMeta(handle.db, "logical_groups", groupsToMeta(groups));
 
     // Order matters (audit C-1): scanOneRepo aggregates session counts FROM
     // the sessions table, so sessions must be refreshed first — otherwise
@@ -720,6 +744,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsSkipped,
       durationMs: Date.now() - started,
       ui: config.defaults.ui,
+      updateCheck: config.settings.updateCheck,
     };
   } finally {
     handle.close();
@@ -736,12 +761,14 @@ function parseArgs(argv: string[]): {
   noSessions: boolean;
   quiet: boolean;
   printUi: boolean;
+  printSettings: boolean;
 } {
   return {
     force: argv.includes("--force"),
     noSessions: argv.includes("--no-sessions"),
     quiet: argv.includes("--quiet"),
     printUi: argv.includes("--print-ui"),
+    printSettings: argv.includes("--print-settings"),
   };
 }
 
@@ -767,7 +794,15 @@ async function main(): Promise<{ code: number; out: string }> {
           `(${res.sessionsSkipped} cached) in ${secs}s\n`,
       );
     }
-    return { code: 0, out: args.printUi && res.ui ? `ui=${res.ui}\n` : "" };
+    // --print-settings: `ui=` and `update_check=` (bin/ccs's pre-scan);
+    // --print-ui: `ui=` alone, as before.
+    let out = "";
+    if (args.printSettings && res.ui) {
+      out = `ui=${res.ui}\nupdate_check=${res.updateCheck === false ? "off" : "on"}\n`;
+    } else if (args.printUi && res.ui) {
+      out = `ui=${res.ui}\n`;
+    }
+    return { code: 0, out };
   } catch (err) {
     process.stderr.write(
       `[ccs-scan] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -776,7 +811,9 @@ async function main(): Promise<{ code: number; out: string }> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not `file://${argv[1]}`: a folder with a space (or any
+// character a URL escapes) in its name would never match.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().then(
     ({ code, out }) => {
       // Exit only after stdout drained: pipe writes are async on macOS, and

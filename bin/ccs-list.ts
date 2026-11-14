@@ -9,7 +9,7 @@
  * `launch: false`), `resume` (past session) or `separator`.
  *
  * Modes:
- *   --current-only    sessions whose cwd matches process.cwd()
+ *   --current-only    sessions whose cwd matches CCS_CWD (else process.cwd())
  *   --repos-only      only NEW repo rows (and group headers)
  *   --sessions-only   only RESUME session rows
  *   (default)         NEW first (alpha, nested repos in a tree under their
@@ -23,10 +23,13 @@
  *                     row; no badge column, no tree glyphs, plain-word times
  *
  *   --print-ui        print the `defaults.ui` the last scan stored, then exit
+ *   --print-settings  print `ui=<mode>` and `update_check=<on|off>` as the
+ *                     last scan stored them, then exit
  */
 
 import { homedir } from "node:os";
 import { openDb, getMeta, reposV3Columns } from "./ccs-db.ts";
+import { groupsFromMeta } from "./ccs-groups.ts";
 import { getPaths } from "./ccs-config.ts";
 import { SHELL_METACHARS } from "./ccs-sanitize.ts";
 import {
@@ -44,6 +47,7 @@ import {
   uiFromArgv,
   type UiMode,
 } from "./ccs-utils.ts";
+import { pathToFileURL } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,6 +75,7 @@ interface Flags {
   sessionsOnly: boolean;
   ui: UiMode;
   printUi: boolean;
+  printSettings: boolean;
 }
 
 function parseArgs(argv: string[]): Flags {
@@ -80,6 +85,7 @@ function parseArgs(argv: string[]): Flags {
     sessionsOnly: argv.includes("--sessions-only"),
     ui: uiFromArgv(argv),
     printUi: argv.includes("--print-ui"),
+    printSettings: argv.includes("--print-settings"),
   };
 }
 
@@ -452,17 +458,77 @@ function simpleRepoRow(n: SimpleNode, nameCol: number): string {
   return [label, desc, "", `new:${r.name}`, cwd, r.command || "claude"].join("\t");
 }
 
-function simpleRepoRows(repos: RepoRowFull[]): string[] {
+/** A logical group (defaults.groups_dir) with the listed repos it holds. */
+interface LogicalView {
+  id: string;
+  label: string;
+  members: RepoRowFull[];
+}
+
+/** Match the stored groups to the listed (enabled) repos; empty groups go. */
+function logicalGroupsOf(
+  groups: { id: string; label: string; members: string[] }[],
+  repos: RepoRowFull[],
+): LogicalView[] {
+  const byName = new Map(repos.map((r) => [r.name, r]));
+  return groups
+    .map((g) => ({
+      id: g.id,
+      label: g.label,
+      members: g.members.map((n) => byName.get(n)).filter((r): r is RepoRowFull => r !== undefined),
+    }))
+    .filter((g) => g.members.length > 0);
+}
+
+/** The icon of a logical group's header (not a repos.yml entry, so no icon of its own). */
+const LOGICAL_ICON = "🗂";
+
+/**
+ * Classic rows of the logical groups: a display-only header (KIND=group, key
+ * `@<id>`, so the preview looks in the logical groups first) and the members
+ * under it, drawn as a tree.
+ */
+function logicalGroupRows(groups: LogicalView[]): string[] {
+  const lines: string[] = [];
+  for (const g of groups) {
+    const label = `${displayIcon(LOGICAL_ICON)} ${truncate(g.label, 40)}${LABEL_SEP}`;
+    lines.push([label, "", "", `group:@${g.id}`, "", ""].join("\t"));
+    g.members.forEach((r, i) => {
+      const last = i === g.members.length - 1;
+      lines.push(repoToRow({ repo: r, parent: null, prefix: `  ${last ? "└ " : "├ "}` }));
+    });
+  }
+  return lines;
+}
+
+/** Simple rows of a logical group: the bold header, then its members one level in. */
+function simpleLogicalRows(g: LogicalView, nameCol: number): string[] {
+  const head = `${padDisplay(LOGICAL_ICON, 2)} ${truncate(g.label, 40)}`;
+  const gap = " ".repeat(Math.max(0, nameCol - displayWidth(head)));
+  const styled = `${padDisplay(LOGICAL_ICON, 2)} ${BOLD}${truncate(g.label, 40)}${RESET}${gap}`;
+  return [
+    [`${styled}  `, "", "", `group:@${g.id}`, "", ""].join("\t"),
+    ...g.members.map((r) => simpleRepoRow({ repo: r, parent: null, depth: 1 }, nameCol)),
+  ];
+}
+
+function simpleRepoRows(repos: RepoRowFull[], logical: LogicalView[] = []): string[] {
   const { groups, projects } = simpleSections(repos);
   const all = [...groups, ...projects];
+  const logicalHeads = logical.flatMap((g) => [
+    `${padDisplay(LOGICAL_ICON, 2)} ${truncate(g.label, 40)}`,
+    ...g.members.map((r) => simpleHead({ repo: r, parent: null, depth: 1 })),
+  ]);
   const nameCol = Math.min(
     SIMPLE_NAME_COL_MAX,
-    Math.max(0, ...all.map((n) => displayWidth(simpleHead(n)))),
+    Math.max(0, ...all.map((n) => displayWidth(simpleHead(n))), ...logicalHeads.map(displayWidth)),
   );
   const lines: string[] = [];
-  if (groups.length > 0) {
+  if (groups.length > 0 || logical.length > 0) {
     lines.push(simpleHeading("グループ"));
     for (const n of groups) lines.push(simpleRepoRow(n, nameCol));
+    // After the launch: false headers.
+    for (const g of logical) lines.push(...simpleLogicalRows(g, nameCol));
   }
   if (projects.length > 0) {
     lines.push(simpleHeading("プロジェクト"));
@@ -554,10 +620,35 @@ function printUi(stateDb: string): number {
   return 0;
 }
 
+/**
+ * `--print-settings`: what the last scan stored, as the pre-scan prints it
+ * (`ui=<mode>` and `update_check=<on|off>`). Any failure prints the defaults
+ * (classic, on): the launcher must always get an answer it can use.
+ */
+function printSettings(stateDb: string): number {
+  let ui: UiMode = "classic";
+  let updateCheck = "on";
+  try {
+    const handle = openDb(stateDb, { readonly: true, skipMigrate: true });
+    try {
+      const v = getMeta(handle.db, "defaults_ui");
+      if (isUiMode(v)) ui = v;
+      if (getMeta(handle.db, "defaults_update_check") === "off") updateCheck = "off";
+    } finally {
+      handle.close();
+    }
+  } catch {
+    // keep the defaults
+  }
+  process.stdout.write(`ui=${ui}\nupdate_check=${updateCheck}\n`);
+  return 0;
+}
+
 function main(): number {
   const flags = parseArgs(process.argv.slice(2));
   const paths = getPaths();
   if (flags.printUi) return printUi(paths.stateDb);
+  if (flags.printSettings) return printSettings(paths.stateDb);
   const simple = flags.ui === "simple";
   // openDb() is called INSIDE the try so that a cold-start failure (state.db
   // missing before first scan) is caught and rendered as a friendly hint
@@ -589,12 +680,17 @@ function main(): number {
             ORDER BY r.name COLLATE NOCASE ASC`,
         )
         .all() as RepoRowFull[];
+      // defaults.groups_dir: logical groups the last scan matched to these
+      // repos (none when the setting is off).
+      const logical = logicalGroupsOf(groupsFromMeta(getMeta(db, "logical_groups")), repos);
       if (simple) {
-        lines.push(...simpleRepoRows(repos));
+        lines.push(...simpleRepoRows(repos, logical));
       } else {
         for (const g of groupRepos(repos)) {
           lines.push(repoToRow(g));
         }
+        // After every project row, before the conversations.
+        lines.push(...logicalGroupRows(logical));
       }
     }
 
@@ -610,7 +706,9 @@ function main(): number {
           ? metaCommand
           : "claude";
 
-      const filterCwd = flags.currentOnly ? process.cwd() : null;
+      // CCS_CWD: the folder ccs was run in (bin/ccs starts this module from
+      // its own folder; see ccs-tsx.sh).
+      const filterCwd = flags.currentOnly ? process.env.CCS_CWD || process.cwd() : null;
       const baseSelect = `SELECT s.uuid, s.repo_name, s.cwd, s.last_activity_at, s.topic,
                   r.name AS repo_display, r.icon AS repo_icon, r.command AS repo_command
              FROM sessions s
@@ -701,7 +799,9 @@ function main(): number {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not `file://${argv[1]}`: a folder with a space (or any
+// character a URL escapes) in its name would never match.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   // exitCode, not process.exit(): stdout is a pipe into fzf, and pipe writes
   // are async on macOS. Exiting right after the write dropped everything past
   // the pipe buffer — as little as 512 bytes, so the list ended after 3 repos
