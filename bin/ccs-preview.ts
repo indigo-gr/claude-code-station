@@ -31,7 +31,12 @@ import {
   tildePath,
   uiFromArgv,
 } from "./ccs-utils.ts";
-import { stripControlChars, stripControlCharsKeepLines } from "./ccs-sanitize.ts";
+import {
+  keyForDisplay,
+  pathForDisplay,
+  stripControlChars,
+  stripControlCharsKeepLines,
+} from "./ccs-sanitize.ts";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -184,8 +189,8 @@ function renderIntegrations(customJson: string): string[] {
 function renderRepoPreview(name: string, cwd: string): void {
   const paths = getPaths();
   if (!existsSync(paths.stateDb)) {
-    console.log(`${hdr("📁 " + name)}`);
-    console.log(dim(cwd || ""));
+    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
+    console.log(dim(cwd ? pathForDisplay(cwd) : ""));
     console.log("");
     console.log("No state cache yet — run `ccs --refresh` to scan.");
     return;
@@ -205,10 +210,10 @@ function renderRepoPreview(name: string, cwd: string): void {
       .get(name) as RepoView | undefined;
 
     if (!repo) {
-      console.log(`${hdr("📁 " + name)}`);
-      console.log(dim(cwd || ""));
+      console.log(`${hdr("📁 " + keyForDisplay(name))}`);
+      console.log(dim(cwd ? pathForDisplay(cwd) : ""));
       console.log("");
-      console.log(`Repo "${name}" not found in cache.`);
+      console.log(`Repo "${keyForDisplay(name)}" not found in cache.`);
       return;
     }
 
@@ -227,9 +232,10 @@ function renderRepoPreview(name: string, cwd: string): void {
     // the dim `name` after it ties the entry to its session rows, which keep
     // showing the name.
     const displayName = repoDisplayName(repo);
-    const nameHint = displayName !== repo.name ? `  ${dim(`(${repo.name})`)}` : "";
+    const shownName = keyForDisplay(repo.name);
+    const nameHint = displayName !== shownName ? `  ${dim(`(${shownName})`)}` : "";
     console.log(`${hdr(`${displayIcon(repo.icon)} ${displayName}`)}${nameHint}`);
-    console.log(dim(repo.path));
+    console.log(dim(pathForDisplay(repo.path)));
     if (repo.description) console.log(stripControlCharsKeepLines(repo.description));
     console.log("");
 
@@ -347,7 +353,7 @@ function renderRepoPreview(name: string, cwd: string): void {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`${hdr("📁 " + name)}`);
+    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
     console.log("");
     console.log(`Preview error: ${msg}`);
   } finally {
@@ -431,8 +437,8 @@ function renderGroupPreview(name: string, cwd: string): void {
   if (name.startsWith("@") && renderLogicalGroup(name.slice(1), false)) return;
   const paths = getPaths();
   if (!existsSync(paths.stateDb)) {
-    console.log(`${hdr("📁 " + name)}`);
-    console.log(dim(cwd || ""));
+    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
+    console.log(dim(cwd ? pathForDisplay(cwd) : ""));
     console.log("");
     console.log("No state cache yet — run `ccs --refresh` to scan.");
     return;
@@ -456,15 +462,15 @@ function renderGroupPreview(name: string, cwd: string): void {
     const group = listed.find((r) => r.name === name);
 
     if (!group) {
-      console.log(`${hdr("📁 " + name)}`);
-      console.log(dim(cwd || ""));
+      console.log(`${hdr("📁 " + keyForDisplay(name))}`);
+      console.log(dim(cwd ? pathForDisplay(cwd) : ""));
       console.log("");
-      console.log(`Group "${name}" not found in cache.`);
+      console.log(`Group "${keyForDisplay(name)}" not found in cache.`);
       return;
     }
 
     console.log(`${hdr(`${displayIcon(group.icon)} ${repoDisplayName(group)}`)}`);
-    console.log(dim(group.path));
+    console.log(dim(pathForDisplay(group.path)));
     if (group.description) console.log(truncate(group.description, 200));
     console.log("");
 
@@ -484,13 +490,13 @@ function renderGroupPreview(name: string, cwd: string): void {
     const names = entries.map((r) => repoDisplayName(r));
     const width = Math.max(...names.map((n) => n.length));
     entries.forEach((r, i) => {
-      const rel = truncate(relative(group.path, r.path), 60) + "/";
+      const rel = pathForDisplay(truncate(relative(group.path, r.path), 60)) + "/";
       const tag = r.launch === 0 ? `  ${dim("(group)")}` : "";
       console.log(`  ${displayIcon(r.icon)} ${names[i].padEnd(width)}  ${dim(rel)}${tag}`);
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`${hdr("📁 " + name)}`);
+    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
     console.log("");
     console.log(`Preview error: ${msg}`);
   } finally {
@@ -614,7 +620,7 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
       console.log("");
     }
 
-    cardField("📂", "フォルダ", [tildePath(truncate(folder, 200), home)]);
+    cardField("📂", "フォルダ", [pathForDisplay(tildePath(truncate(folder, 200), home))]);
     if (!folderExists) {
       console.log(`     ⚠️  このフォルダが見つかりません。repos.yml の path を確かめてください`);
     }
@@ -766,7 +772,7 @@ async function renderSimpleSessionCard(uuid: string): Promise<void> {
   const home = homedir();
   cardTitle("↩️  前の会話のつづきから再開します");
   if (row.repo_label) cardField("🏷 ", "プロジェクト", [row.repo_label]);
-  cardField("📂", "フォルダ", [tildePath(truncate(row.cwd, 200), home)]);
+  cardField("📂", "フォルダ", [pathForDisplay(tildePath(truncate(row.cwd, 200), home))]);
   cardField("🕒", "最後に話した", [
     formatFriendlyTime(row.last_activity_at, { clock: true }),
   ]);

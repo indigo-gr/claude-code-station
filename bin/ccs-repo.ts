@@ -46,7 +46,7 @@ import {
   type CliCode,
   type Outcome,
 } from "./ccs-machine.ts";
-import { SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { pathForDisplay, SHELL_METACHARS } from "./ccs-sanitize.ts";
 import { UI_MODES } from "./ccs-utils.ts";
 
 const NAME_MAX = 100;
@@ -124,10 +124,15 @@ function realOrSame(p: string): string {
   }
 }
 
-/** Checks on the name (4.1): length, characters, quoting. */
+/**
+ * Checks on the name (4.1): length, characters, quoting. DEL, C1 and the
+ * marks that reorder displayed text are refused like in label and
+ * description (invalid_value); C0 stays unsafe_characters (the shell rule).
+ */
 function checkName(name: string): void {
   if (name.length === 0 || codePointLength(name) > NAME_MAX) stop("invalid_value");
   if (SHELL_METACHARS.test(name)) stop("unsafe_characters");
+  if (hasControlChars(name)) stop("invalid_value");
   if (needsQuoting(name)) stop("needs_quoting");
 }
 
@@ -275,14 +280,19 @@ export function configGet(args: readonly string[]): Outcome {
   });
 }
 
-/** `config get` without --json: one `key = value` line each (for people). */
+/**
+ * `config get` without --json: one `key = value` line each (for people). The
+ * groups_dir path is drawn like every path on the screen (pathForDisplay);
+ * `--json` keeps it as written.
+ */
 export function configGetText(outcome: Outcome): string {
   const settings = (outcome.body?.settings ?? {}) as Record<string, unknown>;
   return Object.entries(settings)
     .map(([k, v]) => {
       if (v && typeof v === "object") {
         const o = v as { set?: boolean; path?: string };
-        return `${k} = ${o.path ?? (o.set ? "(set)" : "(not set)")}`;
+        if (typeof o.path === "string") return `${k} = ${pathForDisplay(o.path)}`;
+        return `${k} = ${o.set ? "(set)" : "(not set)"}`;
       }
       return `${k} = ${v === null ? "(not set)" : String(v)}`;
     })

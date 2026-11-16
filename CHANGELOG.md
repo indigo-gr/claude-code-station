@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.1] — 2026-11-16
+
+### Added
+- **A Claude Code skill, `ccs`, ships in the package** at `docs/skills/ccs/SKILL.md`. With it, Claude Code can explain how to set up and use ccs, and register projects, set labels and descriptions, group entries and add integration fields under `custom` in `repos.yml`, following ccs's checks (it prefers `ccs repo add` / `ccs config set` and checks the result with `ccs list --json`). Nothing is installed into `~/.claude` automatically: copy it with `cp -R "$(npm root -g)/@indigo-gr/claude-code-station/docs/skills/ccs" ~/.claude/skills/`, and copy it again after upgrading ccs. The README's install section has the steps and how to remove it.
+
+### Changed
+- **The README's install section is one path for people installing from npm**: checking the prerequisites (Node 22+, fzf 0.42+, `claude`) on macOS, Linux and Windows (WSL), `npm install -g`, `ccs doctor`, `ccs init --auto-discover` and removing the template entry, opening `ccs`, the optional skill, switching from the unscoped package, upgrading, uninstalling, and common problems. The checkout and manual installs moved under "Other ways to install".
+- **`ccs repo add --name` refuses a name with DEL, a C1 character or a text-direction mark** (U+061C, U+200E–U+200F, U+202A–U+202E, U+2066–U+2069) with `invalid_value` (exit 6), the same as `--description` and `label`. Until now a text-direction mark was written to `repos.yml`, and DEL or C1 was refused as `needs_quoting`. A C0 character stays `unsafe_characters`. A name written by hand with such a character is still read.
+- **`ccs init --auto-discover` no longer suggests a folder whose name has one of those characters**; it prints one `[ccs-init] skipped …` line instead.
+- **JSON output writes DEL, C1, the text-direction marks and U+2028–U+2029 as `\uXXXX`** (`list`, `sessions`, `repo`, `config`, `open`, `doctor` with `--json`). The parsed values are the same; only the bytes on the terminal change, so printing the output no longer reorders or controls the terminal.
+
+### Fixed
+- **A name or a group `id` with a text-direction mark reordered what the list and the preview show.** The list rows, the session rows and the preview now draw a name or an `id` with control characters and text-direction marks replaced by a space (runs of spaces become one, ends trimmed; `?` when nothing is left); the name in `repos.yml`, in the cache and after `--repo` is unchanged.
+- **A group definition without `label`** took its `id` as the label as is; the label now has control characters and text-direction marks replaced by a space like a written `label` (`groups[].label` in `ccs list --json`). `groups[].id` is unchanged.
+- **A path with DEL, a C1 character or a text-direction mark was drawn as is.** The preview (the line under the title, the entries of a group, the folder on the simple card and on a session card, the session preview), the session rows without a project, and the `defaults.groups_dir` line of `ccs config get` now draw a path the same way as a name (`?` when nothing is left). The path used to launch, in the cache and in `--json` output is unchanged. The preview title shown before the cache exists, or for an entry missing from it, now draws the name the same way too.
+
 ## [0.5.0] — 2026-11-14
 
 ### Added

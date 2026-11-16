@@ -22,7 +22,7 @@ Target: **0 Critical, 0 High** before release. Older review notes are kept in `d
 - **Path traversal**: every `cwd` must resolve under `$HOME` after `..` is applied; fallback to `.` with a warning otherwise
 - **Files a repo brings**: a scan does not follow a symlink out of the repo (`handoff/`, `pendings/`), and does not run what the repo's own git config names (`core.fsmonitor`, hooks)
 - **Secret masking**: API key / token patterns masked in preview output and in the DB. Mask first, then cut, so a key across the cut is still hidden
-- **Terminal control**: display fields lose C0, C1 and bidirectional controls before they reach the list or the preview
+- **Terminal control**: display fields lose C0, C1 and bidirectional controls before they reach the list or the preview. A repo `name` and a group `id` are display fields too, while their key use (the hidden row key, the cache, `--repo`, the `--json` value) keeps them as written. What ccs writes itself (`repo add --name`, `ccs init --auto-discover`) never carries DEL, C1 or a bidirectional control. `--json` output writes DEL, C1, bidirectional controls and U+2028–U+2029 inside strings as `\uXXXX`
 - **Update check**: one GET of public data, with nothing about the user in it; a time limit; never waited for at startup; only a plain `X.Y.Z` is stored or shown; `CCS_NO_UPDATE_CHECK` turns it off
 - **SQLite hygiene**: DB file created with `0600`; config/cache dirs `0700`; `PRAGMA foreign_keys = ON`; **prepared statements only** (no string concat)
 - **No `eval`**; no `bash -c` with interpolated user input

@@ -8,7 +8,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { maskSecrets } from "./ccs-secrets.ts";
-import { stripControlChars } from "./ccs-sanitize.ts";
+import { pathForDisplay, stripControlChars } from "./ccs-sanitize.ts";
 import {
   extractText,
   truncate,
@@ -167,7 +167,7 @@ export async function renderSessionPreview(
   // treatment as message text: maskSecrets for credential leakage (audit
   // M-2), truncate to strip control chars / escape sequences (audit NEW-1).
   console.log("━━━ Session Info ━━━");
-  console.log(`📁 ${safeText(cwd, 200)}`);
+  console.log(`📁 ${pathForDisplay(safeText(cwd, 200))}`);
   if (gitBranch) console.log(`🌿 ${safeText(gitBranch, 100)}`);
   if (version) console.log(`📌 Claude ${safeText(version, 50)}`);
   console.log(`💬 ${messages.length} messages`);

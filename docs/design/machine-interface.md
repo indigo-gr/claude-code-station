@@ -72,6 +72,7 @@ v0.5.0 は起動の形を変えるので、`repos-yml-schema.md` の「`repos.ym
 - 機械が読む欄に自由な文を入れない。値は語（決まった一覧の中の物）・数・真偽値・バージョン・時刻・ID・利用者が `repos.yml` に書いた名前と表示名と説明（`list` のように、それを出すための口だけ）
 - キーは英語の snake_case、**語の値も小文字の snake_case**（`invalid_package_config`）
 - 時刻は ISO 8601 の UTC（`Z` 付き）。読めない値は `null`
+- 文字列の中の DEL・C1（U+0080〜U+009F）・向きを変える文字（U+061C・U+200E〜U+200F・U+202A〜U+202E・U+2066〜U+2069）・U+2028〜U+2029 は `\uXXXX` で書く（C0 は JSON の決まりで `\uXXXX` になる）。読んだ値は同じで、端末に出した時に並びや端末を動かさないため（`REVIEW.md` の Terminal control）。`doctor` も同じ
 - 読む側は未知のキーと未知の語を無視する（未知の `code` は `status` の意味だけで扱う）。壊す変更は `schema_version` の major を上げ、出す前に読む側に知らせる（`repos-yml-schema.md` の「契約」と同じ運び）
 - 失敗の時も外側は必ず出す。口ごとの中身（`repos` など）は、失敗の時は出さない。ただし `doctor` は `failed` の時も `checks` を出す（どの検査が落ちたかが答えの中身のため）
 
@@ -534,6 +535,7 @@ ccs のどの口も同じ表を使う。
 | 同じフォルダ（解決した絶対パス）が台帳に無い（`disabled` の項目を含む） | 6 `path_taken` |
 | 名前: `--name` が無ければフォルダの名前（`$HOME` そのものは `home`）。空でない・100 字まで（コードポイントで数える） | 6 `invalid_value` |
 | 名前に `SHELL_METACHARS` が無い | 6 `unsafe_characters` |
+| 名前に DEL・C1・向きを変える文字が無い（`--description` と `label` と同じ文字の集まり。C0 は上の `unsafe_characters`） | 6 `invalid_value` |
 | 名前が引用符なしで書ける（1.6） | 6 `needs_quoting` |
 | `--name` を渡した名前が台帳に無い | 6 `name_taken` |
 | `--name` が無い時の名前が重なれば、`-2`・`-3` … を付ける（`ccs init` の候補と同じ） | — |
@@ -700,8 +702,8 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | キー | 読み方 |
 |---|---|
 | `version` | 整数の `1` の物だけ使う。ほかは飛ばす |
-| `id` | 空でない文字列・`SHELL_METACHARS` なし・64 文字まで。重なれば名前の順で先の物 |
-| `label` | 見出しに出す文字列（制御文字を除く・無ければ `id`） |
+| `id` | 空でない文字列・`SHELL_METACHARS` なし・64 文字まで。重なれば名前の順で先の物。DEL・C1・向きを変える文字は断らずに読む（`groups[].id` は書いたままの値・JSON では `\uXXXX`）。一覧の行のキー（隠れた列）も書いたまま |
+| `label` | 見出しに出す文字列（制御文字と向きを変える文字を空白に置き換える）。無い・置き換えて空なら、同じく置き換えた `id`。それも空なら `?` |
 | `kind` | `logical` の物だけ使う。`physical` などは飛ばす（フォルダの入れ子は今の `path` の入れ子で並ぶ） |
 | `members[].path` | `~` を展開して `repos.yml` の `path` と比べる（`realpath` が取れれば両方を解いて比べる）。当たった項目を `members[]` の順に並べる。当たらない物は出さない |
 
@@ -802,6 +804,9 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | `repo add ~/nosuch`・`repo add ~/file.txt` | 6・`path_not_found`／`path_not_directory` |
 | `repo add ~/p/a';b` | 6・`unsafe_characters` |
 | `repo add ~/p/2024`（フォルダの名前が数） | 6・`needs_quoting` |
+| `repo add ~/p/x --name` に U+202E・U+2066・U+009B・U+007F のどれかを含む名前 | 6・`invalid_value`・ファイルが変わらない（タブなどの C0 は `unsafe_characters`） |
+| 手で書いた名前に U+202E（`name: "x<U+202E>y"`）の `list --json` | 0・`repos[].name` を読むと書いたままの値・標準出力のバイトに U+202E が無い（`\u202e` の形） |
+| `label` の無いグループの定義で `id` に U+202E | `groups[].id` は書いたまま・`groups[].label` は U+202E を除いた物・一覧の見える列（1〜3）に U+202E が無い |
 | `repo add ~/p/web --name web`（`web` がある） | 6・`name_taken` |
 | `repo add ~/q/web`（`--name` なし・`web` がある） | 0・名前は `web-2` |
 | 同じフォルダを 2 度 | 2 度目は 6・`path_taken` |

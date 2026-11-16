@@ -36,28 +36,111 @@ A fast, fzf-powered launcher and session picker for [Claude Code](https://docs.a
 
 ## Install / インストール
 
-### Prerequisites / 前提条件
+The steps below are everything someone new needs: check the prerequisites, install with npm, register projects, open `ccs`. / 初めての人はこの節だけで、前提の確かめ → npm で入れる → プロジェクトの登録 → `ccs` を開く、まで進める。
 
-- [Node.js](https://nodejs.org/) **22+**. `better-sqlite3` ships prebuilt modules for macOS and Linux (glibc, musl) on x64 and arm64; anywhere else it has to be built from source (not tested) / それ以外の環境はソースから作る必要がある（未確認）
-- [fzf](https://github.com/junegunn/fzf) **≥ 0.42.0** — fuzzy finder (the `change-header` binding used by the copy-toast requires 0.42+; released Aug 2023). With **0.45+** Enter on a group header (`launch: false`) keeps the list open; on older fzf it just closes ccs without launching anything / 0.45 以上なら、グループ見出しの上で Enter を押してもリストは開いたまま（それより古い fzf では何も起動せずに閉じる）
-  - The friendlier look (`ui: simple`, below) needs **fzf ≥ 0.61.0** (`--ghost`; the frame and labels need 0.58+). On an older fzf ccs opens the classic look and says so in one line / やさしい見た目（`ui: simple`）は fzf 0.61.0 以上。古い fzf ではいつもの見た目で開き、1 行で知らせる
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
-- [tsx](https://github.com/privatenumber/tsx) — TypeScript runner. **Bundled** as a package dependency; a global `tsx` (`npm install -g tsx`) is only needed for the bare-checkout workflow. / npmインストール時は同梱されるため、グローバルtsxは checkout 直接運用時のみ必要
+### 1. Check the prerequisites / 前提を確かめる
 
-### Quick install (npm, recommended) / クイックインストール（npm直接・推奨）
+| Tool | Check | Needed |
+|---|---|---|
+| [Node.js](https://nodejs.org/) | `node -v` | **22+** (22 or newer) / 22 以上 |
+| [fzf](https://github.com/junegunn/fzf) | `fzf --version` | **0.42.0 or newer** (0.45+ recommended, 0.61+ for `ui: simple`) / 0.42.0 以上（0.45 以上を勧める・`ui: simple` は 0.61 以上） |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI | `claude --version` | any / 入っていればよい |
+
+- **fzf versions** — 0.42.0 is the floor (the copy notice needs `change-header`). With **0.45+**, Enter on a group header (`launch: false`) keeps the list open; on older fzf it just closes ccs. The friendlier look (`ui: simple`) needs **0.61.0+** (`--ghost`); on an older fzf ccs opens the classic look and says so in one line. / 0.42.0 が下限。0.45 以上ならグループ見出しで Enter を押しても一覧は開いたまま。やさしい見た目（`ui: simple`）は 0.61.0 以上（古ければいつもの見た目で開き、1 行で知らせる）
+- **tsx** comes with the package; you do not install it. / tsx はパッケージに入っているので入れなくてよい
+
+By OS / OS ごと:
+
+- **macOS** (Apple silicon, Intel) — `brew install node fzf`, or Node from [nodejs.org](https://nodejs.org/) or a version manager (nvm, fnm, Volta). / Homebrew か nodejs.org・バージョン管理の道具で入れる
+- **Linux** (x64, arm64; glibc distributions and musl ones such as Alpine) — Node from [nodejs.org](https://nodejs.org/), your distribution or a version manager. The fzf in `apt` and other package managers is often older than 0.42 (`fzf --version`); if so, install it from fzf's repository: `git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install`. / apt などの fzf は 0.42 より古いことが多い。古ければ fzf のリポジトリから入れる
+- **Windows** — use **WSL** (Ubuntu or another Linux in WSL) and follow the Linux steps inside it. ccs itself is a bash script, and the native database module (`better-sqlite3`) is only known to work from prebuilt files on macOS and Linux. Run Claude Code inside WSL too, so the paths of your sessions match. / **WSL** を使い、その中で Linux の手順に従う。ccs は bash のスクリプトで、データベースの部品（better-sqlite3）も配布済みのファイルで動くと分かっているのは macOS と Linux だけ。Claude Code も WSL の中で使う（会話のパスが合うように）
+
+`better-sqlite3` ships prebuilt modules for macOS and Linux (glibc, musl) on x64 and arm64; anywhere else npm has to build it from source (Python, make and a C++ compiler; not tested). / それ以外の環境では npm がソースから作る（Python・make・C++ のコンパイラが要る・未確認）。
+
+### 2. Install / 入れる
 
 ```bash
 npm install -g @indigo-gr/claude-code-station
+ccs --version        # ccs v0.x.y
+ccs doctor           # first line: "ccs doctor: ccs works (ok)"
 ```
 
-Installs from the [npm registry](https://www.npmjs.com/package/@indigo-gr/claude-code-station). All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. / npm レジストリから取得。実行時依存は全部同梱、`ccs` はnpmのグローバルbinでPATHに乗る。
+Installs from the [npm registry](https://www.npmjs.com/package/@indigo-gr/claude-code-station). All runtime deps (`better-sqlite3`, `yaml`, `tsx`) come bundled, and `ccs` lands on your PATH via npm's global bin. `ccs doctor` checks Node, fzf, `claude`, `repos.yml` and the cache, and names what is missing. Right after installing, `config` and `cache` say `warn` (`config_missing`, `cache_missing`) until step 3 has run; that is expected. / npm レジストリから取得。実行時の依存は全部入り、`ccs` は npm のグローバルの bin で PATH に乗る。`ccs doctor` は Node・fzf・`claude`・`repos.yml`・キャッシュを確かめ、足りない物を名指しする（入れた直後は 3 の前なので、`config` と `cache` が `warn` になる。それでよい）。
 
-Up to 0.3.1 the package was published unscoped as `claude-code-station` (now deprecated). If you installed it under that name, switch once — the `ccs` command, `~/.config/ccs/repos.yml` and the cache stay as they are. / 0.3.1 まではスコープなしの `claude-code-station` で出していた（今は deprecate 済み）。その名前で入れていたら一度だけ入れ替える（`ccs` のコマンド・`~/.config/ccs/repos.yml`・キャッシュはそのまま）。
+### 3. Register projects, then open ccs / プロジェクトを登録して開く
+
+```bash
+ccs init --auto-discover          # pick repos with TAB, add them with Enter
+ccs repo remove "Example Project" # drop the template entry
+ccs                               # the picker opens
+```
+
+1. `ccs init --auto-discover` creates `~/.config/ccs/repos.yml`, scans `$HOME` (depth 5, `--depth N` to change) for git repositories not yet registered, and opens fzf: **TAB** marks a repo, **Enter** adds the marked ones, **Esc** cancels. / `repos.yml` を作り、`$HOME` の下の git のリポを探して fzf を開く。**TAB** で選び、**Enter** で足す、**Esc** でやめる
+2. The new file starts with a template entry, `Example Project`, whose folder does not exist (ccs warns `path not found` about it). Remove it once your own entries are in. / 新しいファイルには見本の項目 `Example Project` が入っている（フォルダが無いので `path not found` の警告が出る）。自分の項目を足したら外す
+3. `ccs` opens the list. Enter on a project starts Claude Code there; Enter on a past session resumes it. See [Usage](#usage--使い方) for keys and flags. / `ccs` で一覧が開く。プロジェクトの上で Enter なら新しく起動、前の会話の上で Enter なら再開
+
+More projects later: `ccs repo add ~/path/to/folder`, run `ccs init --auto-discover` again, or edit `repos.yml` ([Configuration](#configuration--設定)). / 後から足す時は `ccs repo add`・`ccs init --auto-discover` をもう一度・`repos.yml` を直に書く。
+
+### 4. Claude Code skill (optional) / Claude Code の skill（任意）
+
+The package carries a Claude Code skill, `ccs`. With it, Claude Code can explain how to use ccs and register projects or add integration fields to `repos.yml` for you ("add ~/projects/my-app to ccs", "put the GitHub repo on my-app"). Nothing is installed into `~/.claude` automatically; copy it yourself: / パッケージに Claude Code の skill `ccs` が入っている。入れると、Claude Code が ccs の使い方を答え、`repos.yml` への登録や連携の欄の書き足しを手伝う（「my-app を ccs に足して」など）。`~/.claude` には自動で入らないので、自分でコピーする:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R "$(npm root -g)/@indigo-gr/claude-code-station/docs/skills/ccs" ~/.claude/skills/
+```
+
+- Start a new Claude Code session afterwards so it picks up the skill. / コピーの後に Claude Code を開き直す（skill を読み込ませるため）
+- **After upgrading ccs, run the same `cp` again** — the copy does not follow the package. / **ccs を上げたら同じ `cp` をもう一度** 打つ（コピーはパッケージに付いてこない）
+- To remove it: `rm -r ~/.claude/skills/ccs` / 消す時はこのフォルダを消す
+- To use it in one project only, copy into that project's `.claude/skills/` instead. / 1 つのプロジェクトだけで使う時は、そのプロジェクトの `.claude/skills/` にコピーする
+
+### Switching from the unscoped package / スコープなしの旧パッケージからの入れ替え
+
+Up to 0.3.1 the package was published unscoped as `claude-code-station` (now deprecated). If `npm ls -g claude-code-station` lists it, switch once — the `ccs` command, `~/.config/ccs/repos.yml` and the cache stay as they are. / 0.3.1 まではスコープなしの `claude-code-station` で出していた（今は deprecate 済み）。`npm ls -g claude-code-station` に出たら一度だけ入れ替える（`ccs` のコマンド・`repos.yml`・キャッシュはそのまま）。
 
 ```bash
 npm uninstall -g claude-code-station
 npm install -g @indigo-gr/claude-code-station
 ```
+
+### Upgrade / 上げ方
+
+```bash
+npm install -g @indigo-gr/claude-code-station@latest
+ccs --version
+```
+
+(`npm update -g @indigo-gr/claude-code-station` works too.) ccs tells you when a newer version is out ([Update check](#update-check--更新の確認)). `repos.yml` and the cache are kept. If you copied the skill, copy it again (step 4). After a Node major upgrade, reinstall ccs so `better-sqlite3` matches the new Node. / `npm update -g` でもよい。新しいバージョンが出ると ccs が知らせる。`repos.yml` とキャッシュはそのまま。skill をコピーしていたら、もう一度コピーする。Node のメジャーバージョンを上げたら、ccs を入れ直す（better-sqlite3 を新しい Node に合わせる）。
+
+### Uninstall / 消し方
+
+```bash
+npm uninstall -g @indigo-gr/claude-code-station
+rm -r ~/.claude/skills/ccs     # if you copied the skill
+rm -r ~/.cache/ccs             # the cache (rebuilt if you install again)
+rm -r ~/.config/ccs            # your project list — only if you no longer want it
+```
+
+With `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` set, the last two folders are under those instead. Your Claude Code sessions (`~/.claude/projects/`) are not ccs's and stay. / `XDG_CACHE_HOME`・`XDG_CONFIG_HOME` を設定していれば、下の 2 つはその下にある。Claude Code の会話（`~/.claude/projects/`）は ccs の物ではないので残る。
+
+### Troubleshooting / よくある詰まり
+
+| Symptom / 症状 | What to do / 対処 |
+|---|---|
+| `ccs: command not found` | npm's global bin is not on `PATH`. Add `export PATH="$(npm prefix -g)/bin:$PATH"` to `~/.zshrc` or `~/.bashrc` and open a new terminal. / npm のグローバルの bin が PATH に無い。シェルの設定に足して端末を開き直す |
+| `EACCES` / permission denied on `npm install -g` | npm's global folder belongs to root. Install Node with a version manager (nvm, fnm, Volta) or Homebrew instead of using `sudo`. / グローバルの置き場が root の物。`sudo` を使わず、バージョン管理の道具か Homebrew の Node にする |
+| `EEXIST` … `ccs` on install | The old unscoped package still owns `ccs`. See [Switching from the unscoped package](#switching-from-the-unscoped-package--スコープなしの旧パッケージからの入れ替え). / 旧パッケージが `ccs` を持っている |
+| `ccs doctor`: `fzf_too_old`, or ccs closes when you press Enter on a header | fzf is older than ccs needs. Install a newer one (step 1). / fzf が古い |
+| `node_too_old`, `EBADENGINE`, or `better-sqlite3` errors | Node is older than 22, or Node was upgraded after ccs was installed. Use Node 22+, then `npm install -g @indigo-gr/claude-code-station` again. / Node が 22 より古いか、入れた後に Node を上げた。22 以上にして入れ直す |
+| `better-sqlite3` tries to compile (`gyp`, `make`) | No prebuilt module for this system (for example native Windows). Use macOS, Linux or WSL. / 配布済みのファイルが無い環境。macOS・Linux・WSL を使う |
+| The list is empty, or only `Example Project` | No projects registered yet. Run `ccs init --auto-discover` (step 3). / まだ登録が無い |
+| `path not found` warning | An entry's folder was moved or deleted. Fix its `path` in `repos.yml`, `ccs repo remove NAME`, or set `disabled: true`. / 項目のフォルダが無い |
+| ccs stops with a `repos.yml` message | The message names the key and the entry. Fix it, or put back `repos.yml.bak` if a ccs command just wrote the file. `ccs doctor` shows the same check. / 文が直す所を名指しする |
+
+`ccs doctor --json` gives the same checks as words for scripts ([below](#for-scripts-and-tools--スクリプトや道具から呼ぶ)). / スクリプト向けには `ccs doctor --json`。
+
+### Other ways to install / ほかの入れ方
 
 #### From GitHub (latest unreleased) / GitHub直接（未リリース版を使いたい時）
 
@@ -65,7 +148,7 @@ npm install -g @indigo-gr/claude-code-station
 npm install -g --allow-git=root github:indigo-gr/claude-code-station
 ```
 
-### Copy install (checkout) / コピーインストール
+#### Copy install (checkout) / コピーインストール
 
 ```bash
 git clone https://github.com/indigo-gr/claude-code-station.git
@@ -74,9 +157,9 @@ npm install
 ./install.sh
 ```
 
-`install.sh --with-deps` で `npm install` も install.sh に任せられる。`install.sh` はランタイム依存解決のため checkout の `node_modules` をインストール先に symlink する（checkout は残しておくこと）。
+`install.sh --with-deps` で `npm install` も install.sh に任せられる。`install.sh` はランタイム依存解決のため checkout の `node_modules` をインストール先に symlink する（checkout は残しておくこと）。A global `tsx` (`npm install -g tsx`) is only needed for the bare-checkout workflow. / グローバルの tsx は checkout を直接使う時だけ要る。
 
-### Manual install / 手動インストール
+#### Manual install / 手動インストール
 
 ```bash
 npm install
@@ -91,8 +174,10 @@ export PATH="$PATH:$HOME/.claude/scripts"
 
 ## Quick start / クイックスタート
 
-1. Run `ccs init --auto-discover` — scans `$HOME` (depth 5, `--depth N` to change) for git repos and lets you multi-select which to register via fzf (TAB to toggle). / `$HOME` をスキャンして登録するリポをfzfで複数選択
-2. Or edit `~/.config/ccs/repos.yml` by hand (`ccs init` scaffolds the template; see [Configuration](#configuration--設定)) / 手で書くなら `ccs init` でテンプレート生成
+After [installing](#install--インストール): / [入れた](#install--インストール)後:
+
+1. `ccs init --auto-discover` — pick the repos to register (TAB to toggle, Enter to add). / 登録するリポを fzf で選ぶ
+2. Or edit `~/.config/ccs/repos.yml` by hand (`ccs init` scaffolds the template; see [Configuration](#configuration--設定)), or `ccs repo add PATH`. / 手で書くなら `ccs init` でテンプレートを作る。`ccs repo add` でも足せる
 3. Run `ccs` — fzf opens with your repos + past sessions. / `ccs` 実行でfzfが起動
 
 ```
@@ -355,9 +440,9 @@ Commands for GUI launchers, scripts and other tools. They never open fzf, read s
 | `ccs open (--repo NAME \| --session UUID) [--here \| --new-window] [--terminal APP] [--json] [-- ARGS…]` | Starts Claude Code without the list, through the same checks as a picked row (the folder under `$HOME`, the command's characters, the session ID's form). `--here` (the default) runs it in this terminal; `--new-window` (macOS) opens a new window of `defaults.terminal` and returns at once. Unlike the list, `open` never falls back to the current folder: it refuses. / 一覧を開かずに起こす。`--here` はこの端末で、`--new-window`（macOS）は新しいウィンドウで |
 
 - **These words are commands only as the first argument**: `doctor`, `list`, `sessions`, `repo`, `config`, `open`. Until 0.4.x they went to the launched command (`ccs doctor` opened the list and started `claude doctor`). To pass one on, put a flag first: `ccs --new doctor`. / 最初の引数の時だけ ccs の口になる。起動するコマンドに渡したい時は前にフラグを置く
-- **With `--json`**, stdout carries exactly one JSON object, on failure too, with `schema_version`, `product_version`, `command`, `status` and `reasons` (`[{ "vocab", "code" }]`). Match on the exit code and on those words; messages on stderr are for people and may change. Without `--json`, `repo` and `config set` print nothing on stdout and one line on stderr. / `--json` の時は標準出力に JSON を 1 つだけ出す（失敗の時も）。機械は終了コードと語で分ける
+- **With `--json`**, stdout carries exactly one JSON object, on failure too, with `schema_version`, `product_version`, `command`, `status` and `reasons` (`[{ "vocab", "code" }]`). Match on the exit code and on those words; messages on stderr are for people and may change. DEL, C1 characters and text-direction marks inside strings are written as `\uXXXX` (the parsed value is the same). Without `--json`, `repo` and `config set` print nothing on stdout and one line on stderr. / `--json` の時は標準出力に JSON を 1 つだけ出す（失敗の時も）。機械は終了コードと語で分ける
 - **What is never printed**: secrets, the commands repos launch with, `custom`, user and host names. `doctor` prints no repo name or path at all — only words, counts and versions. Paths only with `--with-paths`, conversation titles only with `--with-titles`. / 秘密・起動コマンド・`custom`・ユーザー名とホスト名は出さない。パスは `--with-paths`、会話の題は `--with-titles` の時だけ
-- **How `repos.yml` is written** — one writer at a time (`repos.yml.lock`), the previous text kept in `repos.yml.bak`, the file written in place (a symlinked `repos.yml` stays a symlink), checked again, and put back when that check fails. A one-line `repos:` list (`repos: [ … ]`) is not added to (`flow_style_repos`). Names and paths are written only when they need no YAML quotes (`needs_quoting` otherwise). Comments and the order of keys are kept; spaces before an end-of-line comment may be reduced to one. / 書く時はロック・`.bak`・その場で書く・書いた後に検証・落ちたら元に戻す
+- **How `repos.yml` is written** — one writer at a time (`repos.yml.lock`), the previous text kept in `repos.yml.bak`, the file written in place (a symlinked `repos.yml` stays a symlink), checked again, and put back when that check fails. A one-line `repos:` list (`repos: [ … ]`) is not added to (`flow_style_repos`). Names and paths are written only when they need no YAML quotes (`needs_quoting` otherwise). A name with DEL, a C1 character or a text-direction mark is refused like a description (`invalid_value`). Comments and the order of keys are kept; spaces before an end-of-line comment may be reduced to one. / 書く時はロック・`.bak`・その場で書く・書いた後に検証・落ちたら元に戻す
 - **`ccs open --new-window`** writes a one-shot launcher file in `TMPDIR` (it deletes itself when it starts) and hands it to the terminal app with `open -a`; no AppleScript, so no Automation permission is asked for. The new window runs `ccs open --here` with the same checks. Choose the app first: `ccs config set defaults.terminal terminal` (macOS Terminal; other apps are added once their way of opening has been tried). The exit code of `--here` after Claude Code started is Claude Code's own; scripts should use `--new-window`. / 端末のアプリは先に `defaults.terminal` で決める。`--here` の起こした後の終了コードは Claude Code の物
 - **Called from a GUI app**, `PATH` is often short and `node` or `claude` is not found (`dependency_missing`). Pass the user's shell `PATH` to ccs. / GUI のアプリから呼ぶと `PATH` が短く `node` が見つからないことがある。利用者のシェルの `PATH` を渡す
 

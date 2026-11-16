@@ -20,8 +20,8 @@ import { basename, join, relative } from "node:path";
 import { parseDocument, isSeq } from "yaml";
 
 import { ensureConfigDir, getPaths, loadConfig } from "./ccs-config.ts";
-import { EditStop, runEditSync } from "./ccs-config-edit.ts";
-import { hasShellMetachars } from "./ccs-sanitize.ts";
+import { EditStop, hasControlChars, runEditSync } from "./ccs-config-edit.ts";
+import { hasShellMetachars, jsonForTerminal } from "./ccs-sanitize.ts";
 import { pathToFileURL } from "node:url";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +130,13 @@ export function buildCandidates(
       continue;
     }
     const base = abs === home ? "home" : basename(abs);
+    // ccs repo add refuses such a name (invalid_value); suggest none.
+    if (hasControlChars(base)) {
+      process.stderr.write(
+        `[ccs-init] skipped (control or text-direction characters in the folder name): ${jsonForTerminal(abs)}\n`,
+      );
+      continue;
+    }
     let name = base;
     for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
     taken.add(name);

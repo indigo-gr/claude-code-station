@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ConfigError } from "./ccs-config.ts";
+import { jsonForTerminal } from "./ccs-sanitize.ts";
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -287,7 +288,7 @@ export function emit(command: string, outcome: Outcome, json: boolean): number {
   if (json) {
     const body = outcome.status === "ok" ? outcome.body : undefined;
     process.stdout.write(
-      JSON.stringify(envelope(command, outcome.status, outcome.reasons, body)) + "\n",
+      jsonForTerminal(envelope(command, outcome.status, outcome.reasons, body)) + "\n",
     );
   }
   if (outcome.note) process.stderr.write(`[ccs] ${outcome.note}\n`);

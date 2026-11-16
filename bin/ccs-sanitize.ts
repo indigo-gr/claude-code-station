@@ -53,6 +53,43 @@ export function stripControlCharsKeepLines(text: string): string {
 }
 
 /**
+ * A key (a repos.yml `name`, a group `id`) as shown on the screen. The key
+ * itself stays as written (it ties rows, the cache and `--repo` together);
+ * only what is drawn loses control and reordering characters. A key made of
+ * nothing else is drawn as `?`.
+ */
+export function keyForDisplay(key: string): string {
+  return stripControlChars(key) || "?";
+}
+
+/**
+ * A path (a repos.yml `path`, a session cwd, `defaults.groups_dir`) as shown
+ * on the screen: the same cleaning as a key. The path itself stays as written
+ * wherever it is used (launch, `cd`, the cache, `--json`); only what is drawn
+ * loses control and reordering characters, and an empty result is `?`.
+ */
+export function pathForDisplay(path: string): string {
+  return keyForDisplay(path);
+}
+
+// What JSON.stringify leaves raw although a terminal acts on it: DEL, C1,
+// the reordering marks, and the two line separators JavaScript treats as
+// newlines. C0 is already written as \uXXXX by JSON.stringify.
+const JSON_RAW_CONTROLS_RE = /[\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069]/g;
+
+/**
+ * JSON.stringify, with the characters above written as `\uXXXX`. The parsed
+ * value is the same; only the bytes on the terminal differ. These characters
+ * can only appear inside JSON strings, so the escape is always valid JSON.
+ */
+export function jsonForTerminal(value: unknown): string {
+  return JSON.stringify(value).replace(
+    JSON_RAW_CONTROLS_RE,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
+}
+
+/**
  * Sanitize a session-provided cwd at intake (audit H-1).
  *
  * Unlike display text, cwd is later interpolated into a shell `cd` command

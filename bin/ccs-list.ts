@@ -31,7 +31,7 @@ import { homedir } from "node:os";
 import { openDb, getMeta, reposV3Columns } from "./ccs-db.ts";
 import { groupsFromMeta } from "./ccs-groups.ts";
 import { getPaths } from "./ccs-config.ts";
-import { SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { keyForDisplay, pathForDisplay, SHELL_METACHARS } from "./ccs-sanitize.ts";
 import {
   displayIcon,
   truncate,
@@ -325,9 +325,9 @@ function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
   // gets the same control-char stripping as every other column (audit NEW-1
   // defense-in-depth; fzf renders this column with --ansi).
   const displayName = s.repo_display
-    ? s.repo_display
+    ? keyForDisplay(s.repo_display)
     : s.cwd
-      ? truncate(s.cwd.replace(homedir(), "~"), DESC_MAX)
+      ? pathForDisplay(truncate(s.cwd.replace(homedir(), "~"), DESC_MAX))
       : "(unknown)";
   const mapIcon = s.repo_display ? displayIcon(s.repo_icon) : "❓";
   const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;

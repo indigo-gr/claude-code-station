@@ -36,7 +36,7 @@ repos:                        # リポジトリ定義の配列（必須・1 件�
 | `defaults.ui` | string | — | `"classic"` | 一覧とプレビューの見た目。`classic` か `simple`。ほかの値はエラー。空（YAML の null）は未指定。`simple` は fzf 0.61 以上が要り、古い fzf では `classic` で開く。`--ui=` と `CCS_UI` が勝つ |
 | `defaults.terminal` | string | — | 未指定 | v0.5.0〜。`ccs open --new-window` で開く端末のアプリ。`terminal`（macOS のターミナル）だけ（iTerm2 は確かめてから足す）。ほかの値はエラー。空（YAML の null）は未指定。macOS だけで使う（`machine-interface.md` の 4.5） |
 | `defaults.update_check` | boolean | — | `true` | v0.5.0〜。`false` で更新の確認と知らせを止める（`CCS_NO_UPDATE_CHECK` と同じ）。真偽値だけ（`"false"` などの文字列はエラー） |
-| `defaults.groups_dir` | string | — | 未指定（off） | v0.5.0〜。外のグループの定義（`*.json`）を読むフォルダ。`~` を展開する。`$HOME` の下・シェルのメタ文字不可。ccs はこのフォルダに書かない（`machine-interface.md` の 5 章） |
+| `defaults.groups_dir` | string | — | 未指定（off） | v0.5.0〜。外のグループの定義（`*.json`）を読むフォルダ。`~` を展開する。`$HOME` の下・シェルのメタ文字不可。ccs はこのフォルダに書かない（`machine-interface.md` の 5 章）。`config get` の人向けの行では `path` と同じく制御文字と向きを変える文字を空白に置き換える（`--json` は書いたまま） |
 | `repos` | array | ✅ | — | 1 件以上の項目（下の表） |
 
 トップレベルの未知のキーは、標準エラーに `[ccs] unknown key "<key>" in top-level (ignored)` を出して無視する。
@@ -45,8 +45,8 @@ repos:                        # リポジトリ定義の配列（必須・1 件�
 
 | フィールド | 型 | 必須 | デフォルト | 説明 |
 |---|---|:---:|---|---|
-| `name` | string | ✅ | — | 一意のキー兼、既定の表示名（fzf の行に出る・日本語可）。空はエラー。`label` があれば新規起動の行・`‹親›` の表示・プレビューの見出しは `label` を出す。過去セッションの行は常に `name` |
-| `path` | string | ✅* | `""` | リポジトリのパス。先頭の `~` を展開する。`$HOME` の下に限る |
+| `name` | string | ✅ | — | 一意のキー兼、既定の表示名（fzf の行に出る・日本語可）。空はエラー。`label` があれば新規起動の行・`‹親›` の表示・プレビューの見出しは `label` を出す。過去セッションの行は常に `name`。画面（一覧の行・プレビュー）に出す時は制御文字と向きを変える文字を空白に置き換え、続く空白を 1 つにして前後を落とす（残りが空なら `?`）。キーとしての値（行のキー・キャッシュ・`--repo`・`list --json`）は書いたまま |
+| `path` | string | ✅* | `""` | リポジトリのパス。先頭の `~` を展開する。`$HOME` の下に限る。画面（一覧の行・プレビュー）に出す時は`name` と同じく制御文字と向きを変える文字を空白に置き換える（残りが空なら `?`）。起動・`cd`・キャッシュ・`--json` の値は書いたまま |
 | `description` | string | — | `""` | プレビューと一覧の補助の文。空（YAML の null）は未指定（v0.5.0〜。前は文字列の `"null"` になった） |
 | `command` | string | — | `defaults.command` → `CCS_CMD` → `CCR_CMD` → `"claude"` | 起動コマンド。特殊な場合は丸ごと上書き |
 | `cwd` | string | — | `path` | 起動時の作業ディレクトリ（通常は書かない）。`~` の展開と `$HOME` の下の制限は `path` と同じ |
@@ -55,7 +55,7 @@ repos:                        # リポジトリ定義の配列（必須・1 件�
 | `scan` | bool | — | `true` | false なら状態の走査をしない（git でないフォルダや、Claude Code を起こさない項目）。真偽値のみ（v0.5.0〜。文字列はエラー） |
 | `icon` | string | — | `📁` | 行に出すアイコン（絵文字 1 文字を勧める）。空（YAML の null）は未指定（v0.5.0〜） |
 | `launch` | bool | — | `true` | false なら表示だけのグループ見出し（行の種類 `group:<name>`）。Enter で起動しない・バッジなし・状態を走査しない。`command`/`cwd` は使われない。`path` の中のリポがこの下に並ぶ。真偽値のみ（`"false"` などの文字列はエラー） |
-| `label` | string | — | `""` | 新規起動の行・`‹親›` の表示・プレビューの見出しに `name` の代わりに出す名前。表示専用（シェルのメタ文字は可、制御文字は表示の時に除く）。空（YAML の null）は未指定。空・空白だけなら `name` を出す |
+| `label` | string | — | `""` | 新規起動の行・`‹親›` の表示・プレビューの見出しに `name` の代わりに出す名前。表示専用（シェルのメタ文字は可、制御文字は表示の時に空白に置き換える）。空（YAML の null）は未指定。空・空白だけなら `name` を出す |
 | `lead` | bool | — | `false` | true ならグループの統括。同じ親の下の兄弟の中で一番上に並ぶ（トップレベルの並びは変えない）。`ui: simple` では 👑 で出る。真偽値のみ（`"true"` などの文字列はエラー） |
 | `custom` | object | — | `{}` | 外部システム連携の情報。任意のキーと値（後述）。ほかの道具が自分の値を置く場所 |
 
@@ -332,6 +332,7 @@ v0.5.0 で足した物（足すだけの変更）: `defaults.terminal`・`defaul
 - ccs が書く時（初回のテンプレート・`ccs init --auto-discover` の書き足し・`ccs repo add`・`ccs repo remove`・`ccs config set`）は、必ずこの形で書く。書き足しは元のファイルのコメントと書き方を残し（例外: 行の終わりのコメントの前の空白は 1 つに揃う）、`.bak` を残し、書いた後の検証に落ちたら元に戻す（手順は `machine-interface.md` の 3 章）
 - `repos:` が 1 行の形（`repos: [ … ]`）の時、ccs は項目を書き足さずに断る（`ccs init --auto-discover` は終了コード 1・`ccs repo add` は 6・どちらも理由の語 `flow_style_repos`・ファイルを書き換えない）。`ccs init --auto-discover` の書き足しは、ほかの検査より先に断る（`repos: []` も）。1 行の形のまま足すと、行で読む道具が新しい項目を読めないため
 - ccs が書く `name`・`path` は、YAML で引用符なしに書ける値だけ（`machine-interface.md` の 1.6）
+- ccs が書く `name` に DEL・C1・向きを変える文字は入らない（`repo add` は `invalid_value` で断り、`ccs init --auto-discover` は候補にしない）。手で書いた物は今までどおり読む
 
 ### 最小の形の見本
 

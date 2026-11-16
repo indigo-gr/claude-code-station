@@ -27,6 +27,7 @@ import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { getPaths, readConfig, ConfigError, type CcsConfig, type TerminalApp } from "./ccs-config.ts";
 import { readLogicalGroups } from "./ccs-groups.ts";
 import { envelope, EXIT_CODE, type Status } from "./ccs-machine.ts";
+import { jsonForTerminal } from "./ccs-sanitize.ts";
 import { isUiMode, type UiMode } from "./ccs-utils.ts";
 import { pathToFileURL } from "node:url";
 
@@ -426,7 +427,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     process.exit(130);
   });
   runDoctor(stage1).then((answer) => {
-    process.stdout.write(json ? JSON.stringify(answer.json) + "\n" : humanTable(answer));
+    process.stdout.write(json ? jsonForTerminal(answer.json) + "\n" : humanTable(answer));
     process.exitCode = answer.exitCode;
   });
 }

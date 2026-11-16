@@ -17,7 +17,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { expandPath } from "./ccs-config.ts";
-import { SHELL_METACHARS, stripControlChars } from "./ccs-sanitize.ts";
+import { keyForDisplay, SHELL_METACHARS, stripControlChars } from "./ccs-sanitize.ts";
 
 /** At most this many files are read (the first ones in name order). */
 export const GROUP_FILES_MAX = 200;
@@ -122,7 +122,7 @@ export function readLogicalGroups(dir: string, repos: readonly RepoPath[]): Grou
     }
     seen.add(id);
     const labelRaw = typeof raw.label === "string" ? stripControlChars(raw.label) : "";
-    const label = [...(labelRaw || id)].slice(0, LABEL_MAX).join("");
+    const label = [...(labelRaw || keyForDisplay(id))].slice(0, LABEL_MAX).join("");
     const members: string[] = [];
     let unregistered = 0;
     for (const m of raw.members) {
@@ -161,7 +161,7 @@ export function groupsFromMeta(json: string | null): { id: string; label: string
     const id = readId(g.id);
     if (id === null || typeof g.label !== "string" || !Array.isArray(g.members)) continue;
     const members = g.members.filter((m): m is string => typeof m === "string" && !SHELL_METACHARS.test(m));
-    out.push({ id, label: stripControlChars(g.label) || id, members });
+    out.push({ id, label: stripControlChars(g.label) || keyForDisplay(id), members });
   }
   return out;
 }

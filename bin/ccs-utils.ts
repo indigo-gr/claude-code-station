@@ -9,7 +9,7 @@
  * expressed as explicit options, never as parallel implementations.
  */
 
-import { stripControlChars } from "./ccs-sanitize.ts";
+import { keyForDisplay, stripControlChars } from "./ccs-sanitize.ts";
 import { parseDbTime } from "./ccs-time.ts";
 
 // ---------------------------------------------------------------------------
@@ -63,10 +63,11 @@ export const LABEL_MAX = 40;
  * repos.yml `label` when set, else the unique `name`. The label is
  * display-only (never part of a row key or a shell line), so like
  * `description` it is not rejected at load time — control chars are stripped
- * here by truncate(). A label that strips down to nothing falls back to name.
+ * here by truncate(). A label that strips down to nothing falls back to name,
+ * which loses the same characters on the screen (keyForDisplay).
  */
 export function repoDisplayName(r: { name: string; label?: string | null }): string {
-  return truncate(r.label ?? "", LABEL_MAX) || r.name;
+  return truncate(r.label ?? "", LABEL_MAX) || keyForDisplay(r.name);
 }
 
 /**
