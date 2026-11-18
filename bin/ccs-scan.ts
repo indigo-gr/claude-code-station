@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-scan.ts - Parallel repository scan engine for ccs v0.2.0
  *
@@ -39,9 +39,10 @@ import {
 } from "./ccs-db.ts";
 import { maskSecrets } from "./ccs-secrets.ts";
 import { stripControlChars } from "./ccs-sanitize.ts";
-import { nowIso, type UiMode } from "./ccs-utils.ts";
+import { nowIso } from "./ccs-utils.ts";
 import { scanSessions } from "./ccs-scan-sessions.ts";
 import { pathToFileURL } from "node:url";
+import { t } from "./ccs-i18n.ts";
 
 const execFileP = promisify(execFile);
 
@@ -71,8 +72,6 @@ export interface ScanResult {
   durationMs: number;
   /** True when another scan held the advisory lock and this run did nothing. */
   lockSkipped?: boolean;
-  /** repos.yml `defaults.ui` as loaded by this run (set even when lock-skipped). */
-  ui?: UiMode;
   /** repos.yml `defaults.update_check` (set even when lock-skipped). */
   updateCheck?: boolean;
 }
@@ -672,7 +671,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const releaseLock = acquireScanLock(paths.cacheDir);
   if (!releaseLock) {
     process.stderr.write(
-      "[ccs-scan] another scan is in progress — skipping (stale DB is fine, it self-heals on the next refresh)\n",
+      `${t("scan_locked")}\n`,
     );
     return {
       reposScanned: 0,
@@ -682,7 +681,6 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsSkipped: 0,
       durationMs: Date.now() - started,
       lockSkipped: true,
-      ui: config.defaults.ui,
       updateCheck: config.settings.updateCheck,
     };
   }
@@ -703,11 +701,9 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     // CCS_CMD > "claude") so ccs-list can apply the same chain to sessions
     // that map to no repo (review A-8). Validated at load time (review A-6).
     setMeta(handle.db, "defaults_command", config.defaults.command);
-    // repos.yml `defaults.ui`, for the `ccs --no-scan` path (bin/ccs reads it
-    // back through `ccs-list --print-ui` when no scan ran this launch).
-    setMeta(handle.db, "defaults_ui", config.defaults.ui);
-    // repos.yml `defaults.update_check`, read back the same way (`ccs-list
-    // --print-settings`) when no scan ran this launch.
+    // repos.yml `defaults.update_check`, for the `ccs --no-scan` path
+    // (bin/ccs reads it back through `ccs-list --print-settings` when no scan
+    // ran this launch).
     setMeta(handle.db, "defaults_update_check", config.settings.updateCheck ? "on" : "off");
     // defaults.groups_dir: the logical groups, matched to repos.yml by path,
     // for the list to read (an empty list when the setting is off, so
@@ -743,7 +739,6 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       sessionsIndexed,
       sessionsSkipped,
       durationMs: Date.now() - started,
-      ui: config.defaults.ui,
       updateCheck: config.settings.updateCheck,
     };
   } finally {
@@ -760,23 +755,21 @@ function parseArgs(argv: string[]): {
   force: boolean;
   noSessions: boolean;
   quiet: boolean;
-  printUi: boolean;
   printSettings: boolean;
 } {
   return {
     force: argv.includes("--force"),
     noSessions: argv.includes("--no-sessions"),
     quiet: argv.includes("--quiet"),
-    printUi: argv.includes("--print-ui"),
     printSettings: argv.includes("--print-settings"),
   };
 }
 
 /**
- * Exit status plus the stdout text to flush before exiting. `--print-ui`
- * prints `ui=<mode>` (the only stdout output ccs-scan has): bin/ccs runs the
- * pre-scan anyway, so the launcher learns `defaults.ui` without paying for
- * one more tsx start on every launch.
+ * Exit status plus the stdout text to flush before exiting.
+ * `--print-settings` prints `update_check=<on|off>` (the only stdout output
+ * ccs-scan has): bin/ccs runs the pre-scan anyway, so the launcher learns the
+ * setting without paying for one more Node start on every launch.
  */
 async function main(): Promise<{ code: number; out: string }> {
   const args = parseArgs(process.argv.slice(2));
@@ -794,14 +787,10 @@ async function main(): Promise<{ code: number; out: string }> {
           `(${res.sessionsSkipped} cached) in ${secs}s\n`,
       );
     }
-    // --print-settings: `ui=` and `update_check=` (bin/ccs's pre-scan);
-    // --print-ui: `ui=` alone, as before.
-    let out = "";
-    if (args.printSettings && res.ui) {
-      out = `ui=${res.ui}\nupdate_check=${res.updateCheck === false ? "off" : "on"}\n`;
-    } else if (args.printUi && res.ui) {
-      out = `ui=${res.ui}\n`;
-    }
+    // --print-settings: `update_check=` (bin/ccs's pre-scan).
+    const out = args.printSettings
+      ? `update_check=${res.updateCheck === false ? "off" : "on"}\n`
+      : "";
     return { code: 0, out };
   } catch (err) {
     process.stderr.write(

@@ -26,16 +26,29 @@ export function hasShellMetachars(value: string): boolean {
   return SHELL_METACHARS.test(value);
 }
 
-// All C0 control characters, DEL and C1 (U+0080-U+009F: a terminal may read
-// U+009B as ESC [), plus the marks that reorder displayed text (U+061C,
-// U+200E-F, U+202A-E, U+2066-9). Emoji joiners and variation selectors stay.
+// The marks that reorder displayed text: U+061C, U+200E-F, U+202A-E, U+2066-9.
+// The one list for every check below and for ccs-config-edit's
+// hasControlChars (bin/ccs's text_is_plain is the bash counterpart and has to
+// be changed with it). Emoji joiners and variation selectors are not in it.
+const REORDER_MARKS = "\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069";
+// DEL and C1 (U+0080-U+009F: a terminal may read U+009B as ESC [).
+const DEL_AND_C1 = "\\x7f-\\x9f";
+
+// All C0 control characters, DEL, C1 and the reordering marks.
 // \n and \t are NOT exempted: every ccs display surface is
 // single-line-per-field (TSV rows, preview lines), and the TSV protocol between
 // ccs-list and fzf breaks on embedded tabs/newlines.
-const CONTROL_CHARS_RE =
-  /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
-const CONTROL_CHARS_EXCEPT_NEWLINE_RE =
-  /[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
+const CONTROL_CHARS_RE = new RegExp(`[\\x00-\\x1f${DEL_AND_C1}${REORDER_MARKS}]+`, "g");
+const CONTROL_CHARS_EXCEPT_NEWLINE_RE = new RegExp(
+  `[\\x00-\\x09\\x0b-\\x1f${DEL_AND_C1}${REORDER_MARKS}]+`,
+  "g",
+);
+const HAS_CONTROL_CHAR_RE = new RegExp(`[\\x00-\\x1f${DEL_AND_C1}${REORDER_MARKS}]`);
+
+/** True when the value has a C0, DEL or C1 character or a reordering mark. */
+export function hasControlChars(value: string): boolean {
+  return HAS_CONTROL_CHAR_RE.test(value);
+}
 
 /**
  * Strip C0 control characters (incl. ESC) and DEL from display text,
@@ -68,6 +81,9 @@ export function keyForDisplay(key: string): string {
  * wherever it is used (launch, `cd`, the cache, `--json`); only what is drawn
  * loses control and reordering characters, and an empty result is `?`.
  */
+// Its own name although the rule is a key's today: callers say what they
+// draw, so a path's drawing can change (e.g. a shortened form) without
+// touching every place that draws a key, and the reverse.
 export function pathForDisplay(path: string): string {
   return keyForDisplay(path);
 }
@@ -75,7 +91,7 @@ export function pathForDisplay(path: string): string {
 // What JSON.stringify leaves raw although a terminal acts on it: DEL, C1,
 // the reordering marks, and the two line separators JavaScript treats as
 // newlines. C0 is already written as \uXXXX by JSON.stringify.
-const JSON_RAW_CONTROLS_RE = /[\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069]/g;
+const JSON_RAW_CONTROLS_RE = new RegExp(`[${DEL_AND_C1}${REORDER_MARKS}\\u2028\\u2029]`, "g");
 
 /**
  * JSON.stringify, with the characters above written as `\uXXXX`. The parsed

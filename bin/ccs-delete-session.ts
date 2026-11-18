@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-delete-session.ts — Remove one session row from the state cache.
  *
@@ -7,7 +7,7 @@
  * parameter via ccs-db.ts (audit M-3) instead of interpolating the UUID into
  * a sqlite3 CLI string.
  *
- * Usage: tsx ccs-delete-session.ts <session-uuid>
+ * Usage: node ccs-delete-session.ts <session-uuid>
  * Exit codes: 0 = row deleted or not present, 1 = bad args / DB failure.
  */
 

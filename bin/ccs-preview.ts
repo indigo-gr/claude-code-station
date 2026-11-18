@@ -1,42 +1,35 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-preview.ts — fzf preview pane dispatcher for ccs v0.2.0
  *
- * Invoked by fzf as: tsx bin/ccs-preview.ts <KIND:KEY> <CWD>
+ * Invoked by fzf as: node bin/ccs-preview.ts <KIND:KEY> <CWD>
  *   KIND=new     → render repo preview (DB-backed state summary)
  *   KIND=group   → render group-header preview (path + nested entries)
  *   KIND=resume  → delegate to renderSessionPreview (conversation history)
  *
- * An optional third argument `--ui=simple` draws the friendly "card" for each
- * kind instead (Japanese, plain words, no git/handoff jargon in the headings).
+ * Each kind is drawn as a friendly "card" (plain words in the run's
+ * language, no git/handoff jargon in the headings).
  *
  * All errors print to stdout (fzf reads stdout for preview) and exit 0.
  */
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { relative } from "node:path";
 import { getPaths } from "./ccs-config.ts";
 import { getMeta, openDb, reposV3Columns, type DbHandle } from "./ccs-db.ts";
 import { groupsFromMeta } from "./ccs-groups.ts";
 import { renderSessionPreview } from "./ccs-preview-session.ts";
 import {
-  displayIcon,
-  formatRelativeTime,
-  formatDateTime,
   formatFriendlyTime,
   truncate,
   repoDisplayName,
   findParentRepo,
   tildePath,
-  uiFromArgv,
 } from "./ccs-utils.ts";
 import {
-  keyForDisplay,
   pathForDisplay,
-  stripControlChars,
-  stripControlCharsKeepLines,
 } from "./ccs-sanitize.ts";
+import { t } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -47,25 +40,11 @@ const C = {
   bold: "\x1b[1m",
   dim: "\x1b[2m",
   headerName: "\x1b[1;36m", // bold cyan
-  divider: "\x1b[1;90m",     // bold gray
 };
 
-function hdr(name: string): string {
-  return `${C.headerName}${name}${C.reset}`;
-}
 function dim(s: string): string {
   return `${C.dim}${s}${C.reset}`;
 }
-function label(s: string): string {
-  return `${C.bold}${s}${C.reset}`;
-}
-function divider(title: string): string {
-  // ─── Title ──── (bold gray)
-  const base = `─── ${title} `;
-  const pad = Math.max(0, 40 - base.length);
-  return `${C.divider}${base}${"─".repeat(pad)}${C.reset}`;
-}
-
 // Time formatting and truncation come from ccs-utils.ts — the single source
 // shared with the list renderer (review A-1/A-3/K-8). Unparseable timestamps
 // render as "-" (the utils default), never as the raw DB string.
@@ -117,11 +96,6 @@ interface StatsView {
   session_last_at: string | null;
 }
 
-interface FileRow {
-  filename: string;
-  mtime: string;
-}
-
 interface SessionRow {
   last_activity_at: string;
   topic: string | null;
@@ -144,237 +118,16 @@ const KNOWN_INTEGRATIONS: { key: string; label: string; format?: (v: string) => 
   { key: "github_repo", label: "GitHub" },
   { key: "figma_file", label: "Figma" },
 ];
-const KNOWN_KEYS = new Set(KNOWN_INTEGRATIONS.map((i) => i.key));
-// Secondary keys that exist only to augment known ones — not shown standalone
-const AUX_KEYS = new Set(["plane_url"]);
-
-function renderIntegrations(customJson: string): string[] {
-  let custom: Record<string, unknown>;
-  try {
-    custom = JSON.parse(customJson || "{}");
-  } catch {
-    return [];
-  }
-  const keys = Object.keys(custom).filter((k) => !AUX_KEYS.has(k));
-  if (keys.length === 0) return [];
-
-  const lines: string[] = [];
-  lines.push(divider("🔗 Integrations"));
-
-  for (const { key, label: lbl, format } of KNOWN_INTEGRATIONS) {
-    if (!(key in custom)) continue;
-    const raw = custom[key];
-    if (raw === null || raw === undefined || raw === "") continue;
-    const val = format ? format(String(raw)) : String(raw);
-    lines.push(`  ${label(lbl + ":").padEnd(10)} ✅ ${truncate(val, 50)}`);
-  }
-
-  const unknown = keys.filter((k) => !KNOWN_KEYS.has(k));
-  if (unknown.length > 0) {
-    lines.push(`  ${label("Other:")}`);
-    for (const k of unknown) {
-      const v = custom[k];
-      if (v === null || v === undefined) continue;
-      const vs = typeof v === "string" ? v : JSON.stringify(v);
-      lines.push(`    ${k}: ${truncate(vs, 40)}`);
-    }
-  }
-  return lines;
-}
-
-// ---------------------------------------------------------------------------
-// Repo preview
-// ---------------------------------------------------------------------------
-
-function renderRepoPreview(name: string, cwd: string): void {
-  const paths = getPaths();
-  if (!existsSync(paths.stateDb)) {
-    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-    console.log(dim(cwd ? pathForDisplay(cwd) : ""));
-    console.log("");
-    console.log("No state cache yet — run `ccs --refresh` to scan.");
-    return;
-  }
-
-  let handle: DbHandle | null = null;
-  try {
-    handle = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
-    const db = handle.db;
-
-    const repo = db
-      .prepare(
-        `SELECT name, path, description, icon, tags_json, custom_json,
-                ${reposV3Columns(db)}
-         FROM repos WHERE name = ?`,
-      )
-      .get(name) as RepoView | undefined;
-
-    if (!repo) {
-      console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-      console.log(dim(cwd ? pathForDisplay(cwd) : ""));
-      console.log("");
-      console.log(`Repo "${keyForDisplay(name)}" not found in cache.`);
-      return;
-    }
-
-    const stats = db
-      .prepare(
-        `SELECT is_git, branch, last_commit_hash, last_commit_subject, last_commit_at,
-                uncommitted_files, uncommitted_insertions, uncommitted_deletions,
-                handoff_count, pending_count, claude_room_latest, claude_room_latest_at,
-                session_count_total, session_last_at
-         FROM repo_stats WHERE name = ?`,
-      )
-      .get(name) as StatsView | undefined;
-
-    // --- Header ---
-    // Titled with the repos.yml `label` like the list row; when one is set,
-    // the dim `name` after it ties the entry to its session rows, which keep
-    // showing the name.
-    const displayName = repoDisplayName(repo);
-    const shownName = keyForDisplay(repo.name);
-    const nameHint = displayName !== shownName ? `  ${dim(`(${shownName})`)}` : "";
-    console.log(`${hdr(`${displayIcon(repo.icon)} ${displayName}`)}${nameHint}`);
-    console.log(dim(pathForDisplay(repo.path)));
-    if (repo.description) console.log(stripControlCharsKeepLines(repo.description));
-    console.log("");
-
-    // --- Git ---
-    if (stats && stats.is_git === 1) {
-      console.log(divider("Git"));
-      const branch = stats.branch || "(detached)";
-      console.log(`${label("Branch:".padEnd(14))} ${branch}`);
-      if (stats.last_commit_hash) {
-        const rel = formatRelativeTime(stats.last_commit_at);
-        const shortHash = stats.last_commit_hash.slice(0, 7);
-        const subj = truncate(stats.last_commit_subject || "", 60);
-        console.log(`${label("Last commit:".padEnd(14))} ${rel}`);
-        console.log(`${"".padEnd(14)}   ${shortHash} ${subj}`);
-      }
-      const f = stats.uncommitted_files;
-      if (f === 0 && stats.uncommitted_insertions === 0 && stats.uncommitted_deletions === 0) {
-        console.log(`${label("Uncommitted:".padEnd(14))} clean`);
-      } else {
-        console.log(
-          `${label("Uncommitted:".padEnd(14))} ${f} file(s) (+${stats.uncommitted_insertions} -${stats.uncommitted_deletions})`,
-        );
-      }
-      console.log("");
-    }
-
-    // --- Workspace (handoff / pending / claude-room) ---
-    if (
-      stats &&
-      (stats.handoff_count > 0 ||
-        stats.pending_count > 0 ||
-        stats.claude_room_latest)
-    ) {
-      console.log(divider("Workspace"));
-
-      if (stats.handoff_count > 0) {
-        console.log(`${label("Handoff:".padEnd(14))} ⚠️  ${stats.handoff_count} file(s)`);
-        const rows = db
-          .prepare(
-            `SELECT filename, mtime FROM handoff_files
-             WHERE repo_name = ? ORDER BY mtime DESC LIMIT 3`,
-          )
-          .all(name) as FileRow[];
-        for (const r of rows) {
-          console.log(`  • ${truncate(r.filename, 50)} (${formatRelativeTime(r.mtime)})`);
-        }
-      }
-
-      if (stats.pending_count > 0) {
-        console.log(`${label("Pending:".padEnd(14))} 📝 ${stats.pending_count} item(s)`);
-        const rows = db
-          .prepare(
-            `SELECT filename, mtime FROM pending_items
-             WHERE repo_name = ? ORDER BY mtime DESC LIMIT 3`,
-          )
-          .all(name) as FileRow[];
-        for (const r of rows) {
-          console.log(`  • ${truncate(r.filename, 50)} (${formatRelativeTime(r.mtime)})`);
-        }
-      }
-
-      if (stats.claude_room_latest) {
-        const latest = truncate(stats.claude_room_latest, 40);
-        const when = formatRelativeTime(stats.claude_room_latest_at);
-        console.log(`${label("Claude room:".padEnd(14))} latest: ${latest} (${when})`);
-      }
-      console.log("");
-    }
-
-    // --- Sessions ---
-    console.log(divider("Sessions"));
-    if (!stats || stats.session_count_total === 0) {
-      console.log("No sessions yet — ready to start");
-    } else {
-      console.log(`${label("Total:".padEnd(14))} ${stats.session_count_total} sessions`);
-      console.log(`${label("Last activity:".padEnd(14))} ${formatRelativeTime(stats.session_last_at)}`);
-      // Same population as the Total count above (repo_stats aggregates
-      // WHERE repo_name = ?) — mixing in a cwd fallback here made Total and
-      // Recent disagree (audit logic H-3). Sessions under the repo path are
-      // mapped to repo_name at scan time, including subdirectories.
-      const rows = db
-        .prepare(
-          `SELECT last_activity_at, topic FROM sessions
-           WHERE repo_name = ?
-           ORDER BY last_activity_at DESC LIMIT 3`,
-        )
-        .all(name) as SessionRow[];
-      if (rows.length > 0) {
-        console.log(label("Recent:"));
-        for (const r of rows) {
-          const dt = formatDateTime(r.last_activity_at);
-          const topic = truncate(r.topic || "(no topic)", 50);
-          console.log(`  • ${dt} — ${topic}`);
-        }
-      }
-    }
-    console.log("");
-
-    // --- Integrations ---
-    const intLines = renderIntegrations(repo.custom_json || "{}");
-    if (intLines.length > 0) {
-      for (const line of intLines) console.log(line);
-      console.log("");
-    }
-
-    // --- Tags ---
-    try {
-      const tags = JSON.parse(repo.tags_json || "[]") as unknown;
-      if (Array.isArray(tags) && tags.length > 0) {
-        console.log(divider("Tags"));
-        console.log(tags.map((t) => stripControlChars(String(t))).join(", "));
-      }
-    } catch {
-      // ignore
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-    console.log("");
-    console.log(`Preview error: ${msg}`);
-  } finally {
-    try {
-      handle?.close();
-    } catch {
-      // ignore
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Group-header preview (repos.yml `launch: false`)
 // ---------------------------------------------------------------------------
 
 /**
  * A logical group's header (`group:@<id>`, from defaults.groups_dir): its
- * label and the entries listed under it. Both looks. Never throws. False
+ * label and the entries listed under it. Never throws. False
  * when the cache holds no such group (a repos.yml header may be named `@…`).
  */
-function renderLogicalGroup(id: string, simple: boolean): boolean {
+function renderLogicalGroup(id: string): boolean {
   const paths = getPaths();
   let handle: DbHandle | null = null;
   try {
@@ -392,113 +145,24 @@ function renderLogicalGroup(id: string, simple: boolean): boolean {
       .map((n) => listed.find((r) => r.name === n))
       .filter((r): r is GroupMemberView => r !== undefined);
     const title = truncate(group.label, 60);
-    if (simple) {
-      cardTitle(`🗂 グループ「${title}」`);
-      console.log("  ここは見出しです。開くときは、下のプロジェクトをえらんでください");
-      console.log("");
-      if (entries.length === 0) {
-        console.log("  このグループには、一覧に出るプロジェクトがありません");
-        return true;
-      }
-      cardField(
-        "🗂 ",
-        `中のプロジェクト（${entries.length}）`,
-        entries.map((r) => {
-          const desc = r.description ? `  ${dim(truncate(r.description, 40))}` : "";
-          return `${truncate(r.icon || "", 8) || "📁"} ${repoDisplayName(r)}${desc}`;
-        }),
-      );
+    cardTitle(t("card_group_title", { icon: "🗂", name: title }));
+    console.log(t("card_group_is_heading"));
+    console.log("");
+    if (entries.length === 0) {
+      console.log(t("card_group_no_listed"));
       return true;
     }
-    console.log(hdr(`🗂 ${title}`));
-    console.log("");
-    console.log(divider("Group"));
-    console.log("Logical group (defaults.groups_dir) — not launchable.");
-    console.log("Pick one of the entries below to start a session.");
-    console.log("");
-    console.log(divider(`Entries (${entries.length})`));
-    for (const r of entries) {
-      const desc = r.description ? `  ${dim(truncate(r.description, 60))}` : "";
-      console.log(`  ${displayIcon(r.icon)} ${repoDisplayName(r)}${desc}`);
-    }
+    cardField(
+      "🗂 ",
+      t("card_group_members", { n: entries.length }),
+      entries.map((r) => {
+        const desc = r.description ? `  ${dim(truncate(r.description, 40))}` : "";
+        return `${truncate(r.icon || "", 8) || "📁"} ${repoDisplayName(r)}${desc}`;
+      }),
+    );
     return true;
   } catch {
     return false;
-  } finally {
-    try {
-      handle?.close();
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function renderGroupPreview(name: string, cwd: string): void {
-  if (name.startsWith("@") && renderLogicalGroup(name.slice(1), false)) return;
-  const paths = getPaths();
-  if (!existsSync(paths.stateDb)) {
-    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-    console.log(dim(cwd ? pathForDisplay(cwd) : ""));
-    console.log("");
-    console.log("No state cache yet — run `ccs --refresh` to scan.");
-    return;
-  }
-
-  let handle: DbHandle | null = null;
-  try {
-    handle = openDb(paths.stateDb, { readonly: true, skipMigrate: true });
-    const db = handle.db;
-
-    // The listed (enabled) repos, in list order: children are resolved with
-    // the same findParentRepo rule over the same population as ccs-list, so
-    // the entries here are exactly the rows drawn under the header.
-    const listed = db
-      .prepare(
-        `SELECT name, path, description, icon, ${reposV3Columns(db)}
-         FROM repos WHERE disabled = 0
-         ORDER BY name COLLATE NOCASE ASC`,
-      )
-      .all() as GroupMemberView[];
-    const group = listed.find((r) => r.name === name);
-
-    if (!group) {
-      console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-      console.log(dim(cwd ? pathForDisplay(cwd) : ""));
-      console.log("");
-      console.log(`Group "${keyForDisplay(name)}" not found in cache.`);
-      return;
-    }
-
-    console.log(`${hdr(`${displayIcon(group.icon)} ${repoDisplayName(group)}`)}`);
-    console.log(dim(pathForDisplay(group.path)));
-    if (group.description) console.log(truncate(group.description, 200));
-    console.log("");
-
-    console.log(divider("Group"));
-    console.log("Group header (launch: false) — not launchable.");
-    console.log("Pick one of the entries below to start a session.");
-    console.log("");
-
-    const entries = leadFirst(
-      listed.filter((r) => r !== group && findParentRepo(r, listed) === group),
-    );
-    console.log(divider(`Entries (${entries.length})`));
-    if (entries.length === 0) {
-      console.log("No repos inside this path yet.");
-      return;
-    }
-    const names = entries.map((r) => repoDisplayName(r));
-    const width = Math.max(...names.map((n) => n.length));
-    entries.forEach((r, i) => {
-      const rel = pathForDisplay(truncate(relative(group.path, r.path), 60)) + "/";
-      const tag = r.launch === 0 ? `  ${dim("(group)")}` : "";
-      console.log(`  ${displayIcon(r.icon)} ${names[i].padEnd(width)}  ${dim(rel)}${tag}`);
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.log(`${hdr("📁 " + keyForDisplay(name))}`);
-    console.log("");
-    console.log(`Preview error: ${msg}`);
   } finally {
     try {
       handle?.close();
@@ -538,7 +202,7 @@ function cardNotice(lines: string[]): void {
   for (const l of lines) console.log(`  ${l}`);
 }
 
-/** Integration display names, same table as the classic preview. */
+/** Integration display names, from the table above. */
 function integrationNames(customJson: string): string[] {
   let custom: Record<string, unknown>;
   try {
@@ -552,15 +216,12 @@ function integrationNames(customJson: string): string[] {
   }).map(({ label: l }) => l);
 }
 
-const NO_CACHE_LINES = [
-  "まだ一覧の準備ができていません。",
-  "いちど Esc でやめて、ccs --refresh と打ってください。",
-];
+const noCacheLines = (): string[] => t("card_no_cache").split("\n");
 
 function withDb(fn: (db: DbHandle["db"]) => void): void {
   const paths = getPaths();
   if (!existsSync(paths.stateDb)) {
-    cardNotice(NO_CACHE_LINES);
+    cardNotice(noCacheLines());
     return;
   }
   let handle: DbHandle | null = null;
@@ -570,7 +231,7 @@ function withDb(fn: (db: DbHandle["db"]) => void): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     cardNotice([
-      "ここに中身を出せませんでした。Enter で開くことはできます。",
+      t("card_failed"),
       dim(truncate(msg, 120)),
     ]);
   } finally {
@@ -593,8 +254,7 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
       .get(name) as RepoView | undefined;
     if (!repo) {
       cardNotice([
-        `「${truncate(name, 40)}」はまだ一覧に入っていません。`,
-        "Esc でやめて、ccs --refresh と打ってください。",
+        ...t("card_not_in_cache", { name: truncate(name, 40) }).split("\n"),
       ]);
       return;
     }
@@ -610,9 +270,9 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
     const folder = cwd || repo.path;
     const folderExists = folder ? existsSync(folder) : false;
 
-    cardTitle(`✨ ${repoDisplayName(repo)} で、新しく Claude Code を始めます`);
+    cardTitle(t("card_repo_title", { name: repoDisplayName(repo) }));
     if (repo.lead === 1) {
-      console.log("  👑 このグループの統括です");
+      console.log(t("card_repo_lead"));
       console.log("");
     }
     if (repo.description) {
@@ -620,14 +280,14 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
       console.log("");
     }
 
-    cardField("📂", "フォルダ", [pathForDisplay(tildePath(truncate(folder, 200), home))]);
+    cardField("📂", t("card_folder"), [pathForDisplay(tildePath(truncate(folder, 200), home))]);
     if (!folderExists) {
-      console.log(`     ⚠️  このフォルダが見つかりません。repos.yml の path を確かめてください`);
+      console.log(t("card_folder_missing"));
     }
-    cardField("🕒", "最後に開いた", [
+    cardField("🕒", t("card_last_opened"), [
       stats?.session_last_at
         ? formatFriendlyTime(stats.session_last_at, { clock: true })
-        : "まだ開いたことはありません",
+        : t("card_never_opened"),
     ]);
 
     if (stats && stats.is_git === 1) {
@@ -638,24 +298,24 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
         (stats.uncommitted_deletions ?? 0) > 0;
       const values = [
         changed
-          ? `まだ保存（commit）していない変更が ${files} ファイルあります`
-          : "保存していない変更はありません",
+          ? t("card_changes_some", { n: files })
+          : t("card_changes_none"),
       ];
       const branch = stats.branch ?? "";
       if (branch && branch !== "main" && branch !== "master") {
-        values.push(dim(`作業中のブランチ: ${truncate(branch, 60)}`));
+        values.push(dim(t("card_branch", { branch: truncate(branch, 60) })));
       }
-      cardField("📝", "変更", values);
+      cardField("📝", t("card_changes"), values);
     }
     if ((stats?.handoff_count ?? 0) > 0) {
-      cardField("📌", "申し送り", [`${stats?.handoff_count} 件あります（前の作業からのメモ）`]);
+      cardField("📌", t("card_handoff"), [t("card_handoff_count", { n: stats?.handoff_count ?? 0 })]);
     }
     if ((stats?.pending_count ?? 0) > 0) {
-      cardField("🗒 ", "あとでやること", [`${stats?.pending_count} 件あります`]);
+      cardField("🗒 ", t("card_pending"), [t("card_pending_count", { n: stats?.pending_count ?? 0 })]);
     }
     const services = integrationNames(repo.custom_json || "{}");
     if (services.length > 0) {
-      cardField("🔗", "つながっているサービス", [services.join("・")]);
+      cardField("🔗", t("card_services"), [services.join(t("card_list_separator"))]);
     }
 
     const recent = db
@@ -668,24 +328,27 @@ function renderSimpleRepoCard(name: string, cwd: string): void {
     if (recent.length > 0) {
       cardField(
         "💭",
-        "最近の話題",
+        t("card_recent_topics"),
         recent.map(
           (r) =>
-            `・${formatFriendlyTime(r.last_activity_at)}  ${truncate(r.topic || "（話題なし）", 50)}`,
+            t("card_recent_topic_line", {
+              when: formatFriendlyTime(r.last_activity_at),
+              topic: truncate(r.topic || t("list_no_topic"), 50),
+            }),
         ),
       );
     }
 
     cardFooter(
       folderExists
-        ? "Enter を押すと、このフォルダで Claude Code が開きます"
-        : "Enter を押すと、いまいるフォルダで Claude Code が開きます",
+        ? t("card_repo_footer")
+        : t("card_repo_footer_here"),
     );
   });
 }
 
 function renderSimpleGroupCard(name: string): void {
-  if (name.startsWith("@") && renderLogicalGroup(name.slice(1), true)) return;
+  if (name.startsWith("@") && renderLogicalGroup(name.slice(1))) return;
   withDb((db) => {
     const listed = db
       .prepare(
@@ -697,36 +360,35 @@ function renderSimpleGroupCard(name: string): void {
     const group = listed.find((r) => r.name === name);
     if (!group) {
       cardNotice([
-        `「${truncate(name, 40)}」はまだ一覧に入っていません。`,
-        "Esc でやめて、ccs --refresh と打ってください。",
+        ...t("card_not_in_cache", { name: truncate(name, 40) }).split("\n"),
       ]);
       return;
     }
-    cardTitle(`📂 グループ「${repoDisplayName(group)}」`);
+    cardTitle(t("card_group_title", { icon: "📂", name: repoDisplayName(group) }));
     if (group.description) {
       console.log(`  ${truncate(group.description, 200)}`);
       console.log("");
     }
-    console.log("  ここは見出しです。開くときは、下のプロジェクトをえらんでください");
+    console.log(t("card_group_is_heading"));
     console.log("");
 
     const entries = leadFirst(
       listed.filter((r) => r !== group && findParentRepo(r, listed) === group),
     );
     if (entries.length === 0) {
-      console.log("  このグループには、まだプロジェクトがありません");
+      console.log(t("card_group_empty"));
       return;
     }
     cardField(
       "🗂 ",
-      `中のプロジェクト（${entries.length}）`,
+      t("card_group_members", { n: entries.length }),
       entries.map((r) => {
         const desc = r.description ? `  ${dim(truncate(r.description, 40))}` : "";
         const tag =
           r.launch === 0
-            ? `  ${dim("（グループ）")}`
+            ? `  ${dim(t("card_tag_group"))}`
             : r.lead === 1
-              ? `  ${dim("（統括）")}`
+              ? `  ${dim(t("card_tag_lead"))}`
               : "";
         const icon = r.lead === 1 ? "👑" : truncate(r.icon || "", 8) || "📁";
         return `${icon} ${repoDisplayName(r)}${desc}${tag}`;
@@ -763,23 +425,22 @@ async function renderSimpleSessionCard(uuid: string): Promise<void> {
     // withDb already printed the reason when the cache itself is missing.
     if (existsSync(getPaths().stateDb)) {
       cardNotice([
-        "この会話はまだ一覧に入っていません。",
-        "Enter で開くことはできます。",
+        ...t("card_session_not_in_cache").split("\n"),
       ]);
     }
     return;
   }
   const home = homedir();
-  cardTitle("↩️  前の会話のつづきから再開します");
-  if (row.repo_label) cardField("🏷 ", "プロジェクト", [row.repo_label]);
-  cardField("📂", "フォルダ", [pathForDisplay(tildePath(truncate(row.cwd, 200), home))]);
-  cardField("🕒", "最後に話した", [
+  cardTitle(t("card_session_title"));
+  if (row.repo_label) cardField("🏷 ", t("card_project"), [row.repo_label]);
+  cardField("📂", t("card_folder"), [pathForDisplay(tildePath(truncate(row.cwd, 200), home))]);
+  cardField("🕒", t("card_last_talked"), [
     formatFriendlyTime(row.last_activity_at, { clock: true }),
   ]);
-  cardField("💭", "前の話題", [truncate(row.topic || "（話題なし）", 200)]);
-  cardFooter("Enter を押すと、この会話のつづきが開きます");
+  cardField("💭", t("card_topic"), [truncate(row.topic || t("list_no_topic"), 200)]);
+  cardFooter(t("card_session_footer"));
   console.log("");
-  await renderSessionPreview(uuid, { simple: true });
+  await renderSessionPreview(uuid);
 }
 
 async function renderSimple(kind: string, key: string, cwd: string): Promise<void> {
@@ -790,9 +451,9 @@ async function renderSimple(kind: string, key: string, cwd: string): Promise<voi
   } else if (kind === "group") {
     renderSimpleGroupCard(key);
   } else if (kind === "separator") {
-    cardNotice(["ここは区切りの行です。上か下の行をえらんでください"]);
+    cardNotice([t("card_separator")]);
   } else {
-    cardNotice(["この行は開けません。ほかの行をえらんでください"]);
+    cardNotice([t("card_cannot_open")]);
   }
 }
 
@@ -817,35 +478,14 @@ async function main(): Promise<void> {
   const kind = kindKey.slice(0, colonIdx);
   const key = kindKey.slice(colonIdx + 1);
 
-  if (uiFromArgv(process.argv.slice(4)) === "simple") {
-    try {
-      await renderSimple(kind, key, cwd);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      cardNotice([
-        "ここに中身を出せませんでした。Enter で開くことはできます。",
-        dim(truncate(msg, 120)),
-      ]);
-    }
-    return;
-  }
-
   try {
-    if (kind === "resume") {
-      await renderSessionPreview(key);
-    } else if (kind === "new") {
-      renderRepoPreview(key, cwd);
-    } else if (kind === "group") {
-      renderGroupPreview(key, cwd);
-    } else if (kind === "separator") {
-      // Divider row — intentionally blank preview.
-      return;
-    } else {
-      console.log(`Unknown kind: ${kind}`);
-    }
+    await renderSimple(kind, key, cwd);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`Preview error: ${msg}`);
+    cardNotice([
+      t("card_failed"),
+      dim(truncate(msg, 120)),
+    ]);
   }
 }
 

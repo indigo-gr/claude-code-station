@@ -18,7 +18,8 @@ import { fileURLToPath } from "node:url";
 
 const CCS_BIN = fileURLToPath(new URL("../bin/ccs", import.meta.url));
 const bin = (name: string) => fileURLToPath(new URL(`../bin/${name}`, import.meta.url));
-const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+// The modules run on Node itself (it strips the types of the .ts sources).
+const NODE = process.execPath;
 
 interface Box {
   root: string;
@@ -63,7 +64,10 @@ grep -m1 -- "$STUB_PICK" || exit 1
     STUB_PICK: "realrepo",
     CCS_NO_UPDATE_CHECK: "1",
     GIT_CONFIG_NOSYSTEM: "1",
+    // The language is set by the test, never taken from the shell that runs it.
+    LANG: "en_US.UTF-8",
   };
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
   delete env.CCS_CMD;
   delete env.CCR_CMD;
   delete env.CCS_UI;
@@ -76,10 +80,10 @@ async function writeRepos(box: Box, yaml: string): Promise<void> {
 }
 
 function scan(box: Box, args = ["--force", "--no-sessions", "--quiet"]): SpawnSyncReturns<string> {
-  return spawnSync(TSX, [bin("ccs-scan.ts"), ...args], { encoding: "utf-8", env: box.env, timeout: 120_000 });
+  return spawnSync(NODE, [bin("ccs-scan.ts"), ...args], { encoding: "utf-8", env: box.env, timeout: 120_000 });
 }
 function list(box: Box, args: string[] = []): SpawnSyncReturns<string> {
-  return spawnSync(TSX, [bin("ccs-list.ts"), ...args], { encoding: "utf-8", env: box.env, timeout: 120_000 });
+  return spawnSync(NODE, [bin("ccs-list.ts"), ...args], { encoding: "utf-8", env: box.env, timeout: 120_000 });
 }
 function ccs(box: Box, args: string[]): SpawnSyncReturns<string> {
   return spawnSync("bash", [CCS_BIN, ...args], {
@@ -121,7 +125,7 @@ describe("a tab in a field cannot choose the command", () => {
       assert.equal(rows.status, 0, rows.stderr);
       assert.deepEqual(badRows(rows.stdout), []);
       assert.ok(rows.stdout.includes("🎬"), "the icon is still shown");
-      const res = ccs(box, ["--new", "--no-scan", "--ui=classic"]);
+      const res = ccs(box, ["--new", "--no-scan"]);
       assert.equal(res.status, 0, res.stderr);
       assert.equal(await exists(box.claudeLog), true, "the repo's command ran");
     } finally {
@@ -129,37 +133,36 @@ describe("a tab in a field cannot choose the command", () => {
     }
   });
 
-  for (const look of ["classic", "simple"]) {
-    for (const [field, line] of [
-      ["icon", (v: string) => `    icon: "${v}"`],
-      ["label", (v: string) => `    label: "${v}"`],
-      ["description", (v: string) => `    description: "${v}"`],
-      ["tags", (v: string) => `    tags: ["${v}"]`],
+  for (const [field, line] of [
+    ["icon", (v: string) => `    icon: "${v}"`],
+    ["label", (v: string) => `    label: "${v}"`],
+    ["description", (v: string) => `    description: "${v}"`],
+    ["tags", (v: string) => `    tags: ["${v}"]`],
+  ] as const) {
+    for (const [sepName, sep] of [
+      ["tab", "\\t"],
+      ["newline", "\\n"],
+      ["unit separator", "\\x1f"],
     ] as const) {
-      for (const [sepName, sep] of [
-        ["tab", "\\t"],
-        ["newline", "\\n"],
-        ["unit separator", "\\x1f"],
-      ] as const) {
-        test(`${look}: a ${sepName} in ${field} runs nothing from the field`, async () => {
-          const box = await makeBox();
-          try {
-            const marker = await arm(box);
-            await writeRepos(box, `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n${line(plant(box, sep))}\n`);
-            scan(box); // a fix may refuse the file here: that is fine
-            const rows = list(box, ["--repos-only", `--ui=${look}`]);
-            assert.deepEqual(badRows(rows.stdout), [], `${field}: a row has the wrong column count`);
-            ccs(box, ["--new", "--no-scan", `--ui=${look}`]);
-            assert.equal(await exists(marker), false, `the script in ${field} ran as the command`);
-            if (await exists(box.claudeLog)) {
-              const log = await readFile(box.claudeLog, "utf-8");
-              assert.ok(!log.includes("evil.sh"), log);
-            }
-          } finally {
-            await box.cleanup();
+      test(`a ${sepName} in ${field} runs nothing from the field`, async () => {
+        const box = await makeBox();
+        try {
+          const marker = await arm(box);
+          await writeRepos(box, `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n${line(plant(box, sep))}\n`);
+          scan(box); // a fix may refuse the file here: that is fine
+          const rows = list(box, ["--repos-only"]);
+          assert.deepEqual(badRows(rows.stdout), [], `${field}: a row has the wrong column count`);
+          const res = ccs(box, ["--new", "--no-scan"]);
+          assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
+          assert.equal(await exists(marker), false, `the script in ${field} ran as the command`);
+          if (await exists(box.claudeLog)) {
+            const log = await readFile(box.claudeLog, "utf-8");
+            assert.ok(!log.includes("evil.sh"), log);
           }
-        });
-      }
+        } finally {
+          await box.cleanup();
+        }
+      });
     }
   }
 
@@ -184,7 +187,8 @@ describe("a tab in a field cannot choose the command", () => {
       const rows = list(box, ["--sessions-only"]);
       assert.deepEqual(badRows(rows.stdout), []);
       box.env.STUB_PICK = "resume:";
-      ccs(box, ["--resume", "--no-scan", "--ui=classic"]);
+      const res = ccs(box, ["--resume", "--no-scan"]);
+      assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
       assert.equal(await exists(marker), false, "the script in the session ran as the command");
     } finally {
       await box.cleanup();
@@ -193,7 +197,7 @@ describe("a tab in a field cannot choose the command", () => {
 });
 
 describe("the icon also reaches the session rows", () => {
-  test("classic: a tab in a repo's icon cannot move the columns of its sessions", async () => {
+  test("a tab in a repo's icon cannot move the columns of its sessions", async () => {
     const box = await makeBox();
     try {
       const marker = join(box.root, "EVIL_RAN");
@@ -216,7 +220,8 @@ describe("the icon also reaches the session rows", () => {
       scan(box, ["--force", "--quiet"]);
       assert.deepEqual(badRows(list(box, ["--sessions-only"]).stdout), []);
       box.env.STUB_PICK = "resume:";
-      ccs(box, ["--resume", "--no-scan", "--ui=classic"]);
+      const res = ccs(box, ["--resume", "--no-scan"]);
+      assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
       assert.equal(await exists(marker), false, "the script in the icon ran as the command");
     } finally {
       await box.cleanup();
@@ -242,7 +247,7 @@ describe("a secret on the preview's cut line stays hidden", () => {
       join(proj, `${SESSION}.jsonl`),
       JSON.stringify({ type: "user", cwd: box.home, timestamp: "2026-01-01T00:00:00Z", ...line }) + "\n",
     );
-    const r = spawnSync(TSX, [bin("ccs-preview-session.ts"), SESSION], { encoding: "utf-8", env: box.env, timeout: 120_000 });
+    const r = spawnSync(NODE, [bin("ccs-preview-session.ts"), SESSION], { encoding: "utf-8", env: box.env, timeout: 120_000 });
     return r.stdout;
   }
 
@@ -464,7 +469,7 @@ describe("the scan stays inside a repo and runs nothing the repo configures", ()
 describe("a session's cwd stays under HOME", () => {
   const SESSION = "ffffffff-0000-0000-0000-000000000001";
 
-  async function resumeIn(box: Box, cwd: string, look: string): Promise<string | null> {
+  async function resumeIn(box: Box, cwd: string): Promise<string | null> {
     const proj = join(box.home, ".claude", "projects", "p");
     await mkdir(proj, { recursive: true });
     await mkdir(join(box.home, "dummy"), { recursive: true });
@@ -478,38 +483,37 @@ describe("a session's cwd stays under HOME", () => {
     await writeRepos(box, "version: 1\nrepos:\n  - name: dummy\n    path: ~/dummy\n");
     assert.equal(scan(box, ["--force", "--quiet"]).status, 0);
     box.env.STUB_PICK = "resume:";
-    ccs(box, ["--resume", "--no-scan", `--ui=${look}`]);
+    const res = ccs(box, ["--resume", "--no-scan"]);
+    assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
     if (!(await exists(box.claudeLog))) return null;
     return (await readFile(box.claudeLog, "utf-8")).split("\n")[0];
   }
 
-  for (const look of ["classic", "simple"]) {
-    test(`${look}: control: an ordinary cwd opens there`, async () => {
+  test("control: an ordinary cwd opens there", async () => {
+    const box = await makeBox();
+    try {
+      await mkdir(join(box.home, "work"), { recursive: true });
+      const where = await resumeIn(box, join(box.home, "work"));
+      assert.ok(where?.endsWith("/home/work"), String(where));
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  for (const escape of ["../outside", "dummy/../../outside", "dummy/../.."]) {
+    test(`$HOME/${escape} does not open outside HOME`, async () => {
       const box = await makeBox();
       try {
-        await mkdir(join(box.home, "work"), { recursive: true });
-        const where = await resumeIn(box, join(box.home, "work"), look);
-        assert.ok(where?.endsWith("/home/work"), String(where));
+        await mkdir(join(box.root, "outside"), { recursive: true });
+        const where = await resumeIn(box, `${box.home}/${escape}`);
+        if (where !== null) {
+          const real = spawnSync("pwd", ["-P"], { cwd: box.home, encoding: "utf-8" }).stdout.trim();
+          assert.ok(where === real || where.startsWith(`${real}/`), `opened in ${where}`);
+        }
       } finally {
         await box.cleanup();
       }
     });
-
-    for (const escape of ["../outside", "dummy/../../outside", "dummy/../.."]) {
-      test(`${look}: $HOME/${escape} does not open outside HOME`, async () => {
-        const box = await makeBox();
-        try {
-          await mkdir(join(box.root, "outside"), { recursive: true });
-          const where = await resumeIn(box, `${box.home}/${escape}`, look);
-          if (where !== null) {
-            const real = spawnSync("pwd", ["-P"], { cwd: box.home, encoding: "utf-8" }).stdout.trim();
-            assert.ok(where === real || where.startsWith(`${real}/`), `opened in ${where}`);
-          }
-        } finally {
-          await box.cleanup();
-        }
-      });
-    }
   }
 });
 
@@ -518,13 +522,14 @@ describe("a session's cwd stays under HOME", () => {
 // ---------------------------------------------------------------------------
 
 describe("a wildcard in command is passed as written", () => {
-  async function launch(box: Box, command: string, look: string): Promise<string[] | null> {
+  async function launch(box: Box, command: string): Promise<string[] | null> {
     const repo = join(box.home, "realrepo");
     await mkdir(repo, { recursive: true });
     await writeFile(join(repo, "PLANTED-FILENAME"), "x");
     await writeRepos(box, `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n    command: "${command}"\n`);
     scan(box);
-    ccs(box, ["--new", "--no-scan", `--ui=${look}`]);
+    const res = ccs(box, ["--new", "--no-scan"]);
+    assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
     if (!(await exists(box.claudeLog))) return null;
     return (await readFile(box.claudeLog, "utf-8"))
       .split("\n")
@@ -532,31 +537,29 @@ describe("a wildcard in command is passed as written", () => {
       .map((l) => l.slice("arg:".length));
   }
 
-  for (const look of ["classic", "simple"]) {
-    test(`${look}: control: words still split, as they do today`, async () => {
+  test("control: words still split, as they do today", async () => {
+    const box = await makeBox();
+    try {
+      assert.deepEqual(await launch(box, "claude --model opus"), ["--model", "opus"]);
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  for (const pattern of ["*", "PLANTED*", "?LANTED-FILENAME", "[P]LANTED-FILENAME"]) {
+    test(`claude ${pattern}`, async () => {
       const box = await makeBox();
       try {
-        assert.deepEqual(await launch(box, "claude --model opus", look), ["--model", "opus"]);
+        const args = await launch(box, `claude ${pattern}`);
+        // A fix may also refuse the value when loading it (then nothing opens).
+        if (args !== null) {
+          assert.ok(!args.includes("PLANTED-FILENAME"), `expanded: ${JSON.stringify(args)}`);
+          assert.deepEqual(args, [pattern]);
+        }
       } finally {
         await box.cleanup();
       }
     });
-
-    for (const pattern of ["*", "PLANTED*", "?LANTED-FILENAME", "[P]LANTED-FILENAME"]) {
-      test(`${look}: claude ${pattern}`, async () => {
-        const box = await makeBox();
-        try {
-          const args = await launch(box, `claude ${pattern}`, look);
-          // A fix may also refuse the value when loading it (then nothing opens).
-          if (args !== null) {
-            assert.ok(!args.includes("PLANTED-FILENAME"), `expanded: ${JSON.stringify(args)}`);
-            assert.deepEqual(args, [pattern]);
-          }
-        } finally {
-          await box.cleanup();
-        }
-      });
-    }
   }
 
   test("a resumed session keeps the wildcard too", async () => {
@@ -578,7 +581,8 @@ describe("a wildcard in command is passed as written", () => {
       );
       scan(box, ["--force", "--quiet"]);
       box.env.STUB_PICK = "resume:";
-      ccs(box, ["--resume", "--no-scan", "--ui=classic"]);
+      const res = ccs(box, ["--resume", "--no-scan"]);
+      assert.notEqual(res.status, 2, `ccs took the arguments: ${res.stderr}`);
       if (await exists(box.claudeLog)) {
         const log = await readFile(box.claudeLog, "utf-8");
         assert.ok(!log.includes("PLANTED-FILENAME"), log);
@@ -633,15 +637,14 @@ describe("display fields are clean", () => {
           await mkdir(join(box.home, "realrepo"), { recursive: true });
           await writeRepos(box, `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n${line(value)}\n`);
           scan(box); // a fix may refuse some of these when loading: that is fine
-          for (const ui of ["classic", "simple"]) {
-            assertClean(list(box, ["--repos-only", `--ui=${ui}`]).stdout, `${ui} list`);
-            const p = spawnSync(TSX, [bin("ccs-preview.ts"), "new:realrepo", join(box.home, "realrepo"), `--ui=${ui}`], {
-              encoding: "utf-8",
-              env: box.env,
-              timeout: 120_000,
-            });
-            assertClean(p.stdout, `${ui} preview`);
-          }
+          assertClean(list(box, ["--repos-only"]).stdout, "list");
+          const p = spawnSync(NODE, [bin("ccs-preview.ts"), "new:realrepo", join(box.home, "realrepo")], {
+            encoding: "utf-8",
+            env: box.env,
+            timeout: 120_000,
+          });
+          assert.equal(p.status, 0, p.stderr);
+          assertClean(p.stdout, "card");
         } finally {
           await box.cleanup();
         }
@@ -666,7 +669,7 @@ describe("display fields are clean", () => {
       );
       assert.equal(scan(box, ["--force", "--quiet"]).status, 0);
       assertClean(list(box, ["--sessions-only"]).stdout, "list");
-      const p = spawnSync(TSX, [bin("ccs-preview-session.ts"), id], { encoding: "utf-8", env: box.env, timeout: 120_000 });
+      const p = spawnSync(NODE, [bin("ccs-preview-session.ts"), id], { encoding: "utf-8", env: box.env, timeout: 120_000 });
       assertClean(p.stdout, "preview");
     } finally {
       await box.cleanup();
@@ -702,7 +705,8 @@ describe("ordinary use is not caught by the guards", () => {
     await writeRepos(box, `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n    command: "${command}"\n`);
     Object.assign(box.env, env);
     scan(box);
-    ccs(box, ["--new", "--no-scan", "--ui=classic"]);
+    const res = ccs(box, ["--new", "--no-scan"]);
+    assert.equal(res.status, 0, res.stderr);
     if (!(await exists(box.claudeLog))) return null;
     return (await readFile(box.claudeLog, "utf-8"))
       .split("\n")
@@ -770,7 +774,8 @@ describe("ordinary use is not caught by the guards", () => {
       );
       scan(box, ["--force", "--quiet"]);
       box.env.STUB_PICK = "resume:";
-      ccs(box, ["--resume", "--no-scan", "--ui=classic"]);
+      const res = ccs(box, ["--resume", "--no-scan"]);
+      assert.equal(res.status, 0, res.stderr);
       const log = (await readFile(box.claudeLog, "utf-8")).split("\n");
       assert.ok(log[0].endsWith("/home/realrepo"), log[0]);
       assert.deepEqual(log.slice(1).filter(Boolean), ["arg:--model", "arg:opus", "arg:--resume", `arg:${id}`]);
@@ -799,7 +804,8 @@ describe("ordinary use is not caught by the guards", () => {
         await writeRepos(box, "version: 1\nrepos:\n  - name: dummy\n    path: ~/dummy\n");
         scan(box, ["--force", "--quiet"]);
         box.env.STUB_PICK = "resume:";
-        ccs(box, ["--resume", "--no-scan", "--ui=classic"]);
+        const res = ccs(box, ["--resume", "--no-scan"]);
+        assert.equal(res.status, 0, res.stderr);
         const where = (await readFile(box.claudeLog, "utf-8")).split("\n")[0];
         assert.ok(where.endsWith(`/home/${name}`), where);
       } finally {
@@ -1009,16 +1015,16 @@ describe("the scan lock and the missing native module", () => {
     return join(dir, "bin", "ccs");
   }
 
-  for (const [look, words] of [
-    ["simple", "ソースから作る必要があります"],
-    ["classic", "has to be built from source"],
+  for (const [lang, words] of [
+    ["ja", "ソースから作る必要があります"],
+    ["en", "has to be built from source"],
   ] as const) {
-    test(`${look}: a platform with no prebuilt module says so, and offers no command that would not help`, async () => {
+    test(`${lang}: a platform with no prebuilt module says so, and offers no command that would not help`, async () => {
       const box = await makeBox();
       try {
         await writeRepos(box, "version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n");
         const script = await buildWithScanError(box, "Error: Cannot find module '@example/better-sqlite3-plan9-arm'");
-        const r = spawnSync("bash", [script, `--ui=${look}`], { encoding: "utf-8", env: box.env, cwd: box.home, input: "", timeout: 60_000 });
+        const r = spawnSync("bash", [script], { encoding: "utf-8", env: { ...box.env, CCS_LANG: lang }, cwd: box.home, input: "", timeout: 60_000 });
         const out = r.stdout + r.stderr;
         assert.ok(out.includes(words), out);
         const uname = (flag: string) => spawnSync("uname", [flag], { encoding: "utf-8" }).stdout.trim();
@@ -1028,19 +1034,23 @@ describe("the scan lock and the missing native module", () => {
         await box.cleanup();
       }
     });
-
-    test(`${look}: any other scan error does not mention it`, async () => {
-      const box = await makeBox();
-      try {
-        await writeRepos(box, "version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n");
-        const script = await buildWithScanError(box, "Error: something else");
-        const r = spawnSync("bash", [script, `--ui=${look}`], { encoding: "utf-8", env: box.env, cwd: box.home, input: "", timeout: 60_000 });
-        assert.ok(!(r.stdout + r.stderr).includes("ソースから") && !(r.stdout + r.stderr).includes("built from source"), r.stdout + r.stderr);
-      } finally {
-        await box.cleanup();
-      }
-    });
   }
+
+  test("any other scan error does not mention it", async () => {
+    const box = await makeBox();
+    try {
+      await writeRepos(box, "version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n");
+      const script = await buildWithScanError(box, "Error: something else");
+      for (const lang of ["ja", "en"]) {
+        const r = spawnSync("bash", [script], { encoding: "utf-8", env: { ...box.env, CCS_LANG: lang }, cwd: box.home, input: "", timeout: 60_000 });
+        const out = r.stdout + r.stderr;
+        assert.notEqual(r.status, 2, `${lang}: ${out}`);
+        assert.ok(!out.includes("ソースから") && !out.includes("built from source"), `${lang}: ${out}`);
+      }
+    } finally {
+      await box.cleanup();
+    }
+  });
 });
 
 describe("display fields that are easy to forget", () => {
@@ -1055,13 +1065,12 @@ describe("display fields that are easy to forget", () => {
         `version: 1\nrepos:\n  - name: realrepo\n    path: ~/realrepo\n    custom:\n      note: "a\\e]0;PWNED\\aend"\n      other: "a\\u202Eend"\n`,
       );
       scan(box);
-      for (const ui of ["classic", "simple"]) {
-        const p = spawnSync(TSX, [bin("ccs-preview.ts"), "new:realrepo", join(box.home, "realrepo"), `--ui=${ui}`], {
-          encoding: "utf-8",
-          env: box.env,
-        });
-        assert.ok(!LEFT.test(p.stdout), `${ui}: ${JSON.stringify(p.stdout)}`);
-      }
+      const p = spawnSync(NODE, [bin("ccs-preview.ts"), "new:realrepo", join(box.home, "realrepo")], {
+        encoding: "utf-8",
+        env: box.env,
+      });
+      assert.equal(p.status, 0, p.stderr);
+      assert.ok(!LEFT.test(p.stdout), JSON.stringify(p.stdout));
     } finally {
       await box.cleanup();
     }
@@ -1076,13 +1085,12 @@ describe("display fields that are easy to forget", () => {
         `version: 1\nrepos:\n  - name: team\n    path: ~/team\n    launch: false\n    description: "d\\e]0;PWNED\\aend"\n  - name: team-app\n    path: ~/team/app\n    label: "a\\u202Eend"\n    description: "x\\u0085y"\n`,
       );
       scan(box);
-      for (const ui of ["classic", "simple"]) {
-        const p = spawnSync(TSX, [bin("ccs-preview.ts"), "group:team", join(box.home, "team"), `--ui=${ui}`], {
-          encoding: "utf-8",
-          env: box.env,
-        });
-        assert.ok(!LEFT.test(p.stdout), `${ui}: ${JSON.stringify(p.stdout)}`);
-      }
+      const p = spawnSync(NODE, [bin("ccs-preview.ts"), "group:team", join(box.home, "team")], {
+        encoding: "utf-8",
+        env: box.env,
+      });
+      assert.equal(p.status, 0, p.stderr);
+      assert.ok(!LEFT.test(p.stdout), JSON.stringify(p.stdout));
     } finally {
       await box.cleanup();
     }
@@ -1124,13 +1132,15 @@ describe("the Node version that ccs needs", () => {
   test("package.json, the lockfile, the README and install.sh agree", async () => {
     const pkg = JSON.parse(await readFile(root("package.json"), "utf-8"));
     const lock = JSON.parse(await readFile(root("package-lock.json"), "utf-8"));
-    assert.equal(pkg.engines.node, ">=22");
-    assert.equal(lock.packages[""].engines.node, ">=22");
+    assert.equal(pkg.engines.node, ">=24.12.0");
+    assert.equal(lock.packages[""].engines.node, ">=24.12.0");
     const readme = await readFile(root("README.md"), "utf-8");
-    assert.ok(readme.includes("**22+**"), "README prerequisites");
-    assert.ok(readme.includes("node-%3E%3D22"), "README badge");
-    assert.ok(!/\*\*20\+\*\*|node-%3E%3D20/.test(readme), "README still says 20");
-    assert.ok((await readFile(root("install.sh"), "utf-8")).includes("NODE_MAJOR >= 22"));
+    assert.ok(readme.includes("**24.12+**"), "README prerequisites");
+    assert.ok(readme.includes("node-%3E%3D24.12"), "README badge");
+    assert.ok(!/\*\*2[02]\+\*\*|node-%3E%3D2[02]\b/.test(readme), "README still says 20 or 22");
+    const install = await readFile(root("install.sh"), "utf-8");
+    assert.ok(install.includes("node >= 24.12.0 (found v${NODE_VER})"), "install.sh names the version it needs");
+    assert.ok(!/NODE_MAJOR|node >= 2[02]\b/.test(install), "install.sh still checks 20 or 22");
   });
 
   test("the README's install commands need no extra flag", async () => {
@@ -1139,24 +1149,28 @@ describe("the Node version that ccs needs", () => {
     assert.ok(readme.includes("npm install -g @indigo-gr/claude-code-station"));
   });
 
+  // The boundary from both sides: 24.11.1 below it, 24.12.0 on it.
   for (const [version, refused] of [
     ["v21.7.3", true],
-    ["v22.0.0", false],
-    ["v24.22.1", false],
+    ["v22.22.0", true],
+    ["v24.11.1", true],
+    ["v24.12.0", false],
+    ["v26.1.0", false],
   ] as const) {
     test(`install.sh with Node ${version}: ${refused ? "named as missing" : "accepted"}`, async () => {
       const box = await makeBox();
       try {
-        const major = version.slice(1).split(".")[0];
+        // Answers -v and -p 'process.versions.node' as that Node would.
         await writeFile(
           join(box.root, "stub", "node"),
-          `#!/usr/bin/env bash\nif [[ "$1" == "-v" ]]; then echo ${version}; else echo ${major}; fi\n`,
+          `#!/usr/bin/env bash\ncase "$1" in\n  -v|--version) echo ${version} ;;\n  -p) echo ${version.slice(1)} ;;\n  *) exit 0 ;;\nesac\n`,
           { mode: 0o755 },
         );
         // No input: install.sh asks before going on with something missing, and stops.
         const r = spawnSync("bash", [root("install.sh")], { encoding: "utf-8", env: box.env, cwd: box.home, input: "", timeout: 60_000 });
         const out = r.stdout + r.stderr;
-        assert.equal(out.includes(`node >= 22 (found ${version})`), refused, out);
+        assert.equal(out.includes(`node >= 24.12.0 (found ${version})`), refused, out);
+        assert.equal(out.includes("node >= 24.12.0"), refused, out);
       } finally {
         await box.cleanup();
       }

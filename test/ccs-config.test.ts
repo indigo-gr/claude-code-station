@@ -20,6 +20,14 @@ import { mkdtemp, rm, writeFile, mkdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// The messages checked in this file are the English ones. Pin the language
+// of this process (and of what it starts) so the shell's locale or a
+// CCS_LANG left in it cannot change them; a test that wants Japanese sets
+// CCS_LANG_RESOLVED itself.
+for (const k of ["CCS_LANG", "LC_ALL", "LC_MESSAGES"]) delete process.env[k];
+process.env.LANG = "en_US.UTF-8";
+process.env.CCS_LANG_RESOLVED = "en";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1019,36 +1027,78 @@ describe("loadConfig() — defaults.ui", () => {
   }
   const repos = (home: string) => `repos:\n  - name: a\n    path: ${home}\n`;
 
-  test("absent (or no defaults block at all) means classic", async () => {
-    await withYml((h) => `version: 1\n${repos(h)}`, ({ loadConfig }) => {
-      assert.equal(loadConfig().defaults.ui, "classic");
-    });
-    await withYml((h) => `version: 1\ndefaults:\n  command: claude\n${repos(h)}`, ({ loadConfig }) => {
-      assert.equal(loadConfig().defaults.ui, "classic");
-    });
-  });
+  const CLASSIC_DROPPED =
+    "[ccs] defaults.ui: classic was removed in v0.6.0; ccs opens the simple look (ignored)";
+  // Collects the loader's warnings instead of printing them.
+  type Mod = Awaited<ReturnType<typeof freshImport>>;
+  const loadWith = (loadConfig: Mod["loadConfig"]) => {
+    const warnings: Parameters<NonNullable<Parameters<Mod["loadConfig"]>[0]>["sink"] & {}>[0][] = [];
+    const cfg = loadConfig({ sink: (w) => warnings.push(w) });
+    return { cfg, warnings };
+  };
 
-  test("simple and classic are accepted", async () => {
-    for (const ui of ["simple", "classic"]) {
-      await withYml((h) => `version: 1\ndefaults:\n  ui: ${ui}\n${repos(h)}`, ({ loadConfig }) => {
-        assert.equal(loadConfig().defaults.ui, ui);
+  test("absent, null (or no defaults block at all) means simple, silently", async () => {
+    for (const block of ["", "defaults:\n  command: claude\n", "defaults:\n  ui:\n", "defaults:\n  ui: null\n"]) {
+      await withYml((h) => `version: 1\n${block}${repos(h)}`, ({ loadConfig }) => {
+        const { cfg, warnings } = loadWith(loadConfig);
+        assert.deepEqual(cfg.defaults, { command: "claude", ui: "simple" }, JSON.stringify(block));
+        assert.deepEqual(warnings, [], JSON.stringify(block));
       });
     }
   });
 
+  test("simple is read silently; classic opens the simple look with one warning", async () => {
+    await withYml((h) => `version: 1\ndefaults:\n  ui: simple\n${repos(h)}`, ({ loadConfig }) => {
+      const { cfg, warnings } = loadWith(loadConfig);
+      assert.deepEqual(cfg.defaults, { command: "claude", ui: "simple" });
+      assert.deepEqual(warnings, []);
+    });
+    await withYml((h) => `version: 1\ndefaults:\n  ui: classic\n${repos(h)}`, ({ loadConfig }) => {
+      const { cfg, warnings } = loadWith(loadConfig);
+      assert.deepEqual(cfg.defaults, { command: "claude", ui: "simple" });
+      assert.deepEqual(warnings, [{ code: "ui_classic_dropped", message: CLASSIC_DROPPED }]);
+    });
+  });
+
+  test("classic: the launcher's load prints the one line on stderr", async () => {
+    await withYml((h) => `version: 1\ndefaults:\n  ui: classic\n${repos(h)}`, ({ loadConfig }) => {
+      const printed: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => void printed.push(args.map(String).join(" "));
+      try {
+        assert.equal(loadConfig().defaults.ui, "simple");
+      } finally {
+        console.warn = original;
+      }
+      assert.deepEqual(printed, [CLASSIC_DROPPED]);
+    });
+  });
+
   test("any other value fails loudly instead of falling back", async () => {
-    for (const bad of ["Simple", "friendly", "true", "[simple]"]) {
-      await withYml((h) => `version: 1\ndefaults:\n  ui: ${bad}\n${repos(h)}`, ({ loadConfig, ConfigError }) => {
-        assert.throws(() => loadConfig(), (e: unknown) => {
+    const cases: [string, string][] = [
+      ["Simple", '"Simple"'],
+      ["Classic", '"Classic"'],
+      ["fancy", '"fancy"'],
+      ["friendly", '"friendly"'],
+      ["true", "true"],
+      ["[simple]", '["simple"]'],
+    ];
+    for (const [bad, shown] of cases) {
+      await withYml((h) => `version: 1\ndefaults:\n  ui: ${bad}\n${repos(h)}`, ({ loadConfig, ConfigError, getPaths }) => {
+        assert.throws(() => loadConfig({ sink: () => {} }), (e: unknown) => {
           assert.ok(e instanceof ConfigError);
-          assert.match((e as Error).message, /defaults\.ui must be one of classic \/ simple/);
+          assert.equal(
+            (e as Error).message,
+            `${getPaths().reposYml}: defaults.ui must be simple (got ${shown})`,
+          );
+          assert.equal((e as InstanceType<typeof ConfigError>).code, "defaults_invalid");
           return true;
         });
       });
     }
   });
 
-  test("the first-run template mentions the setting, commented out", async () => {
+  test("the first-run template has no ui line (one look only)", async () => {
     const sb = await makeSandbox();
     const restore = applyEnv({
       HOME: sb.home,
@@ -1060,11 +1110,88 @@ describe("loadConfig() — defaults.ui", () => {
       ensureConfigDir();
       const { readFile } = await import("node:fs/promises");
       const tpl = await readFile(sb.reposYml, "utf-8");
-      assert.match(tpl, /^ {2}# ui: simple/m);
+      assert.ok(tpl.length > 0, "the template was written");
+      // Neither as a key nor as a commented-out hint: there is nothing to pick.
+      assert.doesNotMatch(tpl, /^\s*#?\s*ui\s*:/m);
+      assert.doesNotMatch(tpl, /\bclassic\b/);
     } finally {
       restore();
       await sb.cleanup();
     }
+  });
+});
+
+describe("loadConfig() — defaults.language", () => {
+  type Mod = Awaited<ReturnType<typeof freshImport>>;
+  async function load(block: string, lang: "ja" | "en" = "en") {
+    const sb = await makeSandbox();
+    const restore = applyEnv({
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdgConfig,
+      XDG_CACHE_HOME: sb.xdgCache,
+      CCS_LANG_RESOLVED: lang,
+    });
+    try {
+      await writeYml(sb.reposYml, `version: 1\n${block}repos:\n  - name: a\n    path: ${sb.home}\n`);
+      const { loadConfig } = (await freshImport()) as Mod;
+      const warnings: { code: string; message: string }[] = [];
+      const cfg = loadConfig({ sink: (w) => warnings.push(w) });
+      return { cfg, warnings };
+    } finally {
+      restore();
+      await sb.cleanup();
+    }
+  }
+
+  test("auto, ja and en are read as written; absent, empty and null mean auto, silently", async () => {
+    for (const [block, want] of [
+      ["", "auto"],
+      ["defaults:\n  command: claude\n", "auto"],
+      ["defaults:\n  language:\n", "auto"],
+      ["defaults:\n  language: null\n", "auto"],
+      ['defaults:\n  language: ""\n', "auto"],
+      ["defaults:\n  language: auto\n", "auto"],
+      ["defaults:\n  language: ja\n", "ja"],
+      ['defaults:\n  language: "en"\n', "en"],
+    ] as const) {
+      const { cfg, warnings } = await load(block);
+      assert.equal(cfg.settings.language, want, JSON.stringify(block));
+      assert.deepEqual(warnings, [], JSON.stringify(block));
+      // The contract's defaults stay as they were.
+      assert.deepEqual(cfg.defaults, { command: "claude", ui: "simple" });
+    }
+  });
+
+  test("an unknown value is one warning (language_unknown) and reads as auto, never an error", async () => {
+    for (const [value, shown] of [
+      ["fr", '"fr"'],
+      ["JA", '"JA"'],
+      ["japanese", '"japanese"'],
+      ["1", "1"],
+      ["[ja]", '["ja"]'],
+    ] as const) {
+      const { cfg, warnings } = await load(`defaults:\n  language: ${value}\n`);
+      assert.equal(cfg.settings.language, "auto", value);
+      assert.deepEqual(
+        warnings,
+        [
+          {
+            code: "language_unknown",
+            message: `[ccs] defaults.language: ${shown} is not a language ccs knows (auto, ja, en); ignored`,
+          },
+        ],
+        value,
+      );
+    }
+  });
+
+  test("the warning is in the run's language", async () => {
+    const { warnings } = await load("defaults:\n  language: fr\n", "ja");
+    assert.deepEqual(warnings.map((w) => w.code), ["language_unknown"]);
+    assert.equal(
+      warnings[0].message,
+      '[ccs] defaults.language: "fr" は ccs の知らない言語です（auto・ja・en）。使わずに続けます',
+    );
   });
 });
 

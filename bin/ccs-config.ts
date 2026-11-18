@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 
 import { SHELL_METACHARS } from "./ccs-sanitize.ts";
-import { isUiMode, UI_MODES, type UiMode } from "./ccs-utils.ts";
+import { isLanguageSetting, t, type LanguageSetting } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,7 +39,7 @@ export interface RepoEntry {
   launch: boolean;
   /** Display name for the NEW row / preview ("" = show `name`). */
   label: string;
-  /** true = the group's lead: listed first among its siblings (👑 in ui: simple). */
+  /** true = the group's lead: listed first among its siblings (👑 in the list). */
   lead: boolean;
   custom: Record<string, unknown>;
   configHash: string;
@@ -59,14 +59,16 @@ export function isTerminalApp(v: unknown): v is TerminalApp {
 
 export interface CcsConfig {
   version: 1;
-  /** ui: list/preview look — "classic" (default) or "simple" (friendly, Japanese). */
-  defaults: { command: string; ui: UiMode };
+  /** ui: the list's look — always "simple" since v0.6.0 (the key stays for readers). */
+  defaults: { command: string; ui: "simple" };
   /** The other `defaults.*` keys (kept apart so `defaults` stays as the contract tests pin it). */
   settings: {
     /** defaults.terminal: the app `ccs open --new-window` opens; null = not chosen. */
     terminal: TerminalApp | null;
     /** defaults.update_check: false stops the update check like CCS_NO_UPDATE_CHECK. */
     updateCheck: boolean;
+    /** defaults.language as written (auto = not set; an unknown value reads as auto, with a warning). */
+    language: LanguageSetting;
     /** defaults.groups_dir, `~` expanded and resolved; null = off. */
     groupsDir: string | null;
   };
@@ -124,7 +126,7 @@ export class ConfigError extends Error {
  * (the message names paths and repos).
  */
 export interface ConfigWarning {
-  code: "unknown_key" | "path_missing";
+  code: "unknown_key" | "path_missing" | "ui_classic_dropped" | "language_unknown";
   message: string;
 }
 
@@ -161,7 +163,6 @@ version: 1
 
 defaults:
   command: "claude"
-  # ui: simple   # friendlier full-screen look (Japanese text, needs fzf 0.61+)
 
 repos:
   - name: Example Project
@@ -247,7 +248,7 @@ function rejectShellMetachars(
 ): void {
   if (SHELL_METACHARS.test(value)) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${idx}].${field} contains shell metacharacter(s): ${JSON.stringify(value)}`,
+      t("cfg_metachars", { file: reposYmlPath, where: `repos[${idx}].${field}`, got: JSON.stringify(value) }),
       field === "command" ? "command_unsafe" : "path_unsafe",
       idx,
     );
@@ -338,7 +339,7 @@ function readBoolean(
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}].${key} must be true or false (got ${JSON.stringify(value)})`,
+      t("cfg_must_be_bool", { file: reposYmlPath, where: `repos[${index}].${key}`, got: JSON.stringify(value) }),
       "entry_invalid",
       index,
     );
@@ -356,7 +357,7 @@ function warnUnknownKeys(
     if (!known.has(key)) {
       sink({
         code: "unknown_key",
-        message: `[ccs] unknown key "${key}" in ${context} (ignored)`,
+        message: t("cfg_unknown_key", { key, where: context }),
       });
     }
   }
@@ -381,7 +382,7 @@ function envCommand(): string | undefined {
   if (process.env.CCR_CMD) {
     if (!migrationWarned) {
       console.warn(
-        "[ccs] CCR_CMD is deprecated, please rename to CCS_CMD (using CCR_CMD value for now)",
+        t("ccr_cmd_deprecated"),
       );
       migrationWarned = true;
     }
@@ -403,7 +404,7 @@ function resolveRepoEntry(
 ): RepoEntry {
   if (!isPlainObject(raw)) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}] must be an object`,
+      t("cfg_must_be_object", { file: reposYmlPath, where: `repos[${index}]` }),
       "entry_invalid",
       index,
     );
@@ -413,7 +414,7 @@ function resolveRepoEntry(
   const name = raw.name;
   if (typeof name !== "string" || name.length === 0) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}].name is required and must be a non-empty string`,
+      t("cfg_name_required", { file: reposYmlPath, where: `repos[${index}].name` }),
       "entry_invalid",
       index,
     );
@@ -423,7 +424,7 @@ function resolveRepoEntry(
   // metacharacters and control chars (incl. ESC) are rejected outright.
   if (SHELL_METACHARS.test(name)) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}].name contains shell metacharacter(s) or control char(s): ${JSON.stringify(name)}`,
+      t("cfg_name_unsafe", { file: reposYmlPath, where: `repos[${index}].name`, got: JSON.stringify(name) }),
       "name_unsafe",
       index,
     );
@@ -439,7 +440,7 @@ function resolveRepoEntry(
   // it would have nothing under it (command/cwd, by contrast, go unused).
   if (!launch && raw.path === undefined) {
     throw new ConfigError(
-      `${reposYmlPath}: repos[${index}].path is required when launch is false`,
+      t("cfg_path_required_group", { file: reposYmlPath, where: `repos[${index}].path` }),
       "entry_invalid",
       index,
     );
@@ -450,7 +451,7 @@ function resolveRepoEntry(
   if (raw.path !== undefined) {
     if (typeof raw.path !== "string") {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].path must be a string`,
+        t("cfg_must_be_string", { file: reposYmlPath, where: `repos[${index}].path` }),
         "entry_invalid",
         index,
       );
@@ -458,7 +459,7 @@ function resolveRepoEntry(
     resolvedPath = resolve(expandPath(raw.path));
     if (!isUnderHome(resolvedPath)) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].path "${raw.path}" is outside $HOME (security)`,
+        t("cfg_outside_home", { file: reposYmlPath, where: `repos[${index}].path`, path: String(raw.path) }),
         "path_outside_home",
         index,
       );
@@ -467,7 +468,7 @@ function resolveRepoEntry(
     if (!disabled && !existsSync(resolvedPath)) {
       sink({
         code: "path_missing",
-        message: `[ccs] path not found: ${raw.path} (repos[${index}] "${name}") — set disabled: true to silence`,
+        message: t("cfg_path_missing", { path: String(raw.path), where: `repos[${index}]`, name }),
       });
     }
   }
@@ -477,7 +478,7 @@ function resolveRepoEntry(
   if (raw.cwd !== undefined) {
     if (typeof raw.cwd !== "string") {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].cwd must be a string`,
+        t("cfg_must_be_string", { file: reposYmlPath, where: `repos[${index}].cwd` }),
         "entry_invalid",
         index,
       );
@@ -485,7 +486,7 @@ function resolveRepoEntry(
     resolvedCwd = resolve(expandPath(raw.cwd));
     if (!isUnderHome(resolvedCwd)) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].cwd "${raw.cwd}" is outside $HOME (security)`,
+        t("cfg_outside_home", { file: reposYmlPath, where: `repos[${index}].cwd`, path: String(raw.cwd) }),
         "path_outside_home",
         index,
       );
@@ -498,7 +499,7 @@ function resolveRepoEntry(
   if (raw.command !== undefined) {
     if (typeof raw.command !== "string") {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].command must be a string`,
+        t("cfg_must_be_string", { file: reposYmlPath, where: `repos[${index}].command` }),
         "entry_invalid",
         index,
       );
@@ -530,7 +531,7 @@ function resolveRepoEntry(
   if (raw.label !== undefined && raw.label !== null) {
     if (typeof raw.label !== "string") {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].label must be a string`,
+        t("cfg_must_be_string", { file: reposYmlPath, where: `repos[${index}].label` }),
         "entry_invalid",
         index,
       );
@@ -539,7 +540,7 @@ function resolveRepoEntry(
   }
 
   // lead — the entry that leads its group (a director, a coordinator): listed
-  // first among its siblings, and marked 👑 in the simple look.
+  // first among its siblings, and marked 👑 in the list.
   const lead = readBoolean(raw, "lead", false, index, reposYmlPath);
 
   // tags
@@ -547,7 +548,7 @@ function resolveRepoEntry(
   if (raw.tags !== undefined) {
     if (!Array.isArray(raw.tags) || !raw.tags.every((t) => typeof t === "string")) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].tags must be an array of strings`,
+        t("cfg_tags", { file: reposYmlPath, where: `repos[${index}].tags` }),
         "entry_invalid",
         index,
       );
@@ -567,7 +568,7 @@ function resolveRepoEntry(
   if (raw.custom !== undefined) {
     if (!isPlainObject(raw.custom)) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].custom must be an object`,
+        t("cfg_must_be_object", { file: reposYmlPath, where: `repos[${index}].custom` }),
         "entry_invalid",
         index,
       );
@@ -577,7 +578,7 @@ function resolveRepoEntry(
     const customJson = JSON.stringify(raw.custom);
     if (customJson.length > 64_000) {
       throw new ConfigError(
-        `${reposYmlPath}: repos[${index}].custom exceeds the 64KB limit (measured as 64,000 characters of JSON; got ${customJson.length})`,
+        t("cfg_custom_too_large", { file: reposYmlPath, where: `repos[${index}].custom`, got: customJson.length }),
         "custom_too_large",
         index,
       );
@@ -634,7 +635,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): CcsConfig {
     source = readFileSync(paths.reposYml, "utf-8");
   } catch (err) {
     throw new ConfigError(
-      `${paths.reposYml}: cannot read config file (${(err as Error).message})`,
+      t("cfg_unreadable", { file: paths.reposYml, reason: (err as Error).message }),
       "config_not_readable",
     );
   }
@@ -665,7 +666,7 @@ export function readConfig(): ReadConfigResult {
     source = readFileSync(paths.reposYml, "utf-8");
   } catch (err) {
     throw new ConfigError(
-      `${paths.reposYml}: cannot read config file (${(err as Error).message})`,
+      t("cfg_unreadable", { file: paths.reposYml, reason: (err as Error).message }),
       "config_not_readable",
     );
   }
@@ -694,14 +695,14 @@ export function parseConfigSource(
     parsed = yamlWarnings ? parseYaml(source) : parseYaml(source, { logLevel: "error" });
   } catch (err) {
     throw new ConfigError(
-      `${paths.reposYml}: YAML parse error: ${(err as Error).message}`,
+      t("cfg_yaml_error", { file: paths.reposYml, reason: (err as Error).message }),
       "yaml_parse_error",
     );
   }
 
   if (!isPlainObject(parsed)) {
     throw new ConfigError(
-      `${paths.reposYml}: top-level must be a mapping/object`,
+      t("cfg_top_not_object", { file: paths.reposYml }),
       "not_a_mapping",
     );
   }
@@ -713,7 +714,7 @@ export function parseConfigSource(
     parsed.repos.forEach((entry, i) => {
       if (containsItself(entry)) {
         throw new ConfigError(
-          `${paths.reposYml}: repos[${i}] has a value that refers to itself (a YAML anchor used inside itself)`,
+          t("cfg_self_reference", { file: paths.reposYml, where: `repos[${i}]` }),
           "entry_invalid",
           i,
         );
@@ -722,7 +723,7 @@ export function parseConfigSource(
   }
   if (containsItself(parsed)) {
     throw new ConfigError(
-      `${paths.reposYml}: a value refers to itself (a YAML anchor used inside itself)`,
+      t("cfg_self_reference_file", { file: paths.reposYml }),
       "yaml_parse_error",
     );
   }
@@ -732,21 +733,21 @@ export function parseConfigSource(
   // version
   if (parsed.version !== 1) {
     throw new ConfigError(
-      `${paths.reposYml}: unsupported version: ${String(parsed.version)}, only 1 is supported`,
+      t("cfg_version", { file: paths.reposYml, got: String(parsed.version) }),
       "unsupported_version",
     );
   }
 
   // defaults
   let defaultsCommand: string | undefined;
-  let defaultsUi: UiMode = "classic";
   let defaultsTerminal: TerminalApp | null = null;
   let defaultsUpdateCheck = true;
+  let defaultsLanguage: LanguageSetting = "auto";
   let defaultsGroupsDir: string | null = null;
   if (parsed.defaults !== undefined) {
     if (!isPlainObject(parsed.defaults)) {
       throw new ConfigError(
-        `${paths.reposYml}: defaults must be an object`,
+        t("cfg_must_be_object", { file: paths.reposYml, where: "defaults" }),
         "defaults_invalid",
       );
     }
@@ -754,40 +755,60 @@ export function parseConfigSource(
     if (defaults.command !== undefined) {
       if (typeof defaults.command !== "string") {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.command must be a string`,
+          t("cfg_must_be_string", { file: paths.reposYml, where: "defaults.command" }),
           "defaults_invalid",
         );
       }
       defaultsCommand = defaults.command;
     }
-    // ui — display only (never reaches a shell line), but bin/ccs picks its
-    // fzf flags from it, so only the known values pass; a typo fails loudly
-    // instead of silently falling back to the classic look.
-    if (defaults.ui !== undefined && defaults.ui !== null) {
-      if (!isUiMode(defaults.ui)) {
+    // ui — one look since v0.6.0. The key stays (repos.yml version 1 keeps
+    // its keys and their meaning): simple or empty is read without a word,
+    // classic gets one warning and opens the simple look, anything else is
+    // still an error.
+    if (defaults.ui !== undefined && defaults.ui !== null && defaults.ui !== "simple") {
+      if (defaults.ui !== "classic") {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.ui must be one of ${UI_MODES.join(" / ")} (got ${JSON.stringify(defaults.ui)})`,
+          t("cfg_ui_value", { file: paths.reposYml, got: JSON.stringify(defaults.ui) }),
           "defaults_invalid",
         );
       }
-      defaultsUi = defaults.ui;
+      sink({
+        code: "ui_classic_dropped",
+        message: t("cfg_ui_classic"),
+      });
     }
     // terminal — `ccs open --new-window` picks its app from this list only.
     if (defaults.terminal !== undefined && defaults.terminal !== null) {
       if (!isTerminalApp(defaults.terminal)) {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.terminal must be one of ${TERMINAL_APPS.join(" / ")} (got ${JSON.stringify(defaults.terminal)})`,
+          t("cfg_one_of", { file: paths.reposYml, where: "defaults.terminal", allowed: TERMINAL_APPS.join(" / "), got: JSON.stringify(defaults.terminal) }),
           "defaults_invalid",
         );
       }
       defaultsTerminal = defaults.terminal;
+    }
+    // language — the language of ccs's own text (docs/design/i18n.md). An
+    // unknown value is skipped with one warning, never an error: a typo here
+    // must not keep the list from opening. bin/ccs reads the same line itself
+    // (no Node at start) and skips such a value too.
+    if (defaults.language !== undefined && defaults.language !== null && defaults.language !== "") {
+      if (isLanguageSetting(defaults.language)) {
+        defaultsLanguage = defaults.language;
+      } else {
+        sink({
+          code: "language_unknown",
+          message: t("cfg_language_unknown", {
+            got: String(JSON.stringify(defaults.language)).slice(0, 40),
+          }),
+        });
+      }
     }
     // update_check — true or false only, as strict as the entry flags: a
     // quoted "false" must not silently leave the check on.
     if (defaults.update_check !== undefined && defaults.update_check !== null) {
       if (typeof defaults.update_check !== "boolean") {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.update_check must be true or false (got ${JSON.stringify(defaults.update_check)})`,
+          t("cfg_must_be_bool", { file: paths.reposYml, where: "defaults.update_check", got: JSON.stringify(defaults.update_check) }),
           "defaults_invalid",
         );
       }
@@ -799,20 +820,20 @@ export function parseConfigSource(
     if (defaults.groups_dir !== undefined && defaults.groups_dir !== null) {
       if (typeof defaults.groups_dir !== "string" || defaults.groups_dir === "") {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.groups_dir must be a folder path`,
+          t("cfg_groups_dir", { file: paths.reposYml }),
           "defaults_invalid",
         );
       }
       const dir = resolve(expandPath(defaults.groups_dir));
       if (!isUnderHome(dir)) {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.groups_dir "${defaults.groups_dir}" is outside $HOME (security)`,
+          t("cfg_outside_home", { file: paths.reposYml, where: "defaults.groups_dir", path: String(defaults.groups_dir) }),
           "path_outside_home",
         );
       }
       if (SHELL_METACHARS.test(dir)) {
         throw new ConfigError(
-          `${paths.reposYml}: defaults.groups_dir contains shell metacharacter(s): ${JSON.stringify(defaults.groups_dir)}`,
+          t("cfg_metachars", { file: paths.reposYml, where: "defaults.groups_dir", got: JSON.stringify(defaults.groups_dir) }),
           "path_unsafe",
         );
       }
@@ -829,7 +850,7 @@ export function parseConfigSource(
   // repo currently inherits it. resolveRepoEntry re-checks as defense in depth.
   if (SHELL_METACHARS.test(resolvedDefaultsCommand)) {
     throw new ConfigError(
-      `${paths.reposYml}: defaults.command (resolved from defaults.command / CCS_CMD / CCR_CMD) contains shell metacharacter(s): ${JSON.stringify(resolvedDefaultsCommand)}`,
+      t("cfg_metachars", { file: paths.reposYml, where: "defaults.command / CCS_CMD / CCR_CMD", got: JSON.stringify(resolvedDefaultsCommand) }),
       "command_unsafe",
     );
   }
@@ -837,7 +858,7 @@ export function parseConfigSource(
   // repos
   if (!Array.isArray(parsed.repos) || parsed.repos.length === 0) {
     throw new ConfigError(
-      `${paths.reposYml}: repos must be a non-empty array`,
+      t("cfg_repos_empty", { file: paths.reposYml }),
       "repos_empty",
     );
   }
@@ -866,7 +887,7 @@ export function parseConfigSource(
   }
   if (dupes.length > 0) {
     throw new ConfigError(
-      `${paths.reposYml}: duplicate name ${dupes.join("; ")}`,
+      t("cfg_duplicate_name", { file: paths.reposYml, names: dupes.join("; ") }),
       "duplicate_name",
       firstDupeIndex,
     );
@@ -874,10 +895,11 @@ export function parseConfigSource(
 
   return {
     version: 1,
-    defaults: { command: resolvedDefaultsCommand, ui: defaultsUi },
+    defaults: { command: resolvedDefaultsCommand, ui: "simple" },
     settings: {
       terminal: defaultsTerminal,
       updateCheck: defaultsUpdateCheck,
+      language: defaultsLanguage,
       groupsDir: defaultsGroupsDir,
     },
     repos,

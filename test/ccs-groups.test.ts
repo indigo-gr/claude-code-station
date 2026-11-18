@@ -129,8 +129,10 @@ interface Result {
 }
 
 function run(box: Box, args: string[], extra: Record<string, string> = {}): Result {
+  // The language is fixed here, never taken from the shell that runs the tests.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    LANG: "en_US.UTF-8",
     PATH: `${box.stubBin}:${process.env.PATH ?? ""}`,
     HOME: box.home,
     XDG_CONFIG_HOME: join(box.home, ".config"),
@@ -140,9 +142,9 @@ function run(box: Box, args: string[], extra: Record<string, string> = {}): Resu
     CCS_NO_UPDATE_CHECK: "1",
     FAKE_FZF_ROWS: box.fzfRows,
     FAKE_CLAUDE_LOG: box.claudeLog,
-    ...extra,
   };
-  for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI"]) delete env[k];
+  for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI", "CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  Object.assign(env, extra);
   const res = spawnSync("bash", [CCS_BIN, ...args], { encoding: "utf-8", env, cwd: box.root, stdio: ["ignore", "pipe", "pipe"] });
   return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
@@ -155,9 +157,9 @@ interface Row {
 }
 
 /** Opens the picker (the stub leaves at once) and gives the rows it was offered. */
-async function rows(box: Box, look: "classic" | "simple", extra: string[] = []): Promise<Row[]> {
+async function rows(box: Box, extra: string[] = []): Promise<Row[]> {
   await rm(box.fzfRows, { force: true });
-  const res = run(box, [`--ui=${look}`, ...extra]);
+  const res = run(box, extra);
   assert.equal(res.code, 0, res.stdout + res.stderr);
   return (await readFile(box.fzfRows, "utf-8"))
     .split("\n")
@@ -240,11 +242,9 @@ describe("defaults.groups_dir: off unless set", () => {
     const box = await makeBox(WITHOUT);
     try {
       await define(box, "review.json", REVIEW);
-      for (const look of ["classic", "simple"] as const) {
-        const got = await rows(box, look);
-        assert.deepEqual(got, await rows(plain, look), `${look}: the same rows as with no definition files`);
-        assert.ok(!keys(got).some((k) => k.startsWith("group:@")), look);
-      }
+      const got = await rows(box);
+      assert.deepEqual(got, await rows(plain), "the same rows as with no definition files");
+      assert.ok(!keys(got).some((k) => k.startsWith("group:@")));
       assert.deepEqual(listJson(box).groups, []);
       const d = groupsCheck(box);
       assert.deepEqual([d.code, d.check.status, d.check.code], [0, "skipped", "not_set"]);
@@ -278,37 +278,35 @@ describe("defaults.groups_dir: off unless set", () => {
 });
 
 describe("defaults.groups_dir: a logical group in the picker", () => {
-  for (const look of ["classic", "simple"] as const) {
-    test(`${look}: a heading that launches nothing, its members under it in the file's order`, async () => {
-      const box = await makeBox(withGroups());
-      try {
-        await define(box, "review.json", REVIEW);
-        const got = await rows(box, look);
-        const heading = got.find((r) => r.key === "group:@design-review");
-        assert.ok(heading?.text.includes("Design review"), `the heading shows the file's label: ${heading?.text}`);
-        const members = under(got, "group:@design-review");
-        // members[] order (tools, web), not the order of repos.yml (web, …, tools).
-        assert.deepEqual(keys(members), ["new:tools", "new:web"]);
-        // Shown as repos.yml names them.
-        assert.ok(members[1].text.includes("Web front") && members[1].text.includes("W"), members[1].text);
-        // Each project is still in its own place too, and the header by path is as before.
-        const outside = keys(got.filter((r) => !members.includes(r)));
-        for (const k of ["new:web", "new:api", "new:tools", "new:hq", "group:studio"]) assert.ok(outside.includes(k), `${k} keeps its own row`);
-      } finally {
-        await box.cleanup();
-      }
-    });
-  }
+  test("a heading that launches nothing, its members under it in the file's order", async () => {
+    const box = await makeBox(withGroups());
+    try {
+      await define(box, "review.json", REVIEW);
+      const got = await rows(box);
+      const heading = got.find((r) => r.key === "group:@design-review");
+      assert.ok(heading?.text.includes("Design review"), `the heading shows the file's label: ${heading?.text}`);
+      const members = under(got, "group:@design-review");
+      // members[] order (tools, web), not the order of repos.yml (web, …, tools).
+      assert.deepEqual(keys(members), ["new:tools", "new:web"]);
+      // Shown as repos.yml names them.
+      assert.ok(members[1].text.includes("Web front") && members[1].text.includes("W"), members[1].text);
+      // Each project is still in its own place too, and the header by path is as before.
+      const outside = keys(got.filter((r) => !members.includes(r)));
+      for (const k of ["new:web", "new:api", "new:tools", "new:hq", "group:studio"]) assert.ok(outside.includes(k), `${k} keeps its own row`);
+    } finally {
+      await box.cleanup();
+    }
+  });
 
   test("picking the heading starts nothing; picking a member under it starts that project", async () => {
     const box = await makeBox(withGroups());
     try {
       await define(box, "review.json", REVIEW);
-      const heading = run(box, ["--ui=classic"], { FAKE_FZF_PICK: "group:@design-review" });
+      const heading = run(box, [], { FAKE_FZF_PICK: "group:@design-review" });
       assert.equal(heading.code, 0, heading.stderr);
       assert.equal(await exists(box.claudeLog), false, "a heading launches nothing");
       // The second new:tools row is the one under the heading.
-      const member = run(box, ["--ui=classic"], { FAKE_FZF_PICK: "new:tools", FAKE_FZF_NTH: "2" });
+      const member = run(box, [], { FAKE_FZF_PICK: "new:tools", FAKE_FZF_NTH: "2" });
       assert.equal(member.code, 0, member.stderr);
       assert.equal(await readFile(box.claudeLog, "utf-8"), `${join(box.home, "lab", "tools")}\n`);
     } finally {
@@ -331,12 +329,12 @@ describe("defaults.groups_dir: what is read from a definition file", () => {
         ],
         notes: { anything: ["at", "all"] },
       });
-      const got = await rows(box, "classic");
+      const got = await rows(box);
       const members = under(got, "group:@design-review");
       assert.deepEqual(keys(members), ["new:tools", "new:web"]);
       const shown = got.map((r) => r.text).join("\n");
       for (const ignored of ["zz-renamed", "zz-relabelled", "zz-evil"]) assert.ok(!shown.includes(ignored), ignored);
-      const res = run(box, ["--ui=classic"], { FAKE_FZF_PICK: "new:tools", FAKE_FZF_NTH: "2" });
+      const res = run(box, [], { FAKE_FZF_PICK: "new:tools", FAKE_FZF_NTH: "2" });
       assert.equal(res.code, 0, res.stderr);
       assert.equal(await readFile(box.claudeLog, "utf-8"), `${join(box.home, "lab", "tools")}\n`, "the command and folder are repos.yml's");
       assert.deepEqual(listJson(box).groups, [
@@ -357,7 +355,7 @@ describe("defaults.groups_dir: what is read from a definition file", () => {
       assert.deepEqual(listJson(box).groups, [
         { id: "design-review", label: "Design review", kind: "logical", members: ["api", "tools"], unregistered_members: 2 },
       ]);
-      assert.deepEqual(keys(under(await rows(box, "classic"), "group:@design-review")), ["new:api", "new:tools"]);
+      assert.deepEqual(keys(under(await rows(box), "group:@design-review")), ["new:api", "new:tools"]);
     } finally {
       await box.cleanup();
     }
@@ -373,7 +371,7 @@ describe("defaults.groups_dir: what is read from a definition file", () => {
       const list = listJson(box);
       assert.deepEqual(list.groups.map((g) => g.id), ["design-review"]);
       assert.equal(list.parents.hq, "studio", "hq still nests under its header by path");
-      const got = keys(await rows(box, "classic"));
+      const got = keys(await rows(box));
       assert.deepEqual(got.filter((k) => k.startsWith("group:")).sort(), ["group:@design-review", "group:studio"]);
     } finally {
       await box.cleanup();
@@ -414,11 +412,9 @@ describe("defaults.groups_dir: files ccs cannot use", () => {
       await writeFile(join(box.defs, "notes.txt"), "not a definition\n");
       await mkdir(join(box.defs, "nested"));
       await writeFile(join(box.defs, "nested", "deep.json"), JSON.stringify({ ...REVIEW, id: "nested" }));
-      for (const look of ["classic", "simple"] as const) {
-        const got = keys(await rows(box, look));
-        assert.ok(got.includes("group:@design-review") && got.includes("new:api"), `${look}: the list opens with the usable group`);
-        assert.ok(!got.includes("group:@nested"), "only the folder itself is read");
-      }
+      const got = keys(await rows(box));
+      assert.ok(got.includes("group:@design-review") && got.includes("new:api"), "the list opens with the usable group");
+      assert.ok(!got.includes("group:@nested"), "only the folder itself is read");
       const d = groupsCheck(box);
       assert.deepEqual([d.code, d.status], [0, "ok"], "a warning leaves doctor ok");
       assert.deepEqual([d.check.status, d.check.code], ["warn", "group_files_skipped"]);
@@ -432,7 +428,7 @@ describe("defaults.groups_dir: files ccs cannot use", () => {
   test("the folder is missing: the picker opens without groups and doctor says groups_dir_missing", async () => {
     const box = await makeBox(withGroups("~/no-such-folder"));
     try {
-      const got = keys(await rows(box, "classic"));
+      const got = keys(await rows(box));
       assert.ok(got.includes("new:web") && !got.some((k) => k.startsWith("group:@")));
       assert.deepEqual(listJson(box).groups, []);
       const d = groupsCheck(box);
@@ -463,8 +459,9 @@ describe("defaults.groups_dir: what ccs leaves alone and keeps to itself", () =>
       await define(box, "review.json", REVIEW);
       await define(box, "broken.json", "{ not json");
       const before = await snapshot(box.defs);
-      for (const args of [["--ui=classic"], ["--ui=simple"], ["--refresh", "--ui=classic"], ["list", "--json"], ["doctor", "--json"], ["doctor"], ["sessions", "--json"], ["config", "get", "--json"]]) {
-        run(box, args);
+      for (const args of [[], ["--refresh"], ["list", "--json"], ["doctor", "--json"], ["doctor"], ["sessions", "--json"], ["config", "get", "--json"]]) {
+        const res = run(box, args);
+        assert.equal(res.code, 0, `ccs ${args.join(" ")}: ${res.stdout}${res.stderr}`);
         assert.deepEqual(await snapshot(box.defs), before, `ccs ${args.join(" ")}`);
       }
     } finally {

@@ -12,6 +12,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { t } from "./ccs-i18n.ts";
 
 export const CURRENT_SCHEMA_VERSION = 4;
 
@@ -221,7 +222,7 @@ export function migrate(db: Database.Database): void {
           m.version,
         );
       })();
-      process.stderr.write(`[ccs] applied migration v${m.version}\n`);
+      process.stderr.write(`${t("db_migrated", { version: m.version })}\n`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`[ccs-db] migration v${m.version} failed: ${msg}`);
@@ -286,7 +287,7 @@ export function openDb(
         chmodSync(p, 0o600);
       } catch {
         process.stderr.write(
-          `[ccs-db] warning: could not chmod 0600 ${p} — cache may be readable by other users\n`,
+          `${t("db_chmod_failed", { file: p })}\n`,
         );
       }
     }

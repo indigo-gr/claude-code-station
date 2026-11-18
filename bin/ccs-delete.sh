@@ -6,15 +6,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Same package-local tsx preference as bin/ccs (npm / copy install layouts);
-# this script is invoked by path (never symlinked), so no $0 resolution here.
-if [[ -x "${SCRIPT_DIR}/../node_modules/.bin/tsx" ]]; then
-  TSX="${SCRIPT_DIR}/../node_modules/.bin/tsx"
-elif [[ -x "${SCRIPT_DIR}/node_modules/.bin/tsx" ]]; then
-  TSX="${SCRIPT_DIR}/node_modules/.bin/tsx"
-else
-  TSX="tsx"
-fi
+# The module and its runner, as bin/ccs chose them (bin/ccs exports the runner
+# in CCS_TSX_REAL): the built .js in a release, else the .ts with Node.
+# This script is invoked by path (never symlinked), so no $0 resolution here.
+DELETE_MODULE="${SCRIPT_DIR}/ccs-delete-session.ts"
+[[ -f "${SCRIPT_DIR}/ccs-delete-session.js" ]] && DELETE_MODULE="${SCRIPT_DIR}/ccs-delete-session.js"
+RUNNER="${CCS_TSX_REAL:-node}"
+
+# The words, in the language bin/ccs chose (CCS_LANG_RESOLVED; English when
+# this runs on its own).
+# shellcheck source=ccs-i18n.sh
+source "${SCRIPT_DIR}/ccs-i18n.sh"
+CCS_LANG_RESOLVED="${CCS_LANG_RESOLVED:-en}"
+is_lang "$CCS_LANG_RESOLVED" || CCS_LANG_RESOLVED=en
+ccs_lang_use "$CCS_LANG_RESOLVED"
+tx PRESS_ENTER delete_press_enter
 
 SESSION_ID="${1:-}"
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -29,8 +35,8 @@ prompt_read() { # prompt_read <prompt> [varname]
 }
 
 if [[ -z "$SESSION_ID" ]] || [[ ! "$SESSION_ID" =~ $UUID_RE ]]; then
-  echo "❌ Invalid session ID"
-  prompt_read "Press Enter to continue..."
+  say delete_bad_id
+  prompt_read "$PRESS_ENTER"
   exit 1
 fi
 
@@ -46,8 +52,8 @@ for dir in "$PROJECTS_DIR"/*/; do
 done
 
 if [[ -z "$TARGET" ]]; then
-  echo "❌ Session file not found"
-  prompt_read "Press Enter to continue..."
+  say delete_not_found
+  prompt_read "$PRESS_ENTER"
   exit 1
 fi
 
@@ -55,11 +61,12 @@ fi
 # here (concurrent cleanup) — under `set -e` that would kill the script with
 # no message, so fall back to "?" instead.
 SIZE=$(du -h "$TARGET" 2>/dev/null | cut -f1 || echo "?")
-echo "━━━ Delete Session ━━━"
+say delete_title
 echo "📄 $TARGET"
 echo "📏 $SIZE"
 echo ""
-prompt_read "Delete this session? (y/N): " confirm
+tx ASK delete_confirm
+prompt_read "$ASK" confirm
 
 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # Wrap rm explicitly: under `set -e` a bare rm failure (permissions, file
@@ -67,8 +74,8 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   # the fzf execute pane closes with no message and the user has no way to
   # know the delete failed (review C-2).
   if ! rm "$TARGET"; then
-    echo "❌ Failed to delete: $TARGET" >&2
-    prompt_read "Press Enter to continue..."
+    say_err delete_failed "file=${TARGET}"
+    prompt_read "$PRESS_ENTER"
     exit 1
   fi
   # Also remove subagents directory if it exists. The final-form check is a
@@ -78,24 +85,24 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
   if [[ -d "$SUBAGENT_DIR" && "$SUBAGENT_DIR" == "$PROJECTS_DIR/"*"/$SESSION_ID" ]]; then
     if ! rm -rf "$SUBAGENT_DIR"; then
       # Main JSONL is already gone — report and continue to cache cleanup.
-      echo "[ccs] warning: could not remove subagent dir: $SUBAGENT_DIR" >&2
+      say_err delete_subagent_failed "folder=${SUBAGENT_DIR}"
     fi
   fi
   # Remove the stale row from the SQLite cache so the session disappears
   # from the fzf list immediately on reload (Ctrl-D → +reload). Uses a bound
   # parameter via better-sqlite3 (audit M-3) and reports failures instead of
   # swallowing them (audit L-3).
-  if [[ "$TSX" != "tsx" ]] || command -v tsx &>/dev/null; then
+  if [[ "$RUNNER" == */* ]] || command -v "$RUNNER" &>/dev/null; then
     # Through ccs-tsx.sh: started from ccs's own folder (see that file).
-    if ! CCS_TSX_REAL="$TSX" bash "${SCRIPT_DIR}/ccs-tsx.sh" "${SCRIPT_DIR}/ccs-delete-session.ts" "$SESSION_ID"; then
-      echo "[ccs] warning: cache row cleanup failed — a stale row may remain until the next refresh" >&2
+    if ! CCS_TSX_REAL="$RUNNER" bash "${SCRIPT_DIR}/ccs-tsx.sh" "$DELETE_MODULE" "$SESSION_ID"; then
+      say_err delete_cache_failed
     fi
   else
-    echo "[ccs] warning: tsx not found — cache row not removed (run ccs --refresh)" >&2
+    say_err delete_no_node
   fi
-  echo "✅ Deleted"
+  say delete_done
 else
-  echo "Cancelled"
+  say delete_cancelled
 fi
 
-prompt_read "Press Enter to continue..."
+prompt_read "$PRESS_ENTER"

@@ -54,6 +54,7 @@ import {
   type Outcome,
 } from "./ccs-machine.ts";
 import { sanitizeSessionCwd, SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { t } from "./ccs-i18n.ts";
 
 const COMMAND = "open";
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
@@ -128,7 +129,7 @@ export async function resolveTarget(
   let plan: LaunchPlan;
   if (target.repo !== undefined) {
     if (configError !== undefined) return fail(configFailure(configError));
-    if (!config) return fail(cliOutcome("config_missing", {}, "no repos.yml yet (config_missing)"));
+    if (!config) return fail(cliOutcome("config_missing", {}, t("note_config_missing")));
     const repo = config.repos.find((r) => r.name === target.repo);
     if (!repo) return fail(cliOutcome("repo_not_found"));
     if (!repo.launch) return fail(cliOutcome("not_launchable"));
@@ -139,7 +140,7 @@ export async function resolveTarget(
     if (!UUID_RE.test(uuid)) return fail(cliOutcome("invalid_uuid"));
     const { stateDb } = getPaths();
     if (!existsSync(stateDb)) {
-      return fail(cliOutcome("cache_missing", {}, "no cache yet (cache_missing); open the list once, or run ccs --refresh"));
+      return fail(cliOutcome("cache_missing", {}, t("note_cache_missing")));
     }
     let row: { cwd: string; repo_name: string | null } | undefined;
     try {
@@ -153,7 +154,7 @@ export async function resolveTarget(
         handle.db.close();
       }
     } catch {
-      return fail(cliOutcome("cache_not_readable", {}, "cannot open the cache (cache_not_readable)"));
+      return fail(cliOutcome("cache_not_readable", {}, t("note_cache_not_readable")));
     }
     if (!row) return fail(cliOutcome("session_not_found"));
     const cwd = typeof row.cwd === "string" ? sanitizeSessionCwd(row.cwd) : null;
@@ -239,10 +240,10 @@ export async function openRun(args: readonly string[]): Promise<OpenRun> {
     const resolved = await resolveTarget(target, config, configError);
     if (!resolved.ok) return answer(resolved.outcome);
     if (process.env.CCS_OPEN_TTY !== "1") {
-      return answer(cliOutcome("no_tty", {}, "ccs open --here needs a terminal (no_tty); use --new-window from a script"));
+      return answer(cliOutcome("no_tty", {}, t("note_no_tty")));
     }
     const planFile = process.env.CCS_OPEN_PLAN;
-    if (!planFile) return answer(cliOutcome("internal_error", {}, "run ccs open through bin/ccs"));
+    if (!planFile) return answer(cliOutcome("internal_error", {}, t("note_open_direct")));
     const { kind, key, cwd, command } = resolved.plan;
     writeFileSync(planFile, [kind, key, cwd, command].join("\0") + "\0", { mode: 0o600 });
     return { outcome: okOutcome({ mode: "here" }), silent: true };
@@ -250,14 +251,14 @@ export async function openRun(args: readonly string[]): Promise<OpenRun> {
 
   // --new-window (macOS only)
   if (process.platform !== "darwin") {
-    return answer(cliOutcome("unsupported_os", {}, "ccs open --new-window works on macOS only (unsupported_os)"));
+    return answer(cliOutcome("unsupported_os", {}, t("note_unsupported_os")));
   }
   if (configError !== undefined && terminalFlag === undefined) {
     return answer(configFailure(configError));
   }
   const app = (terminalFlag as TerminalApp | undefined) ?? config?.settings.terminal ?? null;
   if (!app) {
-    return answer(cliOutcome("terminal_not_set", {}, "choose a terminal app first: ccs config set defaults.terminal terminal (terminal_not_set)"));
+    return answer(cliOutcome("terminal_not_set", {}, t("note_terminal_not_set")));
   }
   if (!terminalAppInstalled(app)) return answer(cliOutcome("terminal_app_missing"));
   const resolved = await resolveTarget(target, config, configError);
@@ -278,7 +279,7 @@ export async function openRun(args: readonly string[]): Promise<OpenRun> {
     dir = mkdtempSync(join(process.env.CCS_OPEN_TMPDIR || tmpdir(), "ccs-open-")); // 0700
     writeFileSync(join(dir, "ccs-open.command"), launcherScript(ccsPath, target), { mode: 0o700 });
   } catch {
-    return answer(cliOutcome("launch_failed", {}, "could not write the launcher file (launch_failed)"));
+    return answer(cliOutcome("launch_failed", {}, t("note_launch_file")));
   }
   const res = spawnSync("open", ["-a", TERMINAL_APP_INFO[app].openName, join(dir, "ccs-open.command")], {
     stdio: "ignore",
@@ -286,7 +287,7 @@ export async function openRun(args: readonly string[]): Promise<OpenRun> {
   });
   if (res.status !== 0) {
     rmSync(dir, { recursive: true, force: true });
-    return answer(cliOutcome("launch_failed", {}, "the terminal app did not take the launcher (launch_failed)"));
+    return answer(cliOutcome("launch_failed", {}, t("note_launch_rejected")));
   }
   return answer(okOutcome({ mode: "new_window", terminal: app }));
 }

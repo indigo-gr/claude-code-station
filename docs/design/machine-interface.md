@@ -1,6 +1,6 @@
 # 機械で読む口（machine interface）設計
 
-> ccs v0.5.0 — GUI のランチャー・スクリプト・ほかの道具が、端末の画面（fzf）を通さずに ccs を呼ぶための口。読む口（`doctor`・`list`・`sessions`・`config get`）と書く口（`repo add`・`repo remove`・`config set`）と起動の口（`open`）を、同じ約束で決める。
+> ccs v0.5.0（v0.6.0 で直した所は 1.2.1）— GUI のランチャー・スクリプト・ほかの道具が、端末の画面（fzf）を通さずに ccs を呼ぶための口。読む口（`doctor`・`list`・`sessions`・`config get`）と書く口（`repo add`・`repo remove`・`config set`）と起動の口（`open`）を、同じ約束で決める。
 
 `repos.yml` のキーと書き方の約束は `repos-yml-schema.md`（「契約」の節）が正。この資料は、その上に乗る CLI の口の形を決める。本体と食い違ったら、出す前にどちらかを直す（資料だけを黙って本体に合わせない）。
 
@@ -27,7 +27,7 @@
 - 新しい口はどれも fzf を開かない・標準入力を読まない・問いかけない（`open --here` が起こす Claude Code だけは別）。TTY が無くても動く
 - 新しい口はどれも更新の確認をしない（ネットに出ない・更新のキャッシュも読まない）。更新の確認は今のとおり、一覧を開く時だけ
 - 新しい口はどれも初回のひな形を作らない（`repos.yml`・`README.md`・キャッシュのフォルダ）。書く口（`repo add`）が `repos.yml` を新しく作る時だけは別（4.1）
-- 環境変数は今の物をそのまま効かせる: `XDG_CONFIG_HOME`・`XDG_CACHE_HOME`（置き場）・`CCS_CMD`・`CCR_CMD`（起動コマンドの優先順）。`CCS_UI` は新しい口の出力の形を変えない（`doctor` の `settings.ui` に値として出るだけ・2.1）
+- 環境変数は今の物をそのまま効かせる: `XDG_CONFIG_HOME`・`XDG_CACHE_HOME`（置き場）・`CCS_CMD`・`CCR_CMD`（起動コマンドの優先順）。`CCS_LANG`（v0.6.0・`i18n.md`）は人向けの文の言語だけを変え、`--json` の出力を変えない。`CCS_UI` は v0.6.0 で外した（読まない）
 
 ### 1.2 今の動きとの違い（出す前に読む側に知らせる物）
 
@@ -40,6 +40,20 @@ v0.5.0 は起動の形を変えるので、`repos-yml-schema.md` の「`repos.ym
 | `disabled`・`scan` の値 | 真偽に丸める（`"false"` が true になる） | 真偽値だけ。文字列などはエラー | `repos-yml-schema.md` のバリデーションルール |
 | `description`・`icon` の空（YAML の null） | 文字列の `"null"` になる | 未指定として扱う（バグの直し） | 同上 |
 | `repos:` が 1 行の形（`[…]`）の時の `ccs init --auto-discover` | 1 行の形のまま書き足す | 書き足さずに断る（`ccs init` は今の失敗と同じ 1・`repo add` は 6。どちらも理由の語 `flow_style_repos`・ファイルを書き換えない） | ブロックの形に書き直してから足す |
+
+### 1.2.1 v0.6.0 の違い（出す前に読む側に知らせる物）
+
+v0.6.0 は Node の下限・fzf の下限・起動の形を変えるので、tag を打つ前に読む側に知らせる（2026-11-16 に前もって知らせた）。機械で読む出力のキー（`checks[]` の 11 個・`settings.ui`・`defaults.ui`）は消さず、値が決まった物になるだけにした。消える語は `fzf` の `warn` の 2 語と `detail: tsx` だけ。
+
+| 違い | v0.5.x | v0.6.0 | 読む側の移り方 |
+|---|---|---|---|
+| Node の下限 | 22 | 24.12.0（型の除去が Stable）。`doctor` の `node` が 24.12.0 未満を `node_too_old` にする | Node を上げる |
+| tsx | 要る（パッケージに入る） | 要らない。出したパッケージは `.js`、checkout は `.ts` を Node が直に走らせる。`doctor` の `tsx` の検査は名前を残し、いつも `ok`。`dependency_missing` の `detail: tsx` は出ない | 替える物なし（`tsx` の検査を見ていれば、いつも `ok` になる） |
+| fzf の下限 | 0.42.0（0.45・0.61 未満は `warn`） | 0.61.0。0.61 未満は `fail`・`fzf_too_old`。`fzf_too_old_for_headers`・`fzf_too_old_for_simple` は出ない | fzf を上げる。2 語を読んでいれば外してよい |
+| 一覧の見た目 | `classic`（既定）・`simple` | `simple` だけ。`--ui=`（引数の誤り・2）・`CCS_UI`（読まない）を外す。`repos.yml` の `defaults.ui` は知っているキーのまま（`repos-yml-schema.md` の「頼ってよいキー」）: `simple` は今までどおり読み、`classic` は 1 行の警告を出して `simple` で開く（エラーにしない） | 替える物なし（`ui: simple` の行はそのままでよい。`classic` と書いた行は `simple` に直すと警告が消える） |
+| `ui` の値 | `doctor` の `settings.ui`・`config get` の `defaults.ui` は決まった値 | 名前を残し、いつも `simple`。`config get` の `allowed` の `defaults.ui` は `["simple"]` | 替える物なし |
+| `config set defaults.ui` | `classic`・`simple` を書く | `simple` だけ受ける（今までどおり書く）。`classic` などは 6 `invalid_value` | 設定の画面から見た目の選択を外してよい |
+| 言語 | 英語と日本語の混ざり | `--lang`・`CCS_LANG`・`defaults.language` で `ja`・`en`（`i18n.md`）。`doctor` の `settings.language`・`config get` の `defaults.language` を足す（足すだけ） | 替える物なし。人向けの文を読まない決まり（1.8）のまま |
 
 ### 1.3 JSON の形
 
@@ -84,7 +98,7 @@ ccs のどの口も同じ表を使う。
 |:---:|---|---|---|---|
 | 0 | `ok` | 成功（`doctor` は「動く」） | `ok` | 一覧を出した・書いた・端末に渡した |
 | 1 | `failed` | 失敗（`doctor` は「動かない」） | `failed` | 書けない・書く間に別の手で変わった・`doctor` の前提の検査が `fail` |
-| 2 | `usage` | 引数の誤り（今の `--ui=` の誤りと同じ 2） | `usage` | 知らないフラグ・引数が足りない |
+| 2 | `usage` | 引数の誤り（一覧を開く口の知らないフラグの誤りと同じ 2） | `usage` | 知らないフラグ・引数が足りない |
 | 3 | `unverifiable` | 確かめられない | `unverifiable` | 前提が読めない・権限が無い・検査が時間切れ |
 | 4 | `missing_prerequisite` | 前提が足りないので実行しなかった（`doctor` 以外） | `missing_prerequisite` | `repos.yml` が無い／壊れている・macOS でない・端末のアプリが無い |
 | 5 | `not_found` | 対象が無い | `failed`（理由の語で分ける） | 名前が台帳に無い・UUID がキャッシュに無い |
@@ -101,7 +115,7 @@ ccs のどの口も同じ表を使う。
 - **`doctor` が使うのは 0・1・2・3 だけ**（ほかは Ctrl-C で止めた時の 130）。前提が欠けて動かない時も `doctor` は 1（`failed`）で、どれが欠けたかは理由の語で分ける。4 は、`doctor` 以外の口が「前提が足りないので実行しなかった」時の値
 - 読む側の決まり: `doctor` の 0・1・2 のほか（ccs が入っていない時のシェルの 127・シグナルの 128 以上を含む）は全部 `unverifiable` として読む。ほかの口で表に無い数は `failed` として読む
 - `interrupted`: TS の部品は SIGINT を受けたらロックを外し、書きかけなら元に戻してから 130 で終わる（`--json` なら外側も出す）。bash の部分は `trap` で 130 にする。SIGTERM などほかのシグナルは今のまま（128 + 番号）
-- 一覧を開く今の口（`ccs`・`ccs .`・`--new` など）と `ccs init` の終了コードは、この表に入れない（今のまま。`--version` の 0 と `--ui=` の誤りの 2 は変えない）
+- 一覧を開く今の口（`ccs`・`ccs .`・`--new` など）と `ccs init` の終了コードは、この表に入れない（今のまま。`--version` の 0 と知らないフラグの誤りの 2 は変えない。v0.6.0 で `--ui=` は知らないフラグになった）
 - `open --here` で Claude Code を起こした後の終了コードは、起こしたコマンドの物で、この表の外（4.6）
 
 ### 1.5 理由の語（語彙 `ccs.cli`）
@@ -127,7 +141,7 @@ ccs のどの口も同じ表を使う。
 | `terminal_not_set` | missing_prerequisite | 端末のアプリが決まっていない |
 | `terminal_app_missing` | missing_prerequisite | 決めた端末のアプリが入っていない |
 | `unsafe_install_path` | missing_prerequisite | ccs の置き場のパスに記号が入っていて、新しいウィンドウに渡せない |
-| `dependency_missing` | missing_prerequisite | Node・tsx・`claude` のどれかが無い（どれかは `detail`: `node`・`tsx`・`claude`。`open` が起こすコマンド（`CCS_CMD` などで替えた物を含む）が PATH に無い時も `claude`） |
+| `dependency_missing` | missing_prerequisite | Node・`claude` のどれかが無い（どれかは `detail`: `node`・`claude`。v0.6.0 から `tsx` は出ない。`open` が起こすコマンド（`CCS_CMD` などで替えた物を含む）が PATH に無い時も `claude`） |
 | `repo_not_found` | not_found | その名前が `repos.yml` に無い |
 | `session_not_found` | not_found | その UUID がキャッシュに無い |
 | `path_outside_home` | rejected | パスが `$HOME` の外（書いた形・シンボリックリンクを解いた先のどちらか） |
@@ -152,7 +166,7 @@ ccs のどの口も同じ表を使う。
 | `validation_after_write_failed` | failed | 書いた後の検証に落ち、元に戻した（元のファイルのまま） |
 | `restore_failed` | partial | 書いた後の検証に落ち、元に戻すのにも失敗した（元は `repos.yml.bak` にある） |
 | `launch_failed` | failed | 端末のアプリに渡せなかった |
-| `invalid_package_config` | failed | ccs より上のフォルダの `package.json` が壊れていて、Node が ccs の部品（`.ts`）を読めない（2.1 の `modules` の検査と同じ語） |
+| `invalid_package_config` | failed | ccs より上のフォルダの `package.json` が壊れていて、Node が ccs の部品（checkout は `.ts`・出したパッケージは `.js`）を読めない（2.1 の `modules` の検査と同じ語） |
 | `internal_error` | failed | 予期しない失敗 |
 | `interrupted` | interrupted | SIGINT で止めた |
 
@@ -214,7 +228,7 @@ ccs のどの口も同じ表を使う。
 
 **引数**: `--json` だけ。ほかは 2（`usage`・語彙 `ccs.cli` の `unknown_option`）。Ctrl-C で止めた時は 130（`interrupted`・語彙 `ccs.cli` の `interrupted`）。どちらも `bin/ccs` が答え、`--json` なら外側と `installed`・`running` だけを出す（`checks` は出さない）。
 
-**2 段階で動く**: Node が ccs の部品（`.ts`）を読めない時（上のフォルダの `package.json` が壊れている・Node が無い）にも答えるため、`bin/ccs`（bash）が先に段階 1 を確かめ、段階 2（`bin/ccs-doctor.ts`）を走らせる。段階 2 が JSON を返さなかった時は、bash が段階 1 の結果と `modules` の検査だけで JSON を組んで出す（値は語と数とバージョンと時刻だけなので、bash の `printf` で組める。バージョンは `^[0-9A-Za-z.+-]{1,32}$` に合わない時 `null`。時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で秒まで）。bash が組む答えも `checks` は 11 個全部を表の順に出し、段階 2 の検査（`sqlite`・`config`・`config_layout`・`cache`・`terminal`・`groups_dir`）は `skipped`・`blocked` にする。`modules` は、段階 1 の `node`・`tsx` が `ok` でなく段階 2 を走らせなかった時は `skipped`・`blocked`、時間切れは `unknown`・`check_timeout`、Node の読み込みの失敗が分かれば `fail`（下の表の語）、ほかは `unknown`・`check_crashed`。
+**2 段階で動く**: Node が ccs の部品（`.ts`・`.js`）を読めない時（上のフォルダの `package.json` が壊れている・Node が無い）にも答えるため、`bin/ccs`（bash）が先に段階 1 を確かめ、段階 2（`bin/ccs-doctor.ts`・出したパッケージでは `.js`）を走らせる。段階 2 が JSON を返さなかった時は、bash が段階 1 の結果と `modules` の検査だけで JSON を組んで出す（値は語と数とバージョンと時刻だけなので、bash の `printf` で組める。バージョンは `^[0-9A-Za-z.+-]{1,32}$` に合わない時 `null`。時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で秒まで）。bash が組む答えも `checks` は 11 個全部を表の順に出し、段階 2 の検査（`sqlite`・`config`・`config_layout`・`cache`・`terminal`・`groups_dir`）は `skipped`・`blocked` にする。`modules` は、段階 1 の `node` が `ok` でなく段階 2 を走らせなかった時は `skipped`・`blocked`、時間切れは `unknown`・`check_timeout`、Node の読み込みの失敗が分かれば `fail`（下の表の語）、ほかは `unknown`・`check_crashed`。
 
 **時間の上限**: 段階 1 の `node --version`・`fzf --version` は各 5 秒。段階 2 は全体で 20 秒（試験のために環境変数 `CCS_DOCTOR_TIMEOUT` で 1〜999 秒に変えられる・形の外れた値は無視して 20 秒）。切れたら、その検査を `unknown`・`check_timeout` にする（段階 2 は `modules` の検査）。
 
@@ -227,17 +241,17 @@ ccs のどの口も同じ表を使う。
 | `reasons` | 全体を決めた検査の `code`（語彙 `ccs.health`）。`ok` の時は `[{ "vocab": "ccs.health", "code": "ok" }]`。引数の誤りと中断の時だけ語彙 `ccs.cli`（上の「引数」） |
 | `checks` | `[{ "name", "status", "code" }]`（下の表の順）。検査によってバージョン・数を足す |
 | `platform` | `{ "os": "darwin" \| "linux" \| …, "arch": "arm64" \| "x64" \| … }` |
-| `settings` | `{ "ui", "update_check", "update_check_off_by" }`（2.1 の注） |
+| `settings` | `{ "ui", "update_check", "update_check_off_by", "language" }`（2.1 の注） |
 
 **検査**（`checks[]` の順。`required` の検査の結果で全体が決まる。`code` は語彙 `ccs.health`）:
 
 | `name` | 段階 | required | 確かめる事 | `fail` の `code` | `warn` の `code` |
 |---|:---:|:---:|---|---|---|
-| `node` | 1 | ✅ | `node` があり、メジャーが 22 以上（下限は `bin/ccs` に持つ。コピーで入れた形には `package.json` が無いため。`package.json` の `engines.node` と同じ値に保つ） | `node_missing`・`node_too_old` | — |
-| `tsx` | 1 | ✅ | パッケージの中か PATH に tsx がある | `tsx_missing` | — |
+| `node` | 1 | ✅ | `node` があり、24.12.0 以上（下限は `bin/ccs` に持つ。コピーで入れた形には `package.json` が無いため。`package.json` の `engines.node` と同じ値に保つ） | `node_missing`・`node_too_old` | — |
+| `tsx` | 1 | ✅ | v0.6.0 から ccs は tsx を使わない。読む側の 11 個の形を変えないため名前を残し、いつも `ok`（`tsx_missing` は出ない） | — | — |
 | `modules` | 1→2 | ✅ | 段階 2 が起動して JSON を返した | `invalid_package_config`（Node が `Invalid package config` を出した）・`module_load_failed` | — |
 | `sqlite` | 2 | ✅ | `better-sqlite3` が読める | `sqlite_native_module_missing`・`sqlite_load_failed` | — |
-| `fzf` | 1 | ✅ | `fzf` があり、0.42.0 以上（README と `install.sh` の下限） | `fzf_missing`・`fzf_too_old` | `fzf_too_old_for_headers`（0.45 未満。`ui` が `simple` でもこの語）・`fzf_too_old_for_simple`（0.45 以上 0.61 未満で、`settings.ui` が `simple`。一覧は classic で開く）。1 つの検査に語は 1 つ |
+| `fzf` | 1 | ✅ | `fzf` があり、0.61.0 以上（README と `install.sh` の下限） | `fzf_missing`・`fzf_too_old` | —（v0.6.0 で `fzf_too_old_for_headers`・`fzf_too_old_for_simple` を外した） |
 | `claude` | 1 | ✅ | `claude` が PATH にある（今の `check_deps` と同じ） | `claude_missing` | — |
 | `config` | 2 | ✅ | `repos.yml` を ccs の検証に通せる | 下の語 | `config_missing`（一覧を開けば ccs が作る）・`unknown_keys`・`paths_missing`（両方ある時は表の順で `unknown_keys`） |
 | `config_layout` | 2 | — | 行で読む道具にも読める書き方か（`repos-yml-schema.md` の「勧める書き方」）。`repos.yml` が無い時は `skipped`・`not_set`、`config` が `fail` の時は `skipped`・`blocked` | — | `flow_style_repos`・`name_path_not_direct` |
@@ -276,7 +290,7 @@ ccs のどの口も同じ表を使う。
   "running": "not_applicable",
   "reasons": [{ "vocab": "ccs.health", "code": "ok" }],
   "checks": [
-    { "name": "node", "status": "ok", "code": "ok", "version": "24.1.0" },
+    { "name": "node", "status": "ok", "code": "ok", "version": "24.12.0" },
     { "name": "tsx", "status": "ok", "code": "ok" },
     { "name": "modules", "status": "ok", "code": "ok" },
     { "name": "sqlite", "status": "ok", "code": "ok" },
@@ -289,7 +303,7 @@ ccs のどの口も同じ表を使う。
     { "name": "groups_dir", "status": "skipped", "code": "not_set" }
   ],
   "platform": { "os": "darwin", "arch": "arm64" },
-  "settings": { "ui": "simple", "update_check": "off", "update_check_off_by": "env" }
+  "settings": { "ui": "simple", "update_check": "off", "update_check_off_by": "env", "language": "ja" }
 }
 ```
 
@@ -307,7 +321,7 @@ ccs のどの口も同じ表を使う。
   "running": "not_applicable",
   "reasons": [{ "vocab": "ccs.health", "code": "invalid_package_config" }],
   "checks": [
-    { "name": "node", "status": "ok", "code": "ok", "version": "24.1.0" },
+    { "name": "node", "status": "ok", "code": "ok", "version": "24.12.0" },
     { "name": "tsx", "status": "ok", "code": "ok" },
     { "name": "modules", "status": "fail", "code": "invalid_package_config" },
     { "name": "sqlite", "status": "skipped", "code": "blocked" },
@@ -328,7 +342,8 @@ ccs のどの口も同じ表を使う。
 - 書かない物: `repos.yml` のひな形・キャッシュのフォルダ・`state.db`・状態のファイル（設定とキャッシュの置き場には何も書かない）。書くのは、時間の上限のために段階 2 の出力を受ける `TMPDIR` の一時のフォルダだけで、終わる時（中断を含む）に消す。`state.db` は `readonly` と `fileMustExist` で開き、`migrate` しない（今の一覧と同じ開き方。SQLite が自分の WAL の脇のファイルに触るのはこの約束の外）
 - 確かめるために起こす外の命令は `fzf --version`・`node --version` だけ。`claude` は PATH を見るだけで起こさない。時間の上限は上の「時間の上限」
 - `config` の検査は数だけを足す: `repos`（項目の数）・`disabled`・`paths_missing`（`disabled` でない項目のうちフォルダが無い数）・`unknown_keys`（知らないキーの数）。どの項目かは出さない。番号が要る時は `--json` 無しで人が見る
-- `settings.ui` は `CCS_UI` > `defaults.ui` > `classic` の順で決まった値（一覧が実際に使う見た目）
+- `settings.ui` は v0.6.0 からいつも `simple`（見た目は 1 つだけ・名前は読む側のために残す。`defaults.ui: classic` と書いてあっても `simple`）
+- `settings.language` は決まった言語（`ja`・`en`・`i18n.md` の 2 の順）
 - `settings.update_check` は `on`・`off`。`update_check_off_by` は `env`（`CCS_NO_UPDATE_CHECK`）・`config`（`defaults.update_check: false`・4.4）・`null`。両方の時は `env`
 - bash が組む答え（段階 2 が答えない時）には `settings` が無い（上の例のとおり）
 
@@ -336,11 +351,11 @@ ccs のどの口も同じ表を使う。
 
 `repos.yml` を ccs の検証に通した結果の一覧。キャッシュではなく `repos.yml` を直に読む（走査を待たない・`--no-scan` の古さが無い）。
 
-**引数**: `--json`（要る・無ければ 2・`json_required`）・`--with-paths`。`node`・`tsx` が無い時は、引数の検査より先に 4・`dependency_missing` を返す（引数を読む部品が動かないため）。
+**引数**: `--json`（要る・無ければ 2・`json_required`）・`--with-paths`。`node` が無い時は、引数の検査より先に 4・`dependency_missing` を返す（引数を読む部品が動かないため）。
 
 **検証**: `repos.yml` が無い → 4 `config_missing`。読めない → 3 `config_not_readable`。検証に落ちる → 4 `config_invalid`（`detail`）。ひな形は作らない。
 
-**部品が答えない時**（`bin/ccs` が組む）: `node`・`tsx` が無い → 4 `dependency_missing`（`detail` は `node`・`tsx`）。Node が部品を読めない時（ccs より上のフォルダの `package.json` が壊れている形）→ 1 `invalid_package_config`。ほかに答えが無い時 → 1 `internal_error`。`bin/ccs` は部品の標準エラーを `TMPDIR` の一時のファイルに受け（Node の出すファイル名を標準エラーに流さないため）、終わる時に消す。
+**部品が答えない時**（`bin/ccs` が組む）: `node` が無い → 4 `dependency_missing`（`detail` は `node`）。Node が部品を読めない時（ccs より上のフォルダの `package.json` が壊れている形）→ 1 `invalid_package_config`。ほかに答えが無い時 → 1 `internal_error`。`bin/ccs` は部品の標準エラーを `TMPDIR` の一時のファイルに受け（Node の出すファイル名を標準エラーに流さないため）、終わる時に消す。
 
 **JSON の例**（外側は 1.3 と同じなので略す）:
 
@@ -469,12 +484,14 @@ ccs のどの口も同じ表を使う。
   "reasons": [{ "vocab": "ccs.cli", "code": "ok" }],
   "settings": {
     "defaults.ui": "simple",
+    "defaults.language": "auto",
     "defaults.terminal": "terminal",
     "defaults.update_check": true,
     "defaults.groups_dir": { "set": false }
   },
   "allowed": {
-    "defaults.ui": ["classic", "simple"],
+    "defaults.ui": ["simple"],
+    "defaults.language": ["auto", "ja", "en"],
     "defaults.terminal": ["terminal"],
     "defaults.update_check": [true, false]
   }
@@ -483,7 +500,7 @@ ccs のどの口も同じ表を使う。
 
 - `--json` が無い時は、`settings` を 1 行に 1 つ `key = value` の形で標準出力に出す（人向け・約束の外）
 
-- 書いていないキーは既定の値（`defaults.ui` は `classic`・`defaults.terminal` は `null`・`defaults.update_check` は `true`）
+- 書いていないキーは既定の値（`defaults.ui` はいつも `simple`・`defaults.language` は `auto`・`defaults.terminal` は `null`・`defaults.update_check` は `true`）
 - `defaults.groups_dir` はパスなので `{ "set": true|false }` だけ。`--with-paths` の時は `"path"` を足す
 - `defaults.command` は出さない（1.7）。項目ごとの `label`・`description` は `list --json` で読む
 - `allowed` は `config set` が受ける値の一覧（呼ぶ側が選択肢を決め打ちしないため）
@@ -589,7 +606,8 @@ ccs のどの口も同じ表を使う。
 
 | キー | `--repo` | 受ける値 | 書く物 |
 |---|:---:|---|---|
-| `defaults.ui` | — | `classic`・`simple` | `defaults.ui` |
+| `defaults.ui` | — | `simple` だけ（v0.6.0 で `classic` を外した） | `defaults.ui` |
+| `defaults.language` | — | `auto`・`ja`・`en` | `defaults.language`（新しいキー・`i18n.md`） |
 | `defaults.terminal` | — | `terminal`・`""`（消す） | `defaults.terminal`（新しいキー・4.5） |
 | `defaults.update_check` | — | `true`・`false` | `defaults.update_check`（新しいキー・4.4） |
 | `label` | 要る | 制御文字なし・80 字まで（コードポイント）・`""`（消す＝`name` を出す） | `repos[].label` |
@@ -608,14 +626,14 @@ ccs のどの口も同じ表を使う。
 - `defaults.*` のキーは `version: 1` の「足すだけ」に入る。前のバージョンの ccs は `defaults` の未知のキーを黙って無視するので、壊れない
 
 ```json
-{ "schema_version": "1.0.0", "product_id": "ccs", "command": "config set", "status": "ok", "reasons": [{ "vocab": "ccs.cli", "code": "ok" }], "key": "defaults.ui", "changed": true }
+{ "schema_version": "1.0.0", "product_id": "ccs", "command": "config set", "status": "ok", "reasons": [{ "vocab": "ccs.cli", "code": "ok" }], "key": "defaults.terminal", "changed": true }
 ```
 
 ### 4.4 更新の知らせを止める設定 `defaults.update_check`
 
 - `defaults.update_check: false` で、`CCS_NO_UPDATE_CHECK` と同じに止める（ネットに出ない・更新のキャッシュを読まない・知らせを出さない）
 - 優先順: `CCS_NO_UPDATE_CHECK` が空でない → 止める。そうでなく `defaults.update_check: false` → 止める。どちらも無い → 今のとおり 1 日 1 回確かめる。設定の `true` は環境変数の「止める」に勝たない
-- 読み方: `bin/ccs` は `defaults.ui` を前の走査の標準出力（`ui=<mode>`）で受けている。走査は `--print-settings` で `ui=<mode>` と `update_check=on` か `off` の 2 行を出し（`--print-ui` は `ui=` だけで今のまま）、`meta` に `defaults_update_check`（`on`・`off`）を書く（`defaults_ui` と同じ）。走査をしない時（`--no-scan`）や走査が落ちた時は、`ccs-list --print-settings` で `meta` から同じ 2 行を読む（読めなければ `classic`・`on`）。`check_for_update` はこの値を見てから動く（今も走査の後に呼んでいるので、順番は変えなくてよい）
+- 読み方: `bin/ccs` は設定を前の走査の標準出力で受けている（v0.6.0 で `ui=` の行は意味を持たない・engineer が残すか外すかを決める）。走査は `--print-settings` で `ui=<mode>` と `update_check=on` か `off` の 2 行を出し（`--print-ui` は `ui=` だけで今のまま）、`meta` に `defaults_update_check`（`on`・`off`）を書く（`defaults_ui` と同じ）。走査をしない時（`--no-scan`）や走査が落ちた時は、`ccs-list --print-settings` で `meta` から同じ 2 行を読む（読めなければ `on`）。`check_for_update` はこの値を見てから動く（今も走査の後に呼んでいるので、順番は変えなくてよい）
 - 真偽値だけ受ける（`"false"` の文字列は検証のエラー・`launch` と同じ厳しさ）
 - 用途: 管理された入れ方（ほかの道具が更新を受け持つ）で、「npm で上げる」の案内と食い違わないようにする
 
@@ -628,7 +646,7 @@ ccs のどの口も同じ表を使う。
 - v0.5.0 の一覧は `terminal` だけ。iTerm2 は `.command` を走らせるのを確かめられなかったので、確かめてから足す。一覧は足すだけ（ほかの端末のアプリも、開き方を確かめてから足す・8 章）
 - 書いていない時は、`open --new-window` は 4 `terminal_not_set`。ccs はアプリを勝手に選ばない
 - アプリがあるかは、決まった置き場の `.app`（`terminal` は `/System/Applications/Utilities/Terminal.app` と `/Applications/Utilities/Terminal.app` の 2 つ）を見るだけで確かめる（Finder を動かさない）
-- 文字列の検証: 一覧の語だけ。ほかの値は読む時に検証のエラー（`defaults.ui` と同じ）
+- 文字列の検証: 一覧の語だけ。ほかの値は読む時に検証のエラー
 
 ### 4.6 `ccs open (--repo <name> | --session <uuid>) [--here | --new-window] [--terminal <app>] [--json] [-- <args>…]`
 
@@ -653,9 +671,9 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | フォルダがある | ✅ | ✅ | 6 `path_not_found` |
 | 起動コマンド | 優先順 `repos[].command` > `defaults.command` > `CCS_CMD` > `CCR_CMD` > `claude` | 今の `repos.yml` を読み、会話の項目が `repos.yml` にあればその `command`、無ければ `defaults.command` から後の優先順。`repos.yml` が壊れている → 4 `config_invalid` | — |
 | コマンドの記号の検査 | 今の `bin/ccs` の 2 重目の検査（メタ文字・制御文字） | 同じ | 6 `command_unsafe` |
-| 前提 | `node`・`tsx`（`bin/ccs` が引数の検査より先に見る）・起こすコマンド（fzf は要らない） | 同じ | 4 `dependency_missing`（起こすコマンドが PATH に無い時は `detail: claude`） |
+| 前提 | `node`（`bin/ccs` が引数の検査より先に見る）・起こすコマンド（fzf は要らない） | 同じ | 4 `dependency_missing`（起こすコマンドが PATH に無い時は `detail: claude`） |
 
-検査の順（最初に落ちた物を返す）: 引数（2）→（`--new-window` の時は）OS（4 `unsupported_os`）→（`--terminal` が無ければ）`repos.yml`（4 `config_invalid`）→ 端末のアプリ（4 `terminal_not_set`・`terminal_app_missing`）→ 上の表の対象・項目・作業フォルダ・コマンド（5／6）→ 起こすコマンドが PATH にあるか（4 `dependency_missing`・`detail: claude`）→（`--here` の時は）TTY（4 `no_tty`）。`node`・`tsx` が無い時だけは、引数より先に 4 `dependency_missing`（`detail` は `node`・`tsx`）。
+検査の順（最初に落ちた物を返す）: 引数（2）→（`--new-window` の時は）OS（4 `unsupported_os`）→（`--terminal` が無ければ）`repos.yml`（4 `config_invalid`）→ 端末のアプリ（4 `terminal_not_set`・`terminal_app_missing`）→ 上の表の対象・項目・作業フォルダ・コマンド（5／6）→ 起こすコマンドが PATH にあるか（4 `dependency_missing`・`detail: claude`）→（`--here` の時は）TTY（4 `no_tty`）。`node` が無い時だけは、引数より先に 4 `dependency_missing`（`detail` は `node`）。
 
 - 一覧との違い: 一覧は作業フォルダが `$HOME` の外か無い時に「今いるフォルダで開く」に落ちるが、`open` は落ちずに断る（呼ぶ側が別のフォルダで起きたと気づけないため）
 - `--repo` の名前の一致は大文字と小文字を区別・完全一致
@@ -709,7 +727,7 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 
 - 壊れた JSON・形の外れた物は飛ばし、`doctor` の `groups_dir` に `group_files_skipped`（数）で出す。一覧は開く（飛ばした事で一覧を止めない）
 - 読むのは走査の時（`ccs-scan`）。結果を `meta` に `logical_groups` として JSON で置き（`[{ "id", "label", "members": ["<name>", …] }]`）、一覧（`ccs-list`）はそれを読む。`state.db` のスキーマは変えない
-- 一覧の出し方: 起動しない見出し（行の種類 `group:`・キーは `@<id>` で `repos.yml` の名前と分ける）の下に、当たった項目の行を並べる。`ui: simple` は `launch: false` の見出しの後、`classic` は全部のプロジェクトの行の後で会話の区切りの前。同じプロジェクトが、自分の場所と見出しの下の両方に出てよい
+- 一覧の出し方: 起動しない見出し（行の種類 `group:`・キーは `@<id>` で `repos.yml` の名前と分ける）の下に、当たった項目の行を並べる。`launch: false` の見出しの後に出す（v0.6.0 で `classic` を外した）。同じプロジェクトが、自分の場所と見出しの下の両方に出てよい
 - `list --json` の `groups[]`（2.2）・`doctor` の `groups_dir`（2.1）に出す。`unregistered_members` は当たらなかった数
 
 ---
@@ -729,8 +747,8 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | 9 | `defaults.groups_dir`（走査 → `meta` → 一覧の行・`list --json`・`doctor`） | `bin/ccs-scan.ts`・`bin/ccs-list.ts` |
 | 10 | `--help`・README の節（機械の口・終了コードの表）・CHANGELOG（1.2 の違いを全部） | `bin/ccs`・`README.md`・`CHANGELOG.md` |
 
-- 新しい部品は `ccs-*.ts` の名前にする（コピーで入れる手順は `ccs-*.ts` と `ccs-*.sh` だけを写す）
-- パッケージは足さない（`yaml`・`better-sqlite3`・`tsx` と Node の標準だけで作れる）
+- 新しい部品は `ccs-*.ts` の名前にする（コピーで入れる手順は `ccs-*.ts` と `ccs-*.sh` だけを写す。v0.6.0 から出したパッケージは `release/build.sh` が作る `ccs-*.js`）
+- パッケージは足さない（`yaml`・`better-sqlite3` と Node の標準だけで作れる。v0.6.0 で `tsx` を外した）
 - `--new-window` は macOS の実機で Terminal.app を確かめた（8 章の 2・3）ので、v0.5.0 に `--here` と一緒に出す。iTerm2 は後で足す
 
 ## 7. 試験で確かめる事（checker）
@@ -745,7 +763,7 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | 同じ | 語の値（`status`・`code`・`kind` など）がどれも `^[a-z][a-z0-9_]*$` |
 | 同じ（標準出力と標準エラー） | `HOME` の下のパスの文字列（`--with-paths` の時の他）・`command` の値・会話の本文（`--with-titles` の時の題の他）が出ない。`doctor` には `repos.yml` の `name` も出ない |
 | 同じ・ネットを切った・`CCS_UPDATE_REGISTRY` を止まるサーバーにした | 時間がかからず、更新のキャッシュのファイルが作られない・変わらない |
-| `ccs doctor`・`ccs list --json` を `repos.yml` も置き場も無い所で | 置き場のフォルダ・`repos.yml`・`README.md`・`state.db` が作られない。`TMPDIR` に ccs 自身の一時の物が残らない（tsx の変換のキャッシュ `tsx-<uid>/` は残ることがある） |
+| `ccs doctor`・`ccs list --json` を `repos.yml` も置き場も無い所で | 置き場のフォルダ・`repos.yml`・`README.md`・`state.db` が作られない。`TMPDIR` に ccs 自身の一時の物が残らない（v0.6.0 で tsx を外したので、tsx の変換のキャッシュも残らない） |
 | `ccs repo --json`・`ccs config bogus --json` | 2・`usage`・`missing_argument`／`invalid_argument`。起動するコマンドが起きない |
 | `ccs --new doctor` | 今のとおり一覧の口（`doctor` は起動するコマンドに渡る） |
 | 知らないフラグ `ccs list --json --bogus` | 2・`usage`・`unknown_option` |
@@ -757,7 +775,9 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 |---|---|
 | 全部そろう | 0・`ok`・`installed: installed`・`running: not_applicable`・`checks[]` が 2.1 の順 |
 | PATH から `fzf`／`claude`／`node` を抜く | 1・`failed`・その検査が `fail`・`fzf_missing`／`claude_missing`／`node_missing`（`node` が無い時は bash が組んだ JSON） |
-| `fzf --version` が `0.41.0` の偽の命令 | 1・`fzf_too_old`。`0.44.0` なら 0 で `fzf_too_old_for_headers`（`warn`・`ui: simple` でも同じ語）。`0.55.0` で `ui: simple` なら 0 で `fzf_too_old_for_simple`（`warn`） |
+| `fzf --version` が `0.60.0` の偽の命令 | 1・`fzf_too_old`。`0.61.0` なら 0・`ok`。`fzf_too_old_for_headers`・`fzf_too_old_for_simple` はどのバージョンでも出ない |
+| `node --version` が `24.11.0`・`22.18.0` の偽の命令 | 1・`node_too_old`。`24.12.0` なら `ok` |
+| PATH に `tsx` が無い | `tsx` の検査が `ok`（いつも） |
 | `better-sqlite3` を読めなくする | 1・`sqlite` が `fail`・`sqlite_native_module_missing` |
 | `repos.yml` が YAML として壊れている・`version: 2`・名前が重なる・`$HOME` の外の `path` | 1・`config` が `fail`・それぞれ `yaml_parse_error`・`unsupported_version`・`duplicate_name`・`path_outside_home` |
 | `bin/` の上の `package.json` が壊れている（コピーで入れた形） | 1・`modules` が `fail`・`invalid_package_config` |
@@ -780,7 +800,7 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | `list`（`--json` なし） | 2・`json_required` |
 | `list --json` で `repos.yml` が無い・壊れている | 4・`config_missing`／`config_invalid`（`detail` あり） |
 | `list --json` で `bin/` の上の `package.json` が壊れている（コピーで入れた形） | 1・`failed`・`invalid_package_config` |
-| `list --json` を PATH に `node`／`tsx` の無い所で | 4・`dependency_missing`・`detail` が `node`／`tsx` |
+| `list --json` を PATH に `node` の無い所で | 4・`dependency_missing`・`detail` が `node`。`tsx` が無いだけなら動く |
 | `sessions --json` に 1 つのプロジェクトで 7 件 | 5 件・新しい順・`more: 2`・`title` のキーが無い |
 | `sessions --json --with-titles` で、題に改行・ESC・向きを変える文字・偽の API キー・120 文字 | 1 行・制御文字なし・キーが伏せてある・80 文字＋`…` |
 | `sessions --json --project nosuch` | 5・`repo_not_found` |
@@ -816,12 +836,13 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | `repo remove web` | 0・その項目だけが消える。フォルダは残る |
 | `repo remove nosuch`・最後の 1 件を `repo remove` | 5・`repo_not_found`／6・`last_entry` |
 | ロックのファイルを先に置く（新しい） | 1・`config_locked`・ファイルが変わらない |
-| `config set defaults.ui fancy`・`config set defaults.command x`・`config set --repo web path ~/x` | 6・`invalid_value`／`key_not_settable`／`key_not_settable` |
-| `config set defaults.ui simple`（`defaults` が無い見本） | `defaults:` が `repos:` の前に入る |
+| `config set defaults.ui classic`・`config set defaults.command x`・`config set --repo web path ~/x` | 6・`invalid_value`／`key_not_settable`／`key_not_settable` |
+| `config set defaults.ui simple`（キーが無い見本）・`defaults.ui: classic` と書いた見本で一覧を開く | 書く（`changed: true`）／警告 1 行で `simple` で開く・検証のエラーにならない・`doctor` の `unknown_keys` に数えない |
+| `config set defaults.language ja`（`defaults` が無い見本） | `defaults:` が `repos:` の前に入る |
 | `config set --repo web label ""` | `label` のキーが消える |
 | `config set defaults.update_check false` の後で一覧を開く（偽のレジストリ） | 問い合わせが来ない・知らせが出ない。`--no-scan` でも同じ |
 | `config set defaults.update_check true`（キーが無い見本）を 2 度 | 1 度目は書く（`changed: true`）・2 度目は `changed: false` |
-| `config set defaults.ui simple` を `repos.yml` 無しで | 4・`config_missing`・ファイルを作らない |
+| `config set defaults.language ja` を `repos.yml` 無しで | 4・`config_missing`・ファイルを作らない |
 | `config set bogus x`（`repos.yml` 無し）・`config set label x`（`--repo` なし） | 6・`key_not_settable`／2・`missing_argument`（`repos.yml` より先に見る） |
 
 **repos.yml の検証の直し**
@@ -861,5 +882,5 @@ fzf を開かずに、今の一覧の起動の決まりを通して Claude Code 
 | 5 | 名前（`name`）の付け替え。表示名は `label` で変えられるが、`name` は会話の結び付きと、行で読む道具のキー | v0.5.0 では作らない。要るなら `repo rename` を別に設計する |
 | 6 | `sessions` の題を `--with-titles`、`list` のパスを `--with-paths` の明示のフラグにした事 | この形を勧める（2.2・2.3 の理由） |
 | 7 | `open --here` の起こした後の終了コードが、表の値（1〜7）とぶつかる | 機械は `--new-window` を使う。`--here` の終了コードは約束の外と README に書く |
-| 8 | 一覧を開く今の口（`ccs`）は `fzf` の下限を確かめず、有るかだけを見る（README と `install.sh` は 0.42.0 以上） | `doctor` は 0.42.0 を `fail` にする。一覧の口の `check_deps` に下限を入れるかは別に決める |
+| 8 | 一覧を開く今の口（`ccs`）は `fzf` の下限を確かめず、有るかだけを見る（README と `install.sh` は 0.61.0 以上・v0.6.0） | `doctor` は 0.61.0 未満を `fail` にする。一覧の口の `check_deps` に下限を入れるかは別に決める |
 | 9 | `doctor` が `state.db` を読み取り専用で開く時、SQLite が WAL の脇のファイルを作ることがある | 今の一覧と同じ開き方なので約束の外とし、試験は `state.db` 本体の中身と更新の時刻で見る |

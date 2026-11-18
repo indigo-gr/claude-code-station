@@ -17,7 +17,8 @@
 version: 1                    # スキーマのバージョン（必須・整数の 1 だけ）
 defaults:                     # 全リポジトリの既定（任意）
   command: "claude"           # 起動コマンドの既定
-  ui: simple                  # 一覧の見た目（classic / simple）
+  ui: simple                  # 一覧の見た目（v0.6.0 から simple だけ）
+  language: ja                # 人向けの文の言語（v0.6.0〜・auto / ja / en）
   terminal: terminal          # ccs open --new-window で開く端末のアプリ（v0.5.0〜）
   update_check: false         # 更新の知らせを止める（v0.5.0〜）
   groups_dir: ~/groups        # 外のグループの定義を読むフォルダ（v0.5.0〜・既定は off）
@@ -33,10 +34,11 @@ repos:                        # リポジトリ定義の配列（必須・1 件�
 | `version` | integer | ✅ | — | `1` だけ受け付ける（文字列の `"1"` はエラー） |
 | `defaults` | object | — | `{}` | 下のキー。中の未知のキーは警告なしで無視する（前のバージョンの ccs が新しいキーで壊れないための前方互換） |
 | `defaults.command` | string | — | `CCS_CMD` → `CCR_CMD` → `"claude"` | `command` を書いていない項目の起動コマンド（優先順は下の「環境変数との優先順位」） |
-| `defaults.ui` | string | — | `"classic"` | 一覧とプレビューの見た目。`classic` か `simple`。ほかの値はエラー。空（YAML の null）は未指定。`simple` は fzf 0.61 以上が要り、古い fzf では `classic` で開く。`--ui=` と `CCS_UI` が勝つ |
+| `defaults.ui` | string | — | `"simple"` | 一覧とプレビューの見た目。v0.6.0 から見た目は `simple` だけ（fzf 0.61 以上）。`simple` と空（YAML の null）は黙って読む。`classic`（v0.5.x まで）は標準エラーに 1 行の警告を出して `simple` で開く（エラーにしない・「頼ってよいキー」の約束のため）。ほかの値はエラー。`--ui=` と `CCS_UI` は v0.6.0 で外した |
+| `defaults.language` | string | — | `"auto"` | v0.6.0〜。人向けの文の言語。`auto`・`ja`・`en`（`auto` と空は未指定 = OS の locale で決める）。知らない値は 1 行の警告で飛ばす（エラーにしない）。`--lang=` と `CCS_LANG` が勝つ（`i18n.md` の 2） |
 | `defaults.terminal` | string | — | 未指定 | v0.5.0〜。`ccs open --new-window` で開く端末のアプリ。`terminal`（macOS のターミナル）だけ（iTerm2 は確かめてから足す）。ほかの値はエラー。空（YAML の null）は未指定。macOS だけで使う（`machine-interface.md` の 4.5） |
-| `defaults.update_check` | boolean | — | `true` | v0.5.0〜。`false` で更新の確認と知らせを止める（`CCS_NO_UPDATE_CHECK` と同じ）。真偽値だけ（`"false"` などの文字列はエラー） |
-| `defaults.groups_dir` | string | — | 未指定（off） | v0.5.0〜。外のグループの定義（`*.json`）を読むフォルダ。`~` を展開する。`$HOME` の下・シェルのメタ文字不可。ccs はこのフォルダに書かない（`machine-interface.md` の 5 章）。`config get` の人向けの行では `path` と同じく制御文字と向きを変える文字を空白に置き換える（`--json` は書いたまま） |
+| `defaults.update_check` | boolean | — | `true` | v0.5.0〜。`false` で更新の確認と知らせを止める（`CCS_NO_UPDATE_CHECK` と同じ）。真偽値だけ（`"false"` などの文字列はエラー）。空（YAML の null）は未指定 |
+| `defaults.groups_dir` | string | — | 未指定（off） | v0.5.0〜。外のグループの定義（`*.json`）を読むフォルダ。`~` を展開する。`$HOME` の下・シェルのメタ文字不可。ccs はこのフォルダに書かない（`machine-interface.md` の 5 章）。空（YAML の null）は未指定。`config get` の人向けの行では `path` と同じく制御文字と向きを変える文字を空白に置き換える（`--json` は書いたまま） |
 | `repos` | array | ✅ | — | 1 件以上の項目（下の表） |
 
 トップレベルの未知のキーは、標準エラーに `[ccs] unknown key "<key>" in top-level (ignored)` を出して無視する。
@@ -130,7 +132,7 @@ repos:
 | `version` は整数の `1` だけ | エラー | `<repos.yml>: unsupported version: 2, only 1 is supported` |
 | `defaults` は object | エラー | `<repos.yml>: defaults must be an object` |
 | `defaults.command` は文字列 | エラー | `<repos.yml>: defaults.command must be a string` |
-| `defaults.ui` は `classic` か `simple` | エラー | `<repos.yml>: defaults.ui must be one of classic / simple (got "fancy")` |
+| `defaults.ui` は `simple`（v0.6.0 から。`classic` は警告で `simple` にする） | エラー | `<repos.yml>: defaults.ui must be simple (got "fancy")` |
 | `defaults.terminal` は `terminal` だけ（v0.5.0〜） | エラー | `<repos.yml>: defaults.terminal must be one of terminal (got "x")` |
 | `defaults.update_check` は真偽値のみ（v0.5.0〜） | エラー | `<repos.yml>: defaults.update_check must be true or false (got "false")` |
 | `defaults.groups_dir` は文字列・`$HOME` の下・シェルのメタ文字不可（v0.5.0〜） | エラー | `<repos.yml>: defaults.groups_dir "/etc" is outside $HOME (security)` |
@@ -222,7 +224,7 @@ repos:
     label: Studio
   - name: studio-hq
     path: ~/studio/hq
-    lead: true                 # 兄弟の中で一番上・simple では 👑
+    lead: true                 # 兄弟の中で一番上・👑 で出る
     label: HQ
   - name: studio-web
     path: ~/studio/web
@@ -240,7 +242,9 @@ repos:
 
 **登録の無いセッションへの適用**: `repos.yml` に登録されていない cwd のセッション（fzf 上で `❓` 表示）も、`defaults.command` から後の優先順に従う。走査の時に解決した既定が state.db の `meta.defaults_command` に保存され、一覧が過去セッションの行の起動コマンドに使う。
 
-見た目: `--ui=` フラグ > `CCS_UI` 環境変数 > `defaults.ui` > `classic`
+見た目: v0.6.0 から `simple` だけ（v0.5.x は `--ui=` フラグ > `CCS_UI` 環境変数 > `defaults.ui` > `classic`）
+
+言語: `--lang=` フラグ > `CCS_LANG` 環境変数 > `defaults.language` > OS の locale > `en`（`i18n.md` の 2）
 
 更新の確認: `CCS_NO_UPDATE_CHECK` が空でない → 止める > `defaults.update_check: false` → 止める > 確かめる（設定の `true` は環境変数の「止める」に勝たない）
 
@@ -257,10 +261,11 @@ repos:
       "type": "object",
       "properties": {
         "command": { "type": "string" },
-        "ui": { "enum": ["classic", "simple", null] },
+        "ui": { "enum": ["simple", "classic", null] },
+        "language": { "type": ["string", "null"] },
         "terminal": { "enum": ["terminal", null] },
-        "update_check": { "type": "boolean" },
-        "groups_dir": { "type": "string", "pattern": "^[^;&|<>$`\"'\\\\\\u0000-\\u001f]+$" }
+        "update_check": { "type": ["boolean", "null"] },
+        "groups_dir": { "type": ["string", "null"], "pattern": "^[^;&|<>$`\"'\\\\\\u0000-\\u001f]+$" }
       }
     },
     "repos": {
@@ -309,11 +314,11 @@ repos:
 | `repos[].path` | リポのパス。`$HOME` の下。先頭の `~` を `$HOME` に展開して読む |
 | `repos[].description` | 説明の文 |
 | `defaults.command` | 起動コマンドの既定 |
-| `defaults.ui` | `classic` か `simple` |
+| `defaults.ui` | `simple`（v0.6.0 から見た目は 1 つ。`classic` は読めるが `simple` で開く） |
 
 次に頼ってよい物: `repos[].launch`・`repos[].lead`・`repos[].label`・`repos[].disabled`・`repos[].custom`（意味は上の表）。
 
-v0.5.0 で足した物（足すだけの変更）: `defaults.terminal`・`defaults.update_check`・`defaults.groups_dir`。前のバージョンの ccs は `defaults` の中の未知のキーを黙って無視するので、書いても壊れない。
+v0.5.0 で足した物（足すだけの変更）: `defaults.terminal`・`defaults.update_check`・`defaults.groups_dir`。v0.6.0 で足した物: `defaults.language`。前のバージョンの ccs は `defaults` の中の未知のキーを黙って無視するので、書いても壊れない。
 
 ほかの道具が `repos.yml` を直に読まずに済むよう、ccs は同じ検証を通した結果を `ccs list --json` で出す（`machine-interface.md` の 2.2）。
 
@@ -352,14 +357,14 @@ repos:
 
 - `ccs --version`（`-v` も同じ）: 標準出力に `ccs v<バージョン>` の 1 行を出し、exit 0。バージョンは配った `package.json` の `version`（読めない置き方では `0.0.0-dev`）
 - 起動の形: コマンドの名前は `ccs`。`ccs init`・`ccs init --auto-discover`・`--version`。v0.5.0 から、最初の引数が `doctor`・`list`・`sessions`・`repo`・`config`・`open` の時は ccs の口になる（前は起動するコマンドに渡っていた。渡したい時は `ccs --new doctor` のように前にフラグを置く）。Claude Code は、選んだ項目のフォルダ（`cwd`、無ければ `path`）へ cd し、上の優先順で決めたコマンドで起こす。過去セッションの再開はそのコマンドに `--resume <UUID>` を付ける。ccs が知らないフラグはそのコマンドに渡す
-- Node の下限: `package.json` の `engines.node`
+- Node の下限: `package.json` の `engines.node`（v0.6.0 で 24.12.0）。fzf の下限: README と `install.sh`（v0.6.0 で 0.61.0）
 - 機械で読む口（コマンド・JSON の形・終了コード・理由の語）の約束は `machine-interface.md`
 
 上の物を変えるバージョンは、出す前に読む側に知らせる。壊す変更は、読む側が替え終えてから出す。
 
 ### 約束の外
 
-- 画面の言葉と並び（一覧・プレビュー・警告の文。`ui: simple` と `classic` のどちらも）
+- 画面の言葉と並び（一覧・プレビュー・警告の文。どの言語も）
 - キーの割り当て（Enter・Ctrl-Y など）
 - state.db のスキーマ（`sqlite-schema.md` は設計の記録で、約束ではない）
 

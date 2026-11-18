@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-init.ts — repos.yml bootstrap helpers for `ccs init`.
  *
@@ -20,9 +20,10 @@ import { basename, join, relative } from "node:path";
 import { parseDocument, isSeq } from "yaml";
 
 import { ensureConfigDir, getPaths, loadConfig } from "./ccs-config.ts";
-import { EditStop, hasControlChars, runEditSync } from "./ccs-config-edit.ts";
-import { hasShellMetachars, jsonForTerminal } from "./ccs-sanitize.ts";
+import { EditStop, runEditSync } from "./ccs-config-edit.ts";
+import { hasControlChars, hasShellMetachars, jsonForTerminal } from "./ccs-sanitize.ts";
 import { pathToFileURL } from "node:url";
+import { t } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // Discovery
@@ -125,18 +126,21 @@ export function buildCandidates(
     if (existing.paths.has(abs)) continue;
     if (hasShellMetachars(abs)) {
       process.stderr.write(
-        `[ccs-init] skipped (shell metacharacters in path): ${JSON.stringify(abs)}\n`,
+        `${t("init_skip_metachars", { path: jsonForTerminal(abs) })}\n`,
+      );
+      continue;
+    }
+    // Anywhere in the path, not only the folder's own name: the picker line
+    // is the value written to repos.yml, so a parent folder's mark would
+    // reorder the picker too. ccs repo add refuses such a name
+    // (invalid_value); suggest none.
+    if (hasControlChars(abs)) {
+      process.stderr.write(
+        `${t("init_skip_control", { path: jsonForTerminal(abs) })}\n`,
       );
       continue;
     }
     const base = abs === home ? "home" : basename(abs);
-    // ccs repo add refuses such a name (invalid_value); suggest none.
-    if (hasControlChars(base)) {
-      process.stderr.write(
-        `[ccs-init] skipped (control or text-direction characters in the folder name): ${jsonForTerminal(abs)}\n`,
-      );
-      continue;
-    }
     let name = base;
     for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
     taken.add(name);
@@ -277,19 +281,19 @@ async function cliAppend(): Promise<number> {
     if (!line.trim()) continue;
     const tab = line.indexOf("\t");
     if (tab <= 0) {
-      process.stderr.write(`[ccs-init] malformed candidate line skipped: ${JSON.stringify(line)}\n`);
+      process.stderr.write(`${t("init_skip_malformed", { line: jsonForTerminal(line) })}\n`);
       continue;
     }
     candidates.push({ name: line.slice(0, tab), path: line.slice(tab + 1) });
   }
   if (candidates.length === 0) {
-    process.stderr.write("[ccs-init] nothing selected — repos.yml unchanged\n");
+    process.stderr.write(`${t("init_nothing_selected")}\n`);
     return 0;
   }
   const paths = getPaths();
   appendAndValidate(paths.reposYml, candidates);
   process.stderr.write(
-    `[ccs-init] added ${candidates.length} repo(s) to ${paths.reposYml}\n`,
+    `${t("init_added", { n: candidates.length, file: paths.reposYml })}\n`,
   );
   return 0;
 }
@@ -298,8 +302,7 @@ function cliScaffold(): number {
   ensureConfigDir();
   const paths = getPaths();
   process.stdout.write(
-    `Config ready: ${paths.reposYml}\n` +
-      `Edit it directly, or run \`ccs init --auto-discover\` to scan $HOME for git repos.\n`,
+    `${t("init_scaffold_ready", { file: paths.reposYml })}\n`,
   );
   return 0;
 }

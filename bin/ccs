@@ -10,7 +10,7 @@ shopt -u checkwinsize
 
 # Resolve $0 through symlinks before taking dirname: `npm install -g
 # github:indigo-gr/claude-code-station` links this script into the global
-# bin dir, and the SYMLINK's dirname has none of the sibling .ts modules.
+# bin dir, and the SYMLINK's dirname has none of the sibling modules.
 SOURCE="$0"
 while [[ -L "$SOURCE" ]]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -26,7 +26,6 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 # where ../package.json can belong to something else entirely, and its version
 # must not reach the screen or the update check. A bash match, no extra process.
 CCS_PACKAGE='@indigo-gr/claude-code-station'
-CCS_INSTALL_CMD="npm install -g ${CCS_PACKAGE}"
 VERSION="0.0.0-dev"
 read_package_version() {
   local file="${SCRIPT_DIR}/../package.json" json=""
@@ -41,37 +40,142 @@ read_package_version() {
 }
 read_package_version 2>/dev/null || true
 
-# Prefer a package-local tsx over the PATH one: the npm install brings tsx
-# as a dependency (../node_modules from the package's bin/), and the copy
-# install (install.sh) symlinks node_modules next to the scripts. Fall back
-# to a globally installed tsx for the bare-checkout workflow.
-if [[ -x "${SCRIPT_DIR}/../node_modules/.bin/tsx" ]]; then
-  TSX="${SCRIPT_DIR}/../node_modules/.bin/tsx"
-elif [[ -x "${SCRIPT_DIR}/node_modules/.bin/tsx" ]]; then
-  TSX="${SCRIPT_DIR}/node_modules/.bin/tsx"
-else
-  TSX="tsx"
+# How to get a newer version, matching how this ccs was installed: npm (the
+# package under node_modules, also `npm install -g github:…`, which the npm
+# package replaces) or a clone run in place (its own package.json,
+# not under node_modules). A copy install (install.sh) has no version and
+# gets no notice, so it needs no command here.
+CCS_INSTALL_CMD="npm install -g ${CCS_PACKAGE}"
+if [[ "$SCRIPT_DIR" != */node_modules/* && -f "${SCRIPT_DIR}/../package.json" ]]; then
+  CCS_CLONE_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+  # Both sides as real paths: a HOME that is (or passes through) a symlink
+  # would otherwise never match the clone's real path and lose its ~.
+  __home_real="$(cd -P "$HOME" 2>/dev/null && pwd)" || __home_real="$HOME"
+  case "$CCS_CLONE_DIR" in
+    "$__home_real"/*) CCS_CLONE_SHOWN="~${CCS_CLONE_DIR#"$__home_real"}" ;;
+    *) CCS_CLONE_SHOWN="$CCS_CLONE_DIR" ;;
+  esac
+  unset __home_real
+  # Pasted into a shell: a path with anything but plain characters is quoted
+  # in full instead (no ~, which a quote would make literal).
+  if [[ ! "$CCS_CLONE_SHOWN" =~ ^[~A-Za-z0-9._/+-]+$ ]]; then
+    CCS_CLONE_SHOWN=$(printf '%q' "$CCS_CLONE_DIR")
+  fi
+  # The dependencies can change between versions, so npm install follows.
+  CCS_INSTALL_CMD="cd ${CCS_CLONE_SHOWN} && git pull && npm install"
 fi
 
-# Every module starts through ccs-tsx.sh, from ccs's own folder: Node reads
-# the package.json above the CURRENT folder for tsx's preload, and a broken
-# one there would stop every module (the user's folder goes on in CCS_CWD).
-# TSX stays the tsx to check for; TSX_RUN is how a module is started.
-export CCS_TSX_REAL="$TSX"
+# How the modules run. A release ships them built (ccs-*.js, made by
+# release/build.sh), and Node runs those anywhere. A checkout or a copy install
+# (install.sh) has only the .ts sources, and Node strips their types itself
+# (Node 24.12+, no flag), except under node_modules, where Node refuses to:
+# a package there always carries the built .js.
+CCS_EXT="ts"
+CCS_RUNNER="node"
+if [[ -f "${SCRIPT_DIR}/ccs-machine.js" ]]; then
+  CCS_EXT="js"
+fi
+
+# Every module starts through ccs-tsx.sh, from ccs's own folder, with the
+# folder the user ran ccs in passed on in CCS_CWD (the file keeps its old name
+# because the fzf bindings and ccs-delete.sh call it). TSX_RUN is how a module
+# is started.
+export CCS_TSX_REAL="$CCS_RUNNER"
 CCS_TSX_SH="${SCRIPT_DIR}/ccs-tsx.sh"
 TSX_RUN=(bash "$CCS_TSX_SH")
 
-CCS_LIST="${SCRIPT_DIR}/ccs-list.ts"
-CCS_SCAN="${SCRIPT_DIR}/ccs-scan.ts"
-CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.ts"
+CCS_LIST="${SCRIPT_DIR}/ccs-list.${CCS_EXT}"
+CCS_SCAN="${SCRIPT_DIR}/ccs-scan.${CCS_EXT}"
+CCS_PREVIEW="${SCRIPT_DIR}/ccs-preview.${CCS_EXT}"
 CCS_DELETE="${SCRIPT_DIR}/ccs-delete.sh"
-CCS_INIT="${SCRIPT_DIR}/ccs-init.ts"
-CCS_UPDATE="${SCRIPT_DIR}/ccs-update-check.ts"
+CCS_INIT="${SCRIPT_DIR}/ccs-init.${CCS_EXT}"
+CCS_UPDATE="${SCRIPT_DIR}/ccs-update-check.${CCS_EXT}"
 COPYRIGHT='Copyright © INDIGO GROUP LLC.'
+
+# ── Language and text (docs/design/i18n.md) ──────────────────────────────────
+# One string table per language, bin/ccs-lang-<lang>.txt: `key=text` lines,
+# `key+=text` adds a line to the key above, `{name}` is a named insertion and
+# `\n` a line break. The TS modules read the same files (ccs-i18n.ts). English
+# is loaded first, so a key another table lacks reads in English.
+source "${SCRIPT_DIR}/ccs-i18n.sh"
+
+# defaults.language from repos.yml, read line by line (no Node at start): a
+# `language:` line one level under a top-level `defaults:`. Anything this does
+# not read (flow style, anchors) is left to the locale; the TS loader still
+# checks the file and warns about a value it does not know.
+config_language() {
+  local f="${XDG_CONFIG_HOME:-$HOME/.config}/ccs/repos.yml" line in=0
+  local re_key='^[[:space:]]+language:[[:space:]]*["'\'']?([A-Za-z]{1,16})["'\'']?[[:space:]]*(#.*)?$'
+  [[ -f "$f" && -r "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    if [[ "$line" =~ ^[^[:space:]#-] ]]; then
+      (( in )) && return 0
+      [[ "$line" =~ ^defaults:[[:space:]]*(#.*)?$ ]] && in=1
+      continue
+    fi
+    (( in )) || continue
+    if [[ "$line" =~ $re_key ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "$f"
+}
+
+# --lang= (any place before a bare --) is ccs's own: taken out of the
+# arguments before anything else reads them.
+CCS_LANG_FLAG="" CCS_LANG_FLAG_BAD=0 __args=() __rest=0
+for __a in "$@"; do
+  if (( ! __rest )) && [[ "$__a" == --lang=* ]]; then
+    CCS_LANG_FLAG="${__a#--lang=}"
+    is_lang "$CCS_LANG_FLAG" || CCS_LANG_FLAG_BAD=1
+    continue
+  fi
+  [[ "$__a" == "--" ]] && __rest=1
+  __args+=("$__a")
+done
+set -- "${__args[@]+"${__args[@]}"}"
+unset __args __rest __a
+
+# The order: --lang=, CCS_LANG, defaults.language, the locale, English. An
+# unknown CCS_LANG or defaults.language is skipped (CCS_LANG with a warning
+# here; the config loader warns about the file).
+CCS_LANG_ENV_BAD=""
+CCS_LANG_RESOLVED=""
+if (( ! CCS_LANG_FLAG_BAD )) && [[ -n "$CCS_LANG_FLAG" ]]; then
+  CCS_LANG_RESOLVED="$CCS_LANG_FLAG"
+fi
+if [[ -z "$CCS_LANG_RESOLVED" && -n "${CCS_LANG:-}" ]]; then
+  if is_lang "$CCS_LANG"; then CCS_LANG_RESOLVED="$CCS_LANG"; else CCS_LANG_ENV_BAD="$CCS_LANG"; fi
+fi
+if [[ -z "$CCS_LANG_RESOLVED" ]]; then
+  __cfg=$(config_language 2>/dev/null) || __cfg=""
+  is_lang "$__cfg" && CCS_LANG_RESOLVED="$__cfg"
+  unset __cfg
+fi
+if [[ -z "$CCS_LANG_RESOLVED" ]]; then
+  for __v in "${LC_ALL:-}" "${LC_MESSAGES:-}" "${LANG:-}"; do
+    [[ -n "$__v" ]] || continue
+    case "$__v" in
+      ja|ja[_.@-]*) CCS_LANG_RESOLVED=ja ;;
+      *) CCS_LANG_RESOLVED=en ;;
+    esac
+    break
+  done
+  unset __v
+fi
+[[ -n "$CCS_LANG_RESOLVED" ]] || CCS_LANG_RESOLVED=en
+export CCS_LANG_RESOLVED
+ccs_lang_use "$CCS_LANG_RESOLVED"
+if [[ -n "$CCS_LANG_ENV_BAD" ]]; then
+  # Shown only when it is a plain word: the value goes to a terminal.
+  [[ "$CCS_LANG_ENV_BAD" =~ ^[A-Za-z0-9_.@-]{1,32}$ ]] || CCS_LANG_ENV_BAD="?"
+  say_err lang_env_unknown "value=${CCS_LANG_ENV_BAD}"
+fi
 
 # ── CCR_CMD -> CCS_CMD migration shim ────────────────────────────────────────
 if [[ -n "${CCR_CMD:-}" && -z "${CCS_CMD:-}" ]]; then
-  echo "[ccs] CCR_CMD is deprecated, please rename to CCS_CMD (using CCR_CMD value for now)" >&2
+  say_err ccr_cmd_deprecated
   export CCS_CMD="${CCR_CMD}"
 fi
 
@@ -83,11 +187,10 @@ fi
 # to the network or create the config template or the cache. Exit codes and
 # the JSON shape are the contract; stderr is for people and never carries a
 # repo path or name.
-CCS_MACHINE="${SCRIPT_DIR}/ccs-machine.ts"
-CCS_DOCTOR="${SCRIPT_DIR}/ccs-doctor.ts"
-NODE_MIN_MAJOR=22      # package.json engines.node
-FZF_MIN=(0 42)         # README and install.sh
-FZF_HEADERS_MIN=(0 45) # fzf's transform action (group headers stay open)
+CCS_MACHINE="${SCRIPT_DIR}/ccs-machine.${CCS_EXT}"
+CCS_DOCTOR="${SCRIPT_DIR}/ccs-doctor.${CCS_EXT}"
+NODE_MIN=(24 12)       # package.json engines.node (24.12.0: type stripping is stable)
+FZF_MIN=(0 61)         # README and install.sh (--style, the labels, --ghost)
 CHECK_TIMEOUT=5        # node --version, fzf --version
 DOCTOR_STAGE2_TIMEOUT=20
 
@@ -154,9 +257,9 @@ run_timed() {
 
 # machine_tmp_dir NAME — a fresh 0700 folder for this run in TMPDIR, or in
 # /tmp when TMPDIR is missing or not writable. Sets MACHINE_TMP and
-# MACHINE_TMP_BASE (the folder it was made in). The .ts modules run with
-# TMPDIR set to MACHINE_TMP, so what tsx puts in its temporary folder goes
-# when the folder is removed at exit.
+# MACHINE_TMP_BASE (the folder it was made in). The modules run with
+# TMPDIR set to MACHINE_TMP, so what they (or the runner) put in the temporary
+# folder goes when the folder is removed at exit.
 machine_tmp_dir() {
   local base
   for base in "${TMPDIR:-/tmp}" /tmp; do
@@ -204,7 +307,7 @@ run_doctor() {
       printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"unknown_option"}]}\n' \
         "$(machine_outer doctor usage)"
     fi
-    echo "[ccs] doctor takes only --json (usage: unknown_option)" >&2
+    say_err doctor_usage
     exit 2
   fi
 
@@ -213,7 +316,7 @@ run_doctor() {
       printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"internal_error"}]}\n' \
         "$(machine_outer doctor failed)"
     fi
-    echo "[ccs] doctor: failed: internal_error — cannot create a temporary folder (TMPDIR or /tmp)" >&2
+    say_err doctor_no_tmp
     exit 1
   fi
   DOCTOR_TMP="$MACHINE_TMP"
@@ -241,7 +344,7 @@ run_doctor() {
       c_node="unknown:check_timeout"
     elif (( TIMED_RC == 0 )) && [[ "$v" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
       v="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-      if (( 10#${BASH_REMATCH[1]} < NODE_MIN_MAJOR )); then
+      if ! version_at_least "$v" "${NODE_MIN[@]}"; then
         c_node="fail:node_too_old:$v"
       else
         c_node="ok:ok:$v"
@@ -251,14 +354,11 @@ run_doctor() {
     fi
   fi
 
-  # tsx: the package's own, or one on PATH.
-  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
-    c_tsx="fail:tsx_missing"
-  else
-    c_tsx="ok:ok"
-  fi
+  # tsx: ccs no longer needs it (Node runs the modules). The check keeps its
+  # name and place in checks[] for readers of the JSON, and is always ok.
+  c_tsx="ok:ok"
 
-  # fzf: present and at least 0.42.0; under 0.45 group headers do not stay open.
+  # fzf: present and at least 0.61 (the list's look needs it).
   if ! command -v fzf >/dev/null 2>&1; then
     c_fzf="fail:fzf_missing"
   else
@@ -270,8 +370,6 @@ run_doctor() {
       v="${BASH_REMATCH[1]}"
       if ! version_at_least "$v" "${FZF_MIN[@]}"; then
         c_fzf="fail:fzf_too_old:$v"
-      elif ! version_at_least "$v" "${FZF_HEADERS_MIN[@]}"; then
-        c_fzf="warn:fzf_too_old_for_headers:$v"
       else
         c_fzf="ok:ok:$v"
       fi
@@ -283,13 +381,13 @@ run_doctor() {
   # claude: on PATH (never started).
   if command -v claude >/dev/null 2>&1; then c_claude="ok:ok"; else c_claude="fail:claude_missing"; fi
 
-  # Stage 2, when Node and tsx can run it.
-  if [[ "$c_node" == ok:* && "$c_tsx" == ok:* ]]; then
+  # Stage 2, when Node can run it.
+  if [[ "$c_node" == ok:* ]]; then
     local limit="$DOCTOR_STAGE2_TIMEOUT"
     [[ "${CCS_DOCTOR_TIMEOUT:-}" =~ ^[1-9][0-9]{0,2}$ ]] && limit="$CCS_DOCTOR_TIMEOUT"
     local mode=()
     (( DOCTOR_JSON )) && mode=(--json)
-    run_timed "$limit" "$out" "$err" env TMPDIR="$DOCTOR_TMP" TSX_DISABLE_CACHE=1 \
+    run_timed "$limit" "$out" "$err" env TMPDIR="$DOCTOR_TMP" \
       "${TSX_RUN[@]}" "$CCS_DOCTOR" ${mode[@]+"${mode[@]}"} \
       --node "$c_node" --tsx "$c_tsx" --fzf "$c_fzf" --claude "$c_claude"
     if (( TIMED_OUT )); then
@@ -352,9 +450,9 @@ doctor_answer_from_stage1() { # JSON NODE TSX MODULES FZF CLAUDE
       "$(machine_outer doctor "$status")" "$reasons" "$checks" "$os" "$arch"
   else
     case "$status" in
-      ok) echo "ccs doctor: ccs works (ok)" ;;
-      failed) echo "ccs doctor: ccs does not work (failed)" ;;
-      *) echo "ccs doctor: could not tell (${status})" ;;
+      ok) say doctor_ok ;;
+      failed) say doctor_failed ;;
+      *) say doctor_unknown "status=${status}" ;;
     esac
     printf '%s' "$rows"
   fi
@@ -376,9 +474,6 @@ run_machine() {
   if ! command -v node >/dev/null 2>&1; then
     machine_fail "$word" "$MACHINE_JSON" missing_prerequisite 4 dependency_missing node
   fi
-  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
-    machine_fail "$word" "$MACHINE_JSON" missing_prerequisite 4 dependency_missing tsx
-  fi
   machine_tmp_dir ccs-machine ||
     machine_fail "$word" "$MACHINE_JSON" failed 1 internal_error "" "cannot create a temporary folder (TMPDIR or /tmp)"
   trap 'rm -rf "$MACHINE_TMP"' EXIT
@@ -386,7 +481,7 @@ run_machine() {
   # The child gets SIGINT too and answers it itself (130 and the outer object).
   local rc=0 out="" got_int=0 load_error
   trap 'got_int=1' INT
-  out=$(TMPDIR="$MACHINE_TMP" TSX_DISABLE_CACHE=1 "${TSX_RUN[@]}" "${CCS_MACHINE}" "$@" 2>"$MACHINE_ERR" </dev/null) || rc=$?
+  out=$(TMPDIR="$MACHINE_TMP" "${TSX_RUN[@]}" "${CCS_MACHINE}" "$@" 2>"$MACHINE_ERR" </dev/null) || rc=$?
   trap - INT
   load_error=$(stage2_load_error "$MACHINE_ERR")
   # The module answered: JSON on stdout, or (without --json) its own line.
@@ -439,9 +534,6 @@ run_open() {
   if ! command -v node >/dev/null 2>&1; then
     machine_fail open "$MACHINE_JSON" missing_prerequisite 4 dependency_missing node
   fi
-  if [[ "$TSX" == "tsx" ]] && ! command -v tsx >/dev/null 2>&1; then
-    machine_fail open "$MACHINE_JSON" missing_prerequisite 4 dependency_missing tsx
-  fi
   machine_tmp_dir ccs-open-plan ||
     machine_fail open "$MACHINE_JSON" failed 1 internal_error "" "cannot create a temporary folder (TMPDIR or /tmp)"
   OPEN_TMP="$MACHINE_TMP"
@@ -457,7 +549,7 @@ run_open() {
   # The launcher file of --new-window must outlive this run: it goes to the
   # folder OPEN_TMP was made in, not into OPEN_TMP (removed at exit).
   out=$(CCS_OPEN_PLAN="$OPEN_TMP/plan" CCS_OPEN_TTY="$tty" CCS_OPEN_TMPDIR="$MACHINE_TMP_BASE" \
-    TMPDIR="$OPEN_TMP" TSX_DISABLE_CACHE=1 "${TSX_RUN[@]}" "${CCS_MACHINE}" open "$@" 2>"$OPEN_TMP/err" </dev/null) || rc=$?
+    TMPDIR="$OPEN_TMP" "${TSX_RUN[@]}" "${CCS_MACHINE}" open "$@" 2>"$OPEN_TMP/err" </dev/null) || rc=$?
   trap - INT
   load_error=$(stage2_load_error "$OPEN_TMP/err")
   if [[ -n "$out" || -s "$OPEN_TMP/plan" ]] || { (( ! MACHINE_JSON )) && [[ -z "$load_error" ]] && (( ! got_int )); }; then
@@ -494,11 +586,45 @@ run_open() {
   exit 0
 }
 
+# A --lang= value ccs does not know is a usage error (exit 2) for every
+# command; with --json the answer says so in the usual shape.
+if (( CCS_LANG_FLAG_BAD )); then
+  [[ "$CCS_LANG_FLAG" =~ ^[A-Za-z0-9_.@-]{1,32}$ ]] || CCS_LANG_FLAG="?"
+  case "${1:-}" in
+    doctor)
+      args_want_json "$@" && printf '{%s,"installed":"installed","running":"not_applicable","reasons":[{"vocab":"ccs.cli","code":"unknown_option"}]}\n' \
+        "$(machine_outer doctor usage)" ;;
+    open|list|sessions|repo|config)
+      # `command` names the subcommand too, as run_machine does (1.3).
+      __word=$1
+      case "${1}:${2:-}" in
+        repo:add|repo:remove|config:get|config:set) __word="$1 $2" ;;
+      esac
+      args_want_json "$@" && printf '{%s,"reasons":[{"vocab":"ccs.cli","code":"unknown_option"}]}\n' "$(machine_outer "$__word" usage)" ;;
+  esac
+  say_err lang_flag_unknown "value=${CCS_LANG_FLAG}"
+  exit 2
+fi
+
 case "${1:-}" in
   doctor) shift; run_doctor "$@" ;;
   open) shift; run_open "$@" ;;
   list|sessions|repo|config) run_machine "$@" ;;
 esac
+
+# The string tables (docs/design/i18n.md 3): a language without its table
+# reads in English; no English table means a broken install. The commands
+# above answer in JSON and words, so they go on; everything from here on
+# speaks to a person, so it stops with one fixed line (no key names on the
+# screen). --version needs no words.
+if [[ ! -r "${SCRIPT_DIR}/ccs-lang-en.txt" ]]; then
+  case " $* " in
+    *" --version "*|*" -v "*) ;;
+    *)
+      echo "[ccs] ccs is not installed completely: bin/ccs-lang-en.txt is missing. Install ccs again (npm install -g ${CCS_PACKAGE})." >&2
+      exit 1 ;;
+  esac
+fi
 
 # ── Clipboard helper (cross-platform) ────────────────────────────────────────
 clipboard_cmd() {
@@ -520,109 +646,23 @@ CLIP_CMD=$(clipboard_cmd)
 check_deps() {
   local missing=()
   command -v fzf &>/dev/null   || missing+=("fzf")
-  # tsx: a resolved package-local binary counts; only require a PATH tsx
-  # when no local one was found.
-  if [[ "$TSX" == "tsx" ]]; then
-    command -v tsx &>/dev/null || missing+=("tsx (npm install -g tsx)")
-  fi
   command -v node &>/dev/null  || missing+=("node")
   command -v claude &>/dev/null || missing+=("claude (Claude Code CLI)")
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "❌ Missing dependencies:" >&2
+    say_err deps_missing
     for dep in "${missing[@]}"; do
       echo "   - $dep" >&2
     done
     echo "" >&2
-    echo "Install with:" >&2
-    echo "  brew install fzf       # or: apt install fzf" >&2
-    echo "  npm install -g tsx" >&2
+    say_err deps_install
     exit 1
   fi
 }
 
 # ── Help / version ───────────────────────────────────────────────────────────
 print_help() {
-  cat <<HELP
-ccs v${VERSION} - Claude Code Station (fzf-powered launcher)
-
-Usage:
-  ccs                 Mixed list: NEW repos + RESUME sessions
-  ccs .               Sessions whose cwd is (under) current dir
-  ccs --new           Only NEW repo entries
-  ccs --resume        Only past sessions
-  ccs --refresh       Force pre-scan before showing list
-  ccs --no-scan       Skip implicit pre-scan (use stale DB)
-  ccs --ui=simple     Friendlier full-screen look (Japanese text, fzf 0.61+);
-                      --ui=classic forces the default look
-  ccs init            Create ~/.config/ccs/repos.yml from the template
-  ccs init --auto-discover [--depth N]
-                      Scan \$HOME for git repos (default depth 5) and pick
-                      which to add to repos.yml via fzf multi-select
-  ccs [options]       Unknown options pass through to launched command
-
-For scripts and tools (no fzf, no questions, no network; --json prints one
-JSON answer on stdout, and the exit code says what happened):
-  ccs doctor [--json] Does ccs work here? Exit 0 works, 1 does not,
-                      2 bad arguments, 3 could not tell
-  ccs list --json [--with-paths]
-                      repos.yml entries after ccs's checks (paths only
-                      with --with-paths)
-  ccs sessions --json [--project NAME] [--limit N] [--with-titles] [--no-scan]
-                      Past conversations per project, newest first
-                      (titles only with --with-titles)
-  ccs repo add PATH [--name NAME] [--description TEXT] [--json]
-  ccs repo remove NAME [--json]
-                      Add a folder under \$HOME to repos.yml, or take an
-                      entry out (the folder is never touched)
-  ccs config get [--json]
-  ccs config set [--repo NAME] KEY VALUE [--json]
-                      KEY is defaults.ui, defaults.terminal,
-                      defaults.update_check, or label / description
-                      of the entry named by --repo
-  ccs open (--repo NAME | --session UUID) [--here | --new-window]
-                      Start Claude Code without the list: in this terminal
-                      (--here, the default), or in a new window of
-                      defaults.terminal (--new-window, macOS)
-  Exit codes: 0 ok, 1 failed, 2 bad arguments, 3 could not tell,
-  4 missing prerequisite, 5 not found, 6 refused, 7 partly done,
-  130 interrupted. doctor, list, sessions, repo, config and open are
-  commands only as the first argument; \`ccs --new doctor\` still passes
-  doctor on.
-
-Controls:
-  Enter               Launch (or resume) selected entry; does nothing on a
-                      group header (an entry with launch: false)
-  Ctrl-Y              Copy the effective shell command to clipboard
-  Ctrl-I              Copy session UUID (resume) or repo path (new/group)
-  Ctrl-R              Refresh DB and reload list
-  Ctrl-D              Delete session (resume rows only)
-  Esc / Ctrl-C        Cancel
-
-Environment:
-  CCS_CMD             Fallback launch command for repos with no explicit
-                      command. Per-repo command in repos.yml always wins.
-                      Example: export CCS_CMD="opr claude"
-  CCR_CMD             Deprecated — still honored with a warning if CCS_CMD unset
-  CCS_UI              simple | classic — overrides repos.yml defaults.ui
-                      (the --ui= flag wins over both)
-  CCS_NO_UPDATE_CHECK Any non-empty value stops the update check and its notice
-                      (no network request, the cache is not read); so does
-                      defaults.update_check: false in repos.yml
-  CCS_UPDATE_REGISTRY Registry to ask instead of https://registry.npmjs.org
-
-Examples:
-  ccs                                     # Full launcher
-  ccs .                                   # Resume current-dir session
-  ccs --new                               # Pick a repo to launch fresh
-  ccs --refresh                           # Force DB rebuild
-  ccs --dangerously-skip-permissions      # Pass-through flag to claude
-
-Config: ~/.config/ccs/repos.yml
-Cache:  ~/.cache/ccs/state.db, ~/.cache/ccs/update-check
-
-${COPYRIGHT} MIT License.
-HELP
+  say help "version=${VERSION}" "copyright=${COPYRIGHT}"
 }
 
 # ── init subcommand ──────────────────────────────────────────────────────────
@@ -640,27 +680,23 @@ if [[ "${1:-}" == "init" ]]; then
     esac
   done
 
-  if [[ "$TSX" == "tsx" ]] && ! command -v tsx &>/dev/null; then
-    echo "❌ tsx not found (npm install -g tsx)" >&2
-    exit 1
-  fi
-
   if (( ! AUTO )); then
     "${TSX_RUN[@]}" "${CCS_INIT}" scaffold
     exit $?
   fi
 
   check_deps
-  echo "🔍 Scanning \$HOME for git repositories..." >&2
+  say_err init_scanning
   CANDIDATES="$("${TSX_RUN[@]}" "${CCS_INIT}" discover ${INIT_ARGS[@]+"${INIT_ARGS[@]}"})" || exit 1
   if [[ -z "$CANDIDATES" ]]; then
-    echo "No new git repositories found (everything within depth is already registered)." >&2
+    say_err init_none_found
     exit 0
   fi
+  tx INIT_HEADER init_header
   SELECTED=$(printf '%s\n' "$CANDIDATES" | fzf \
     --multi \
     --delimiter=$'\t' \
-    --header=$'TAB: toggle | Enter: add selected to repos.yml | Esc: cancel' \
+    --header="${INIT_HEADER}" \
     --prompt='ccs init> ' \
     --height='80%' \
     --layout=reverse \
@@ -671,7 +707,7 @@ if [[ "${1:-}" == "init" ]]; then
   printf '%s\n' "$SELECTED" | "${TSX_RUN[@]}" "${CCS_INIT}" append || exit 1
   # Index the new repos right away so the next `ccs` shows them with stats.
   "${TSX_RUN[@]}" "${CCS_SCAN}" --force --quiet || {
-    echo "[ccs] scan failed — run \`ccs --refresh\` to index the new repos" >&2
+    say_err init_scan_failed
   }
   exit 0
 fi
@@ -681,7 +717,6 @@ LIST_FLAGS=()
 PASS_ARGS=()
 DO_REFRESH=0
 NO_SCAN=0
-UI_FLAG=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -691,11 +726,10 @@ for arg in "$@"; do
     --refresh)    DO_REFRESH=1 ;;
     --no-scan)    NO_SCAN=1 ;;
     --ui=*)
-      UI_FLAG="${arg#--ui=}"
-      if [[ "$UI_FLAG" != "simple" && "$UI_FLAG" != "classic" ]]; then
-        echo "❌ --ui must be simple or classic (got: ${UI_FLAG})" >&2
-        exit 2
-      fi
+      # Removed in v0.6.0 (one look only). A usage error, not passed on to
+      # the launched command, so an old alias stops here with the reason.
+      say_err ui_flag_removed
+      exit 2
       ;;
     --help|-h)    print_help; exit 0 ;;
     --version|-v) echo "ccs v${VERSION}"; exit 0 ;;
@@ -703,11 +737,9 @@ for arg in "$@"; do
   esac
 done
 
-check_deps
-
 # ── fzf version helpers ──────────────────────────────────────────────────────
 # fzf_at_least MAJOR MINOR — true when the installed fzf is that version or
-# newer. Unparseable / missing version → false (callers fall back safely).
+# newer. Unparseable / missing version → false.
 fzf_at_least() {
   local v
   v=$(fzf --version 2>/dev/null) || return 1
@@ -716,24 +748,19 @@ fzf_at_least() {
   (( maj > $1 || (maj == $1 && min >= $2) ))
 }
 
-# ── UI mode (classic | simple) ───────────────────────────────────────────────
-# Priority: --ui= flag > CCS_UI env > repos.yml defaults.ui > classic. The
-# repos.yml value arrives on the pre-scan's stdout (`ui=<mode>`, --print-ui),
-# so the default launch costs no extra process; only when no scan ran (or it
-# failed) is it read back from the cache the last scan wrote.
-UI_REQ="${UI_FLAG}"
-if [[ -z "$UI_REQ" && -n "${CCS_UI:-}" ]]; then
-  case "${CCS_UI}" in
-    simple|classic) UI_REQ="${CCS_UI}" ;;
-    *) echo "[ccs] CCS_UI must be simple or classic (got: ${CCS_UI}) — ignored" >&2 ;;
-  esac
+check_deps
+
+# The list's flags (--style, the four labels, --ghost) need fzf 0.61+. An
+# older fzf would stop on the first unknown flag, so say why before opening.
+if ! fzf_at_least "${FZF_MIN[@]}"; then
+  FZF_V=$(fzf --version 2>/dev/null | awk '{print $1}')
+  [[ -n "$FZF_V" ]] || tx FZF_V unknown_version
+  say_err fzf_too_old "need=${FZF_MIN[0]}.${FZF_MIN[1]}" "found=${FZF_V}"
+  exit 1
 fi
 
 # ── Pre-scan ─────────────────────────────────────────────────────────────────
-# The scan's stderr is held until the look is known: the classic look prints
-# it exactly as before (then the same "continuing with stale DB" line); the
-# simple look keeps it for after the picker closes, where it can be read.
-UI_CFG=""
+# The scan's stderr is kept for after the picker closes, where it can be read.
 UPDATE_CHECK_CFG="" # off = repos.yml defaults.update_check: false
 SCAN_RAN=0
 SCAN_FAILED=0
@@ -748,10 +775,6 @@ if (( DO_REFRESH || ! NO_SCAN )); then
   (( DO_REFRESH )) && SCAN_ARGS=(--force "${SCAN_ARGS[@]}")
   if SCAN_OUT=$("${TSX_RUN[@]}" "${CCS_SCAN}" "${SCAN_ARGS[@]}" 2>"$SCAN_ERR_FILE"); then
     case "$SCAN_OUT" in
-      *ui=simple*)  UI_CFG="simple" ;;
-      *ui=classic*) UI_CFG="classic" ;;
-    esac
-    case "$SCAN_OUT" in
       *update_check=off*) UPDATE_CHECK_CFG="off" ;;
       *update_check=on*)  UPDATE_CHECK_CFG="on" ;;
     esac
@@ -760,29 +783,13 @@ if (( DO_REFRESH || ! NO_SCAN )); then
   fi
 fi
 
-# No scan this launch (--no-scan, or it failed): the settings the last scan
-# stored, in one read — only when one of them is still needed.
-UI="${UI_REQ:-${UI_CFG}}"
-if [[ -z "$UI" || ( -z "$UPDATE_CHECK_CFG" && -z "${CCS_NO_UPDATE_CHECK:-}" ) ]]; then
+# No scan this launch (--no-scan, or it failed): the setting the last scan
+# stored — only when it is still needed.
+if [[ -z "$UPDATE_CHECK_CFG" && -z "${CCS_NO_UPDATE_CHECK:-}" ]]; then
   SETTINGS_OUT=$("${TSX_RUN[@]}" "${CCS_LIST}" --print-settings 2>/dev/null) || SETTINGS_OUT=""
-  if [[ -z "$UI" ]]; then
-    case "$SETTINGS_OUT" in
-      *ui=simple*) UI="simple" ;;
-      *) UI="classic" ;;
-    esac
-  fi
   case "$SETTINGS_OUT" in
     *update_check=off*) UPDATE_CHECK_CFG="off" ;;
   esac
-fi
-[[ "$UI" == "simple" ]] || UI="classic"
-
-# The simple look's flags (--style, the four labels, --ghost) need fzf 0.61+.
-# On an older fzf the classic look opens instead, with one line saying why.
-if [[ "$UI" == "simple" ]] && ! fzf_at_least 0 61; then
-  FZF_V=$(fzf --version 2>/dev/null | awk '{print $1}')
-  echo "[ccs] やさしい見た目（ui: simple）には fzf 0.61 以上が要ります（いまの fzf: ${FZF_V:-不明}）。ふつうの見た目で開きます。fzf を新しくするには: brew upgrade fzf" >&2
-  UI="classic"
 fi
 
 # Node takes a .ts module's type from the nearest package.json above it, and
@@ -790,8 +797,8 @@ fi
 # keeps the search inside the package, but a copy install (install.sh copies
 # only ccs*) sits under someone else's directories. No rescan or refresh can
 # get past that, so instead of an empty list and exit 0, ccs stops here with
-# one line naming the file. The reason word (invalid_package_config) is the
-# same in both looks, for scripts and the self-check to match on.
+# one line naming the file. The reason word (invalid_package_config) is in
+# the line for scripts and the self-check to match on.
 # text_is_plain TEXT — true when TEXT holds nothing a terminal acts on: no C0
 # control or DEL, no C1 control (UTF-8 C2 80–9F), no mark that reorders text
 # (U+061C, U+200E–F, U+202A–E, U+2066–9). Byte-wise (LC_ALL=C), so it is the
@@ -826,11 +833,8 @@ stop_on_package_config() { # stop_on_package_config STDERR_FILE
   # The path comes from Node's message, i.e. from folder names: one a terminal
   # would act on (ESC, C1, text-direction marks) is not printed.
   text_is_plain "$bad" || bad=""
-  if [[ "$UI" == "simple" ]]; then
-    echo "[ccs] 一覧を開けません（invalid_package_config）: ${bad:-ccs より上のフォルダの package.json} が壊れていて、Node が ccs の部品を読めません。このファイルを直すか消してから、もう一度 ccs と打ってください。" >&2
-  else
-    echo "[ccs] cannot open the list (invalid_package_config): Node cannot parse ${bad:-a package.json above ccs}, so it will not load ccs's modules. Fix or remove that file, then run ccs again." >&2
-  fi
+  [[ -n "$bad" ]] || tx bad package_config_above
+  say_err package_config_broken "file=${bad}"
   exit 1
 }
 (( SCAN_FAILED )) && stop_on_package_config "$SCAN_ERR_FILE"
@@ -842,36 +846,19 @@ native_module_missing() {
 }
 print_native_module_hint() {
   native_module_missing || return 0
-  if [[ "$UI" == "simple" ]]; then
-    echo "[ccs] この環境（$(uname -s)-$(uname -m)）向けの部品（better-sqlite3）が入っていません。ソースから作る必要があります。" >&2
-  else
-    echo "[ccs] better-sqlite3 has no prebuilt module for this platform ($(uname -s)-$(uname -m)); it has to be built from source." >&2
-  fi
+  say_err native_module_missing "platform=$(uname -s)-$(uname -m)"
 }
 
-if [[ "$UI" == "classic" ]]; then
-  cat "$SCAN_ERR_FILE" >&2
-  print_native_module_hint
-  if (( SCAN_FAILED )); then
-    if (( DO_REFRESH )); then
-      echo "[ccs] refresh failed, continuing with stale DB" >&2
-    else
-      echo "[ccs] scan failed, continuing with stale DB" >&2
-    fi
-  fi
-fi
-
-# simple: what to say about the scan once the picker has closed (empty when
-# the scan was quiet). Printed by print_scan_notes.
+# What to say about the scan once the picker has closed (empty when the scan
+# was quiet). Printed by print_scan_notes.
 print_scan_notes() {
-  [[ "$UI" == "simple" ]] || return 0
   if native_module_missing; then
     print_native_module_hint
   elif (( SCAN_FAILED )); then
-    echo "[ccs] 設定ファイル（~/.config/ccs/repos.yml）を読めなかったので、前の一覧を出しました。下の行を直してから、もう一度 ccs と打ってください。" >&2
+    say_err scan_failed_note
     sed 's/^/    /' "$SCAN_ERR_FILE" >&2
   elif [[ -s "$SCAN_ERR_FILE" ]]; then
-    echo "[ccs] 設定ファイルについてのお知らせです（このままでも使えます）。" >&2
+    say_err scan_notes
     sed 's/^/    /' "$SCAN_ERR_FILE" >&2
   fi
 }
@@ -884,21 +871,12 @@ LIST_ARGS_STR=""
 for f in "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}"; do
   LIST_ARGS_STR+=" ${f}"
 done
-if [[ "$UI" == "simple" ]]; then
-  LIST_FLAGS+=("--ui=simple")
-  LIST_ARGS_STR+=" --ui=simple"
-fi
-
-# Header flashes and notices, per look (simple = Japanese, plain words).
-if [[ "$UI" == "simple" ]]; then
-  MSG_COPIED_CMD='📋 開くためのコマンドをコピーしました'
-  MSG_COPIED_ID='📋 会話の番号（またはフォルダの場所）をコピーしました'
-  MSG_NO_REPO_DELETE='[ccs] プロジェクトは一覧から消せません。外すときは ~/.config/ccs/repos.yml を直してください（何かキーを押すと戻ります）'
-else
-  MSG_COPIED_CMD='📋 Copied command to clipboard — ⏎: launch | ^Y: copy again'
-  MSG_COPIED_ID='📋 Copied ID/path to clipboard — ⏎: launch | ^I: copy again'
-  MSG_NO_REPO_DELETE='[ccs] Repos can only be removed by editing ~/.config/ccs/repos.yml (press any key)'
-fi
+# Header flashes and notices, plain words. They go inside fzf actions
+# (change-header(...)) and a single-quoted echo, so the tables keep ASCII
+# parentheses and single quotes out of these texts.
+tx MSG_COPIED_CMD list_copied_cmd
+tx MSG_COPIED_ID list_copied_id
+tx MSG_NO_REPO_DELETE list_no_repo_delete
 
 CLIP_BINDS=()
 if [[ -n "$CLIP_CMD" ]]; then
@@ -937,30 +915,20 @@ DELETE_BIND=(--bind "ctrl-d:execute(
   esac
 )+reload(bash '${CCS_TSX_SH}' '${CCS_LIST}'${LIST_ARGS_STR})")
 
-# enter / double-click on a group header (KIND=group, a repos.yml entry with
-# `launch: false`) keep the picker open instead of accepting the row. That
-# needs fzf's transform action (0.45+); on an older fzf the row is accepted
-# as usual and the post-selection check below exits quietly, like the
-# separator row. The `transform:` form takes the rest of the string as its
-# argument, so the `)` of the case patterns cannot end it early. fzf runs the
-# command with $SHELL -c; the test itself goes through `bash -c` so a
-# non-POSIX login shell (fish) cannot break Enter on every row.
+# enter / double-click on a heading, a group header (KIND=group, a repos.yml
+# entry with `launch: false`) or an empty result keep the picker open and say
+# why nothing opened (a one-line header flash); any cursor move puts the
+# usual guide line back (focus). The `transform:` form takes the rest of the
+# string as its argument, so the `)` of the case patterns cannot end it
+# early. fzf runs the command with $SHELL -c; the test itself goes through
+# `bash -c` so a non-POSIX login shell (fish) cannot break Enter on every row.
+tx MSG_ON_GROUP list_on_group
+tx MSG_ON_SEPARATOR list_on_separator
+tx MSG_NO_MATCH list_no_match
 GROUP_BINDS=()
-if [[ "$UI" == "simple" ]]; then
-  # simple: Enter on a heading, a group header or an empty result says why
-  # nothing opened (a one-line header flash) instead of doing nothing; any
-  # cursor move puts the usual guide line back (focus). fzf >= 0.61 here.
-  MSG_ON_GROUP='  ここは見出しです。下の行をえらんでください'
-  MSG_ON_SEPARATOR='  ここは区切りの行です。上か下の行をえらんでください'
-  MSG_NO_MATCH='  見つかりません。delete キーで文字を消してください'
-  for key in enter double-click; do
-    GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo \"change-header(${MSG_ON_GROUP})\" ;; separator:*) echo \"change-header(${MSG_ON_SEPARATOR})\" ;; \"\") echo \"change-header(${MSG_NO_MATCH})\" ;; *) echo accept ;; esac' _ {4}")
-  done
-elif fzf_at_least 0 45; then
-  for key in enter double-click; do
-    GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo ignore ;; *) echo accept ;; esac' _ {4}")
-  done
-fi
+for key in enter double-click; do
+  GROUP_BINDS+=(--bind "${key}:transform:bash -c 'case \$1 in group:*) echo \"change-header(${MSG_ON_GROUP})\" ;; separator:*) echo \"change-header(${MSG_ON_SEPARATOR})\" ;; \"\") echo \"change-header(${MSG_NO_MATCH})\" ;; *) echo accept ;; esac' _ {4}")
+done
 
 # ctrl-r: force refresh
 REFRESH_BIND=(--bind "ctrl-r:execute(bash '${CCS_TSX_SH}' '${CCS_SCAN}' --force --quiet)+reload(bash '${CCS_TSX_SH}' '${CCS_LIST}'${LIST_ARGS_STR})")
@@ -980,14 +948,9 @@ terminal_cols() {
   if [[ "$size" =~ ^[1-9][0-9]*$ ]]; then echo "$size"; else echo 80; fi
 }
 COLS=$(terminal_cols)
-if (( COLS >= 80 )); then
-  HEADER=$'Enter: launch | ^Y: copy cmd | ^I: copy ID/path | ^R: refresh\n^D: del session (edit repos.yml to remove a repo) | Esc: cancel'
-else
-  HEADER=$'⏎launch ^Y:cmd ^I:ID ^R:refresh\n^D:del[resume] Esc:quit'
-fi
 
 # ── Version and copyright (fzf border label) ─────────────────────────────────
-# The frame already exists in both looks, so the label costs no list row, and
+# The frame already exists, so the label costs no list row, and
 # change-header cannot replace it. fzf draws a label that is too long over the
 # frame's corners, so take the longest form that fits: the title goes first, then
 # the word Copyright, and the version stays. Computed once at start, like the
@@ -997,15 +960,13 @@ fi
 label_fits() { (( COLS >= $1 + 4 )); }
 VERSION_TAG="ccs v${VERSION}"
 COPYRIGHT_SHORT='© INDIGO GROUP LLC.'
-TITLE='Claude Code をはじめる'
-TAG_W=${#VERSION_TAG} COPYRIGHT_W=29 COPYRIGHT_SHORT_W=19 TITLE_W=22
-if [[ "$UI" == "simple" ]]; then
-  PAD='  '
-else
-  PAD=' '
-fi
+tx TITLE list_title
+tx TITLE_W list_title_width
+[[ "$TITLE_W" =~ ^[0-9]{1,3}$ ]] || TITLE_W=${#TITLE}
+TAG_W=${#VERSION_TAG} COPYRIGHT_W=29 COPYRIGHT_SHORT_W=19
+PAD='  '
 PAD_W=$(( ${#PAD} * 2 ))
-if [[ "$UI" == "simple" ]] && label_fits $(( PAD_W + TITLE_W + 2 + TAG_W + 2 + COPYRIGHT_W )); then
+if label_fits $(( PAD_W + TITLE_W + 2 + TAG_W + 2 + COPYRIGHT_W )); then
   BORDER_LABEL="${PAD}${TITLE}  ${VERSION_TAG}  ${COPYRIGHT}${PAD}"
 elif label_fits $(( PAD_W + TAG_W + 2 + COPYRIGHT_W )); then
   BORDER_LABEL="${PAD}${VERSION_TAG}  ${COPYRIGHT}${PAD}"
@@ -1023,6 +984,8 @@ fi
 # cache's text is safe to put in an fzf option. Set UPDATE_LATEST when the npm
 # latest is newer than this version.
 UPDATE_LATEST=""
+UPDATE_NODE_NEEDED="" # X.Y.Z the newer version needs, when this Node is older
+UPDATE_NODE_NOW=""
 UPDATE_INTERVAL=86400
 version_is_newer() { # version_is_newer CANDIDATE CURRENT (both X.Y.Z)
   local a b ai bi i
@@ -1044,17 +1007,28 @@ check_for_update() {
   [[ "$VERSION" =~ $plain ]] || return 0
 
   local cache="${XDG_CACHE_HOME:-$HOME/.cache}/ccs/update-check"
-  local key value latest="" checked=0
+  local key value latest="" checked=0 node_floor="" node_now=""
   if [[ -f "$cache" && -r "$cache" ]]; then
     while IFS='=' read -r key value || [[ -n "$key" ]]; do
       case "$key" in
         latest)  latest="$value" ;;
         checked) checked="$value" ;;
+        node)    node_floor="$value" ;;
       esac
     done < "$cache"
   fi
   if [[ "$latest" =~ $plain ]] && version_is_newer "$latest" "$VERSION"; then
     UPDATE_LATEST="$latest"
+    # The newer version needs a newer Node than this one: say so first, or
+    # the upgrade would install a ccs that cannot start. One `node --version`,
+    # only when there is something to tell.
+    if [[ "$node_floor" =~ $plain ]]; then
+      node_now=$(node --version 2>/dev/null) || node_now=""
+      node_now="${node_now#v}"
+      if [[ "$node_now" =~ $plain ]] && version_is_newer "$node_floor" "$node_now"; then
+        UPDATE_NODE_NEEDED="$node_floor" UPDATE_NODE_NOW="$node_now"
+      fi
+    fi
   fi
 
   # stdout not a terminal = a script or a test, not someone at the picker.
@@ -1068,17 +1042,19 @@ check_for_update() {
 }
 check_for_update || true
 
-# simple: the frame says a new version is out; how to get it is printed once the
+# The frame says a new version is out; how to get it is printed once the
 # picker has closed, where it can be read and copied.
 print_update_note() {
   [[ -n "$UPDATE_LATEST" ]] || return 0
-  echo "[ccs] 新しい ccs v${UPDATE_LATEST} が出ています（いまは v${VERSION}）。上げるには: ${CCS_INSTALL_CMD}" >&2
+  if [[ -n "$UPDATE_NODE_NEEDED" ]]; then
+    say_err update_note_node "latest=${UPDATE_LATEST}" "current=${VERSION}" "node_needed=${UPDATE_NODE_NEEDED}" "node_now=${UPDATE_NODE_NOW}" "command=${CCS_INSTALL_CMD}"
+  else
+    say_err update_note "latest=${UPDATE_LATEST}" "current=${VERSION}" "command=${CCS_INSTALL_CMD}"
+  fi
 }
 
-# ── Launch fzf (simple) ──────────────────────────────────────────────────────
-# Same rows, same bindings and the same post-pick path as the classic look;
-# only the frame, the words and where the badges live differ (the list shows
-# column 1 only — ccs-list puts the whole simple line there).
+# ── Launch fzf ───────────────────────────────────────────────────────────────
+# The list shows column 1 only — ccs-list puts the whole line there.
 #   --no-sort      the list keeps its order while filtering: typing a group's
 #                  name shows the group, then its projects, then their
 #                  conversations — a score sort put the conversations first
@@ -1096,114 +1072,75 @@ print_update_note() {
 #                  message. So zero unbinds focus and result rebinds it once
 #                  there are rows; the result binding already runs bash, so a
 #                  cursor move still costs no process
-if [[ "$UI" == "simple" ]]; then
-  SIMPLE_HEADER='  Enter: ひらく   ↑↓ かマウス: えらぶ   Esc: やめる'
-  LIST_LABEL='  えらぶ  '
-  if (( SCAN_FAILED )); then
-    LIST_LABEL='  えらぶ  ⚠️ 設定ファイルを読めませんでした（Esc でやめると理由が出ます）  '
-  elif [[ -n "$UPDATE_LATEST" ]] && (( COLS >= 44 )); then
-    LIST_LABEL="  えらぶ  ccs v${UPDATE_LATEST} が出ています  "
+tx SIMPLE_HEADER list_guide
+tx LIST_LABEL list_label
+if (( SCAN_FAILED )); then
+  tx LIST_LABEL list_label_config_failed
+elif [[ -n "$UPDATE_LATEST" ]] && (( COLS >= 44 )); then
+  tx LIST_LABEL list_label_update "latest=${UPDATE_LATEST}"
+  if [[ -n "$UPDATE_NODE_NEEDED" ]] && (( COLS >= 64 )); then
+    tx LIST_LABEL list_label_update_node "latest=${UPDATE_LATEST}"
   fi
-  LIST_FAILED=0
-  ROWS=$("${TSX_RUN[@]}" "${CCS_LIST}" "${LIST_FLAGS[@]}" 2>"$LIST_ERR_FILE") || LIST_FAILED=1
-  (( LIST_FAILED )) && stop_on_package_config "$LIST_ERR_FILE"
-  # A bash match, not `printf | grep -q`: grep -q exits at the first hit,
-  # printf then dies of SIGPIPE, and pipefail turns that into "no rows".
-  if [[ "$ROWS" != *$'\t'new:* && "$ROWS" != *$'\t'resume:* ]]; then
-    print_scan_notes
-    if (( LIST_FAILED )); then
-      echo "まだ一覧の準備ができていません。ccs --refresh と打ってください。"
-      exit 0
-    fi
-    case " ${LIST_FLAGS[*]} " in
-      *" --current-only "*)
-        echo "このフォルダでの前の会話は、まだありません。全部の一覧は ccs と打つと出ます。" ;;
-      *" --sessions-only "*)
-        echo "前の会話は、まだありません。ccs と打つと、プロジェクトをえらんで新しく始められます。" ;;
-      *)
-        echo "まだ一覧に出すプロジェクトがありません。"
-        echo "  ・ホームのフォルダから選んで足すには: ccs init --auto-discover"
-        echo "  ・自分で書くときは ~/.config/ccs/repos.yml を開いて、repos: の下にフォルダを足してください" ;;
-    esac
-    exit 0
-  fi
-  FZF_RC=0
-  SELECTED=$(printf '%s\n' "$ROWS" | fzf \
-    --ansi \
-    --delimiter=$'\t' \
-    --with-nth=1 \
-    --no-sort --no-hscroll \
-    --style=full:rounded --border=rounded \
-    --border-label="${BORDER_LABEL}" --border-label-pos=3 \
-    --list-label="${LIST_LABEL}" --input-label='  さがす  ' --preview-label='  中身  ' \
-    --header="${SIMPLE_HEADER}" --header-border=none \
-    --ghost='ここに文字を打つと、しぼりこめます' \
-    --prompt='🔎 ' --pointer='▶' --highlight-line \
-    --info=inline-right --layout=reverse --height=100% \
-    --color='label:blue:bold,border:gray,header:gray,pointer:blue,hl:red,hl+:red' \
-    --preview="bash '${CCS_TSX_SH}' '${CCS_PREVIEW}' {4} {5} --ui=simple" \
-    --preview-window='right,50%,wrap,<50(down,40%,wrap)' \
-    "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
-    "${DELETE_BIND[@]}" \
-    "${REFRESH_BIND[@]}" \
-    "${GROUP_BINDS[@]}" \
-    --bind "focus:change-header(${SIMPLE_HEADER})" \
-    --bind "zero:unbind(focus)+change-header(${MSG_NO_MATCH})" \
-    --bind "change:first" \
-    --bind "result:transform:bash -c 'case \$1 in separator:*) echo \"rebind(focus)+down\" ;; ?*) echo \"rebind(focus)\" ;; esac' _ {4}" \
-  ) || FZF_RC=$?
+fi
+tx INPUT_LABEL list_input_label
+tx PREVIEW_LABEL list_preview_label
+tx GHOST list_ghost
+LIST_FAILED=0
+ROWS=$("${TSX_RUN[@]}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" 2>"$LIST_ERR_FILE") || LIST_FAILED=1
+(( LIST_FAILED )) && stop_on_package_config "$LIST_ERR_FILE"
+# A bash match, not `printf | grep -q`: grep -q exits at the first hit,
+# printf then dies of SIGPIPE, and pipefail turns that into "no rows".
+if [[ "$ROWS" != *$'\t'new:* && "$ROWS" != *$'\t'resume:* ]]; then
   print_scan_notes
-  print_update_note
-  if (( FZF_RC != 0 )) || [[ -z "$SELECTED" ]]; then
-    if (( FZF_RC == 2 )); then
-      echo "[ccs] 一覧をうまく開けませんでした。今の見た目で開くには: ccs --ui=classic" >&2
-    else
-      echo "やめました。もう一度ひらくときは ccs と打ってください。"
-    fi
+  if (( LIST_FAILED )); then
+    say list_not_ready
     exit 0
   fi
+  case " ${LIST_FLAGS[*]+"${LIST_FLAGS[*]}"} " in
+    *" --current-only "*)
+      say list_empty_here ;;
+    *" --sessions-only "*)
+      say list_empty_sessions ;;
+    *)
+      say list_empty_repos ;;
+  esac
+  exit 0
 fi
-
-# ── Launch fzf ───────────────────────────────────────────────────────────────
-if [[ "$UI" == "classic" ]]; then
-# The picker opens below this line (--height), and the header beside the preview
-# is too narrow for the command, so the notice goes above the frame. It costs no
-# list row and stays in the scrollback after the picker closes.
-if [[ -n "$UPDATE_LATEST" ]]; then
-  echo "[ccs] Update v${VERSION} -> v${UPDATE_LATEST}: ${CCS_INSTALL_CMD}" >&2
-fi
-# The rows are read before fzf starts, so a list that cannot load at all stops
-# with its reason instead of opening empty. Any other failure prints what the
-# list said and opens with the rows it gave (each one already checked by
-# ccs-list, and checked again below before anything runs), so a row picked
-# from them launches. Until 0.4.x the list was piped into fzf and such a
-# failure ended ccs without launching, even after a pick.
-ROWS=""
-if ! ROWS=$("${TSX_RUN[@]}" "${CCS_LIST}" "${LIST_FLAGS[@]+"${LIST_FLAGS[@]}"}" 2>"$LIST_ERR_FILE"); then
-  stop_on_package_config "$LIST_ERR_FILE"
-fi
-cat "$LIST_ERR_FILE" >&2
-SELECTED=$({ [[ -z "$ROWS" ]] || printf '%s\n' "$ROWS"; } | fzf \
+FZF_RC=0
+SELECTED=$(printf '%s\n' "$ROWS" | fzf \
   --ansi \
   --delimiter=$'\t' \
-  --with-nth=1..3 \
-  --header="${HEADER}" \
+  --with-nth=1 \
+  --no-sort --no-hscroll \
+  --style=full:rounded --border=rounded \
+  --border-label="${BORDER_LABEL}" --border-label-pos=3 \
+  --list-label="${LIST_LABEL}" --input-label="${INPUT_LABEL}" --preview-label="${PREVIEW_LABEL}" \
+  --header="${SIMPLE_HEADER}" --header-border=none \
+  --ghost="${GHOST}" \
+  --prompt='🔎 ' --pointer='▶' --highlight-line \
+  --info=inline-right --layout=reverse --height=100% \
+  --color='label:blue:bold,border:gray,header:gray,pointer:blue,hl:red,hl+:red' \
   --preview="bash '${CCS_TSX_SH}' '${CCS_PREVIEW}' {4} {5}" \
-  --preview-window='right:55%:wrap' \
+  --preview-window='right,50%,wrap,<50(down,40%,wrap)' \
   "${CLIP_BINDS[@]+"${CLIP_BINDS[@]}"}" \
   "${DELETE_BIND[@]}" \
   "${REFRESH_BIND[@]}" \
-  "${GROUP_BINDS[@]+"${GROUP_BINDS[@]}"}" \
-  --height='80%' \
-  --layout=reverse \
-  --border \
-  --border-label="${BORDER_LABEL}" --border-label-pos=3 \
-  --prompt='ccs> ' \
-  --tabstop=4 \
-) || exit 0
+  "${GROUP_BINDS[@]}" \
+  --bind "focus:change-header(${SIMPLE_HEADER})" \
+  --bind "zero:unbind(focus)+change-header(${MSG_NO_MATCH})" \
+  --bind "change:first" \
+  --bind "result:transform:bash -c 'case \$1 in separator:*) echo \"rebind(focus)+down\" ;; ?*) echo \"rebind(focus)\" ;; esac' _ {4}" \
+) || FZF_RC=$?
+print_scan_notes
+print_update_note
+if (( FZF_RC != 0 )) || [[ -z "$SELECTED" ]]; then
+  if (( FZF_RC == 2 )); then
+    say_err list_fzf_failed
+  else
+    say list_cancelled
+  fi
+  exit 0
 fi
-
-[[ -z "$SELECTED" ]] && exit 0
 
 # ── Parse selected row ───────────────────────────────────────────────────────
 # 6-col TSV from ccs-list.ts: LABEL, DESCRIPTION, BADGES, KIND:KEY, CWD, COMMAND.
@@ -1218,7 +1155,7 @@ fi
 IFS=$'\x1f' read -r _ _ _ KIND_KEY ROW_CWD ROW_CMD <<< "${SELECTED//$'\t'/$'\x1f'}"
 
 if [[ -z "$KIND_KEY" ]]; then
-  echo "❌ Could not parse selection" >&2
+  say_err pick_unparsable
   exit 1
 fi
 
@@ -1226,20 +1163,20 @@ KIND="${KIND_KEY%%:*}"
 KEY="${KIND_KEY#*:}"
 
 # Separator row is a non-actionable divider (empty ROW_CWD/ROW_CMD by design),
-# and a group header (`launch: false`) is display-only (empty ROW_CMD) — it
-# only gets here when the enter binding above is unavailable (fzf < 0.45).
+# and a group header (`launch: false`) is display-only (empty ROW_CMD) — the
+# enter binding above keeps them from being picked; this is the safety net.
 # Short-circuit here so the downstream ROW_CMD empty-check doesn't misfire.
 [[ "$KIND" == "separator" || "$KIND" == "group" ]] && exit 0
 
 if [[ -z "$ROW_CMD" ]]; then
-  echo "❌ Could not parse selection" >&2
+  say_err pick_unparsable
   exit 1
 fi
 
 # Defense-in-depth copy of the policy ccs-config.ts enforces on command at load
 # time. Extra columns would also land here, joined by \x1f, and be refused.
 if ! command_is_safe "$ROW_CMD"; then
-  echo "❌ Refusing the selected row's command (shell metacharacters/control chars)" >&2
+  say_err pick_bad_command
   exit 1
 fi
 
@@ -1252,7 +1189,7 @@ fi
 case "$KIND" in
   resume)
     if [[ ! "$KEY" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-      echo "❌ Invalid session ID format: ${KEY}" >&2
+      say_err pick_bad_session "id=${KEY}"
       exit 1
     fi
     ;;
@@ -1262,7 +1199,7 @@ case "$KIND" in
     # ccs-config.ts enforces on repo names at load time; this is the
     # defense-in-depth copy for rows coming back out of fzf.
     if [[ "$KEY" =~ [\;\&\|\<\>\$\`\"\'\\] || "$KEY" =~ [[:cntrl:]] ]]; then
-      echo "❌ Invalid repo name (shell metacharacters/control chars): ${KEY}" >&2
+      say_err pick_bad_repo "name=${KEY}"
       exit 1
     fi
     ;;
@@ -1272,7 +1209,7 @@ case "$KIND" in
     exit 0
     ;;
   *)
-    echo "❌ Unknown row kind: ${KIND}" >&2
+    say_err pick_bad_kind "kind=${KIND}"
     exit 1
     ;;
 esac
@@ -1281,12 +1218,7 @@ esac
 # path ("$HOME"/*): a bare prefix match would also accept sibling dirs like
 # /Users/xEVIL (audit L-1). A `..` segment could walk back out of $HOME.
 if [[ ( "$ROW_CWD" != "$HOME" && "$ROW_CWD" != "$HOME"/* ) || "/${ROW_CWD}/" == */../* ]]; then
-  if [[ "$UI" == "simple" ]]; then
-    echo "⚠️  ホームの外のフォルダ（${ROW_CWD}）は開けないので、いまいるフォルダで開きます" >&2
-  else
-    echo "⚠️  cwd is outside \$HOME: ${ROW_CWD}" >&2
-    echo "Launching in current directory instead." >&2
-  fi
+  say_err launch_outside_home "folder=${ROW_CWD}"
   ROW_CWD="."
 fi
 
@@ -1297,14 +1229,10 @@ fi
 
 # ── cd ───────────────────────────────────────────────────────────────────────
 if ! cd "$ROW_CWD" 2>/dev/null; then
-  if [[ "$UI" == "simple" ]]; then
-    echo "⚠️  フォルダ ${ROW_CWD} が見つからないので、いまいるフォルダ（$(pwd)）で開きます" >&2
-  else
-    echo "⚠️  Directory ${ROW_CWD} not found. Launching in $(pwd) instead." >&2
-  fi
+  say_err launch_folder_missing "folder=${ROW_CWD}" "here=$(pwd)"
 fi
 
-# $PWD with $HOME shown as ~ (simple look). A function, not
+# $PWD with $HOME shown as ~. A function, not
 # ${PWD/#$HOME/\~}: bash 3.2 — still /bin/bash on macOS — prints the backslash.
 tilde_pwd() {
   case "$PWD" in
@@ -1319,18 +1247,10 @@ tilde_pwd() {
 # with no wildcard expansion — the same path `ccs open --here` takes.
 case "$KIND" in
   resume)
-    if [[ "$UI" == "simple" ]]; then
-      echo "🔄 前の会話のつづきを開きます（$(tilde_pwd)）"
-    else
-      echo "🔄 Resuming session ${KEY} in $(pwd)..."
-    fi
+    say launch_resume "folder=$(tilde_pwd)"
     ;;
   new)
-    if [[ "$UI" == "simple" ]]; then
-      echo "🚀 Claude Code を開きます（$(tilde_pwd)）"
-    else
-      echo "🚀 Launching ${KEY} in $(pwd)..."
-    fi
+    say launch_new "folder=$(tilde_pwd)"
     ;;
 esac
 run_launch_command "$KIND" "$KEY" "$ROW_CMD" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"

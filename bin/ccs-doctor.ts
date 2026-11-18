@@ -2,13 +2,14 @@
  * ccs-doctor.ts — stage 2 of `ccs doctor [--json]`.
  *
  * bin/ccs runs stage 1 in bash (node, tsx, fzf, claude: what must hold before
- * any .ts module can load) and passes the results here; this stage adds what
+ * any module can load; tsx is no longer needed and stage 1 always passes it
+ * as ok, so checks[] keeps its names and order) and passes the results here; this stage adds what
  * needs Node (the modules themselves, better-sqlite3, repos.yml, the cache)
  * and prints the whole answer. When this stage cannot start or answer, bin/ccs
  * builds the answer from stage 1 alone. Contract:
  * docs/design/machine-interface.md 2.1.
  *
- *   tsx ccs-doctor.ts [--json] --node <check> --tsx <check> --fzf <check> --claude <check>
+ *   node ccs-doctor.ts [--json] --node <check> --tsx <check> --fzf <check> --claude <check>
  *   <check> = <status>:<code>[:<version>]   e.g. ok:ok:24.1.0, fail:fzf_missing
  *
  * Writes nothing, anywhere: no config template, no cache directory, no
@@ -28,8 +29,8 @@ import { getPaths, readConfig, ConfigError, type CcsConfig, type TerminalApp } f
 import { readLogicalGroups } from "./ccs-groups.ts";
 import { envelope, EXIT_CODE, type Status } from "./ccs-machine.ts";
 import { jsonForTerminal } from "./ccs-sanitize.ts";
-import { isUiMode, type UiMode } from "./ccs-utils.ts";
 import { pathToFileURL } from "node:url";
+import { currentLang, t } from "./ccs-i18n.ts";
 
 const COMMAND = "doctor";
 
@@ -75,9 +76,6 @@ const STATUSES = new Set<CheckStatus>(["ok", "warn", "fail", "unknown", "skipped
 const WORD_RE = /^[a-z][a-z0-9_]*$/;
 const VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
 
-/** fzf below this cannot run the simple look (--ghost and the labels). */
-const FZF_SIMPLE_MIN: [number, number] = [0, 61];
-
 /**
  * Read one stage-1 result from bin/ccs. Anything not in the expected shape
  * counts as a crashed check rather than being trusted.
@@ -97,14 +95,6 @@ export function parseStage1(name: string, raw: string | undefined): Check {
   const check: Check = { name, status: status as CheckStatus, code };
   if (version !== undefined) check.version = version;
   return check;
-}
-
-function versionAtLeast(version: string, [maj, min]: [number, number]): boolean {
-  const m = /^(\d+)\.(\d+)/.exec(version);
-  if (!m) return false;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  return a > maj || (a === maj && b >= min);
 }
 
 /** `sqlite`: better-sqlite3 loads and opens an in-memory database. */
@@ -131,8 +121,6 @@ export function checkSqlite(): Check {
 export interface ConfigFindings {
   config: Check;
   layout: Check;
-  /** defaults.ui when repos.yml could be read, else undefined. */
-  ui: UiMode | undefined;
   /** defaults.terminal when set (repos.yml read), else null. */
   terminal?: TerminalApp | null;
   /** defaults.update_check when repos.yml could be read, else undefined. */
@@ -155,14 +143,12 @@ export function checkConfig(): ConfigFindings {
     return {
       config: { name: "config", status: "fail", code },
       layout: { name: "config_layout", status: "skipped", code: "blocked" },
-      ui: undefined,
     };
   }
   if (!result.found) {
     return {
       config: { name: "config", status: "warn", code: "config_missing" },
       layout: { name: "config_layout", status: "skipped", code: "not_set" },
-      ui: undefined,
     };
   }
   const { config, warnings, source } = result;
@@ -180,7 +166,6 @@ export function checkConfig(): ConfigFindings {
   return {
     config: { name: "config", status: code === "ok" ? "ok" : "warn", code, ...counts },
     layout: checkLayout(source),
-    ui: config.defaults.ui,
     terminal: config.settings.terminal,
     updateCheck: config.settings.updateCheck,
     groupsDir: checkGroupsDir(config),
@@ -289,12 +274,6 @@ export async function checkTerminal(app: TerminalApp | null): Promise<Check> {
   return { name: "terminal", status: "ok", code: "ok" };
 }
 
-function effectiveUi(configUi: UiMode | undefined): UiMode {
-  const env = process.env.CCS_UI;
-  if (isUiMode(env)) return env;
-  return configUi ?? "classic";
-}
-
 export interface DoctorAnswer {
   exitCode: number;
   json: Record<string, unknown>;
@@ -313,19 +292,6 @@ export async function runDoctor(stage1: Record<string, string | undefined>): Pro
     sqlite.status === "ok"
       ? await checkCache()
       : { name: "cache", status: "skipped", code: "blocked" };
-  const ui = effectiveUi(found.ui);
-
-  // The simple look needs a newer fzf than the list does; bin/ccs then opens
-  // the classic look. Only stage 2 knows the look, so the warning is added here.
-  if (
-    fzf.status === "ok" &&
-    ui === "simple" &&
-    typeof fzf.version === "string" &&
-    !versionAtLeast(fzf.version, FZF_SIMPLE_MIN)
-  ) {
-    fzf.status = "warn";
-    fzf.code = "fzf_too_old_for_simple";
-  }
 
   const terminal = await checkTerminal(found.terminal ?? null);
   const groupsDir: Check = found.groupsDir ?? {
@@ -360,9 +326,12 @@ export async function runDoctor(stage1: Record<string, string | undefined>): Pro
       checks,
       platform: { os: process.platform, arch: process.arch },
       settings: {
-        ui,
+        // One look since v0.6.0; the key stays for readers of the answer.
+        ui: "simple",
         update_check: updateOffByEnv || updateOffByConfig ? "off" : "on",
         update_check_off_by: updateOffByEnv ? "env" : updateOffByConfig ? "config" : null,
+        // The language bin/ccs decided for this run (docs/design/i18n.md 2).
+        language: currentLang(),
       },
     },
   );
@@ -398,10 +367,12 @@ export function humanTable(answer: DoctorAnswer): string {
     const code = c.code === "ok" ? "" : c.code;
     return `  ${c.name.padEnd(14)}${c.status.padEnd(9)}${code}${extra ? (code ? "  " : "") + extra : ""}`.trimEnd();
   });
+  // The same lines as bin/ccs prints when stage 2 cannot run (doctor_* keys);
+  // the table under them is words and stays as it is in every language.
   const status = String(answer.json.status);
-  const verdict =
-    status === "ok" ? "ccs works" : status === "failed" ? "ccs does not work" : "could not tell";
-  return `ccs doctor: ${verdict} (${status})\n${lines.join("\n")}\n`;
+  const head =
+    status === "ok" ? t("doctor_ok") : status === "failed" ? t("doctor_failed") : t("doctor_unknown", { status });
+  return `${head}\n${lines.join("\n")}\n`;
 }
 
 // ---------------------------------------------------------------------------

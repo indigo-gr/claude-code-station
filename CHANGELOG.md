@@ -1,10 +1,36 @@
 # Changelog
 
+[日本語](CHANGELOG.ja.md)
+
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.6.0] — 2026-11-18
+
+### Added
+- **Japanese and English.** ccs's own text (the list, the preview, notices, warnings, errors, `--help`, `ccs init`, the `doctor` table) follows `--lang=ja|en`, then `CCS_LANG`, then `defaults.language` in `repos.yml` (`auto` / `ja` / `en`), then the OS locale (`LC_ALL`, `LC_MESSAGES`, `LANG`: `ja…` is Japanese, anything else English). `ccs config get` and `ccs doctor --json` add `language` to their settings; `ccs config set defaults.language` takes `auto`, `ja` or `en`. `--json`, exit codes and code words do not change with the language. The README and this changelog are now split into English (`README.md`, `CHANGELOG.md`) and Japanese (`README.ja.md`, `CHANGELOG.ja.md`).
+
+### Breaking
+- **ccs's text is English unless your locale (or a setting) says Japanese.** Until 0.5.x the list's look was always in Japanese; with an English or empty locale (common on macOS) it now opens in English. Put `language: ja` under `defaults:` in `repos.yml` to keep Japanese.
+- **ccs now needs Node 24.12.0 or newer** (was 22). `engines.node` is `>=24.12.0`, `ccs doctor` reports an older Node as `node_too_old` (the check now compares the minor version too), and `install.sh` asks for 24.12.0. On Node 22 or early 24, upgrade Node first, then install ccs again. 24.12.0 is where Node's own TypeScript type stripping became stable, which ccs now uses instead of tsx.
+- **One look only: the `classic` look is gone, and ccs needs fzf 0.61.0 or newer** (was 0.42.0). The list always opens in the full-screen look with plain words (what `ui: simple` used to choose). On an older fzf ccs does not open the list and says so in one line; `ccs doctor` reports it as `fzf_too_old`, and `fzf_too_old_for_headers` and `fzf_too_old_for_simple` are no longer reported. `install.sh` asks for 0.61.0.
+- **`--ui=` is a usage error (exit 2) and `CCS_UI` is no longer read.** Remove them from aliases and scripts.
+- **`defaults.ui` in `repos.yml`**: `simple` (or empty) is read as before and changes nothing; `classic` prints one warning and opens the list as usual; any other value is still an error. `ccs config set defaults.ui` takes only `simple` (`classic` is `invalid_value`, exit 6). `ccs config get` and `ccs doctor --json` keep the `defaults.ui` / `settings.ui` keys, always `"simple"`.
+
+### Changed
+- **The update notice says when the new version needs a newer Node.** The daily check also reads the public manifest of npm's latest version (one more GET, still with no ccs version or machine details) for its `engines.node`; when your Node is older, the notice names the Node it needs and says to upgrade Node first, and the frame adds "upgrade Node first" on a wide enough terminal. A floor written other than `>=X[.Y[.Z]]` is not guessed at: the notice then reads as before.
+- **The upgrade command in the notice matches how ccs was installed**: `npm install -g @indigo-gr/claude-code-station` for an npm (or `github:`) install, `cd <clone> && git pull && npm install` for `bin/ccs` run from a clone. A copy install (`install.sh`) still gets no notice.
+- **The README recommends npm, and no longer calls the GitHub install "latest unreleased"**: the GitHub repository carries the same released versions as npm.
+- **ccs runs its modules with Node itself, not tsx.** The npm package carries JavaScript built from the TypeScript sources at release time (Node does not strip types under `node_modules`); a checkout or the copy install (`install.sh`) runs the `.ts` sources directly with Node. Launching, the list, the preview and every `--json` command work as before. The package no longer depends on `tsx`, so `npm i -g` no longer installs it.
+- **`ccs doctor`'s `tsx` check is always `ok`.** It keeps its name and its place in `checks[]` so readers of the JSON are not broken; `tsx_missing` and the `dependency_missing` detail `tsx` are no longer reported. A missing global `tsx` no longer stops `ccs`, `ccs init` or the `--json` commands.
+- **The direct dependencies are pinned to exact versions** (`better-sqlite3` 13.0.3, `yaml` 2.8.3) instead of `^` ranges, so `npm i -g` installs the same versions that were tested rather than the newest in the range on the day of install. The versions themselves are unchanged.
+- **`ccs init --auto-discover` no longer suggests a repository when any folder in its path** — not only its own name — **has DEL, a C1 character or a text-direction mark**; it prints one `[ccs-init] skipped … in the path` line instead. Until now such a parent folder reached the picker as is.
+
+### Fixed
+- **`ccs init --auto-discover` printed a skipped path or a malformed selected line with DEL, C1 or text-direction marks raw on stderr.** Those characters are now written as `\uXXXX`, as in the other `[ccs-init] skipped` line.
 
 ## [0.5.1] — 2026-11-16
 

@@ -1,0 +1,278 @@
+# ccs — 日本語の文（キーは英語の表と同じ。無いキーは英語で出る）
+# 書き方は ccs-lang-en.txt の先頭を見る。fzf の操作に入る文（list_copied_*・
+# list_on_*・list_no_match・list_no_repo_delete）には ASCII の ( ) と ' を入れない。
+
+# --- bin/ccs (launcher, doctor stage 1, init, --help)
+lang_env_unknown=[ccs] CCS_LANG={value} は ccs の知らない言語です（ja・en）。使わずに続けます
+lang_flag_unknown=[ccs] --lang={value} は ccs の知らない言語です。--lang=ja か --lang=en にしてください（usage: unknown_option）
+ccr_cmd_deprecated=[ccs] CCR_CMD は古い名前です。CCS_CMD に名前を変えてください（今は CCR_CMD の値を使います）
+doctor_usage=[ccs] doctor に付けられるのは --json だけです（usage: unknown_option）
+doctor_no_tmp=[ccs] doctor: failed: internal_error — 一時のフォルダを作れません（TMPDIR か /tmp）
+doctor_ok=ccs doctor: ccs は動きます（ok）
+doctor_failed=ccs doctor: ccs は動きません（failed）
+doctor_unknown=ccs doctor: 動くかどうか分かりませんでした（{status}）
+deps_missing=❌ 足りない物があります:
+deps_install=入れ方:\n  brew install fzf       # または: apt install fzf
+init_scanning=🔍 ホームのフォルダから git のリポジトリを探しています…
+init_none_found=新しい git のリポジトリは見つかりませんでした（探した深さの中の物は、もう全部登録してあります）。
+init_header=TAB: えらぶ・はずす | Enter: えらんだ物を repos.yml に足す | Esc: やめる
+init_scan_failed=[ccs] 読み込みに失敗しました。新しいリポジトリを一覧に入れるには ccs --refresh と打ってください
+ui_flag_removed=[ccs] --ui= はなくなりました（v0.6.0 から見た目は 1 つだけです）。--ui= を付けずに ccs と打ってください（usage: unknown_option）
+unknown_version=不明
+fzf_too_old=[ccs] ccs には fzf {need} 以上が要ります（いまの fzf: {found}）。fzf を新しくするには: brew upgrade fzf
+package_config_above=ccs より上のフォルダの package.json
+package_config_broken=[ccs] 一覧を開けません（invalid_package_config）: {file} が壊れていて、Node が ccs の部品を読めません。このファイルを直すか消してから、もう一度 ccs と打ってください。
+native_module_missing=[ccs] この環境（{platform}）向けの部品（better-sqlite3）が入っていません。ソースから作る必要があります。
+scan_failed_note=[ccs] 設定ファイル（~/.config/ccs/repos.yml）を読めなかったので、前の一覧を出しました。下の行を直してから、もう一度 ccs と打ってください。
+scan_notes=[ccs] 設定ファイルについてのお知らせです（このままでも使えます）。
+list_copied_cmd=📋 開くためのコマンドをコピーしました
+list_copied_id=📋 会話の番号（またはフォルダの場所）をコピーしました
+list_no_repo_delete=[ccs] プロジェクトは一覧から消せません。外すときは ~/.config/ccs/repos.yml を直してください（何かキーを押すと戻ります）
+list_on_group=  ここは見出しです。下の行をえらんでください
+list_on_separator=  ここは区切りの行です。上か下の行をえらんでください
+list_no_match=  見つかりません。delete キーで文字を消してください
+list_title=Claude Code をはじめる
+list_title_width=22
+update_note=[ccs] 新しい ccs v{latest} が出ています（いまは v{current}）。上げるには: {command}
+update_note_node=[ccs] 新しい ccs v{latest} が出ています（いまは v{current}）。v{latest} には Node {node_needed} 以上が要ります（いまの Node: {node_now}）。先に Node を上げてから、ccs を上げてください: {command}
+list_guide=  Enter: ひらく   ↑↓ かマウス: えらぶ   Esc: やめる
+list_label=  えらぶ  
+list_label_config_failed=  えらぶ  ⚠️ 設定ファイルを読めませんでした（Esc でやめると理由が出ます）  
+list_label_update=  えらぶ  ccs v{latest} が出ています  
+list_label_update_node=  えらぶ  ccs v{latest} が出ています（先に Node を上げる）  
+list_input_label=  さがす  
+list_preview_label=  中身  
+list_ghost=ここに文字を打つと、しぼりこめます
+list_not_ready=まだ一覧の準備ができていません。ccs --refresh と打ってください。
+list_empty_here=このフォルダでの前の会話は、まだありません。全部の一覧は ccs と打つと出ます。
+list_empty_sessions=前の会話は、まだありません。ccs と打つと、プロジェクトをえらんで新しく始められます。
+list_empty_repos=まだ一覧に出すプロジェクトがありません。\n  ・ホームのフォルダから選んで足すには: ccs init --auto-discover\n  ・自分で書くときは ~/.config/ccs/repos.yml を開いて、repos: の下にフォルダを足してください
+list_fzf_failed=[ccs] 一覧をうまく開けませんでした。fzf の具合を見るには: ccs doctor
+list_cancelled=やめました。もう一度ひらくときは ccs と打ってください。
+pick_unparsable=❌ えらんだ行を読めませんでした
+pick_bad_command=❌ えらんだ行のコマンドは使いません（シェルの記号か制御文字があります）
+pick_bad_session=❌ 会話の番号の形ではありません: {id}
+pick_bad_repo=❌ 使えないプロジェクトの名前です（シェルの記号か制御文字があります）: {name}
+pick_bad_kind=❌ 知らない行の種類です: {kind}
+launch_outside_home=⚠️  ホームの外のフォルダ（{folder}）は開けないので、いまいるフォルダで開きます
+launch_folder_missing=⚠️  フォルダ {folder} が見つからないので、いまいるフォルダ（{here}）で開きます
+launch_resume=🔄 前の会話のつづきを開きます（{folder}）
+launch_new=🚀 Claude Code を開きます（{folder}）
+
+# --- bin/ccs-delete.sh (Ctrl-D)
+delete_press_enter=Enter を押すと戻ります…
+delete_bad_id=❌ 会話の番号の形ではありません
+delete_not_found=❌ 会話の記録のファイルが見つかりません
+delete_title=━━━ 前の会話を消す ━━━
+delete_confirm=この会話を消しますか？ (y/N): 
+delete_failed=❌ 消せませんでした: {file}
+delete_subagent_failed=[ccs] 注意: サブエージェントのフォルダを消せませんでした: {folder}
+delete_cache_failed=[ccs] 注意: 一覧のキャッシュを直せませんでした。次に読み込み直すまで、行が残るかもしれません
+delete_no_node=[ccs] 注意: node が見つからないので、一覧のキャッシュを直せませんでした（ccs --refresh と打ってください）
+delete_done=✅ 消しました
+delete_cancelled=やめました
+
+# --- bin/ccs-config.ts
+cfg_metachars={file}: {where} にシェルの記号があります: {got}
+cfg_must_be_bool={file}: {where} は true か false にしてください（いまの値: {got}）
+cfg_unknown_key=[ccs] {where} に知らないキー "{key}" があります（使わずに続けます）
+cfg_must_be_object={file}: {where} はキーと値の形（object）にしてください
+cfg_name_required={file}: {where} は必ず書いてください（空でない文字列）
+cfg_name_unsafe={file}: {where} にシェルの記号か制御文字があります: {got}
+cfg_path_required_group={file}: launch が false の時は {where} を必ず書いてください
+cfg_must_be_string={file}: {where} は文字列にしてください
+cfg_outside_home={file}: {where} の "{path}" はホームの外です（安全のため使えません）
+cfg_path_missing=[ccs] フォルダが見つかりません: {path}（{where} "{name}"）。disabled: true を書くと、このお知らせは出なくなります
+cfg_tags={file}: {where} は文字列の並び（配列）にしてください
+cfg_custom_too_large={file}: {where} が 64KB の上限を超えています（JSON で 64,000 字まで・いま {got} 字）
+cfg_unreadable={file}: 設定ファイルを読めません（{reason}）
+cfg_yaml_error={file}: YAML の書き方の誤り: {reason}
+cfg_self_reference={file}: {where} に自分を指す値があります（YAML のアンカーを自分の中で使っています）
+cfg_version={file}: version: {got} は使えません（使えるのは 1 だけです）
+cfg_ui_value={file}: defaults.ui は simple にしてください（いまの値: {got}）
+cfg_ui_classic=[ccs] defaults.ui: classic は v0.6.0 でなくなりました。いつもの見た目で開きます（使わずに続けます）
+cfg_one_of={file}: {where} は {allowed} のどれかにしてください（いまの値: {got}）
+cfg_groups_dir={file}: defaults.groups_dir はフォルダのパスにしてください
+cfg_repos_empty={file}: repos には項目を 1 つ以上書いてください
+cfg_duplicate_name={file}: 同じ name が 2 回以上あります: {names}
+cfg_language_unknown=[ccs] defaults.language: {got} は ccs の知らない言語です（auto・ja・en）。使わずに続けます
+cfg_top_not_object={file}: いちばん外側はキーと値の形（key: value）にしてください
+cfg_self_reference_file={file}: 自分を指す値があります（YAML のアンカーを自分の中で使っています）
+
+# --- bin/ccs-list.ts
+list_heading_groups=グループ
+list_heading_projects=プロジェクト
+list_heading_sessions=前の会話のつづき
+list_folder_unknown=（フォルダ不明）
+list_project_in_parent={parent}・{name}
+list_no_topic=（話題なし）
+list_parent_hint=（{parent}）
+list_no_cache=[ccs-list] state.db がありません。先に ccs --refresh と打って、キャッシュを作ってください。
+
+# --- bin/ccs-machine-notes
+note_sessions_json=`ccs sessions` には --json が要ります（手で会話をえらぶ時は ccs --resume と打ってください）
+note_config_missing=repos.yml がまだありません（config_missing）
+note_cache_missing=キャッシュがまだありません（cache_missing）。一度一覧をひらくか、ccs --refresh と打ってください
+note_cache_not_readable=キャッシュを開けません（cache_not_readable）
+note_no_tty=ccs open --here にはターミナルが要ります（no_tty）。スクリプトからは --new-window を使ってください
+note_open_direct=ccs open は bin/ccs から動かしてください
+note_unsupported_os=ccs open --new-window は macOS だけで使えます（unsupported_os）
+note_terminal_not_set=先にターミナルのアプリを決めてください: ccs config set defaults.terminal terminal（terminal_not_set）
+note_launch_file=起動のためのファイルを書けませんでした（launch_failed）
+note_launch_rejected=ターミナルのアプリが起動を受け付けませんでした（launch_failed）
+note_key_not_settable=変えられるのは defaults.ui・defaults.language・defaults.terminal・defaults.update_check・label・description だけです
+note_config_not_readable=repos.yml を読めません（config_not_readable）
+note_unknown_command=知らないコマンドです
+
+# --- bin/ccs-misc
+init_skip_metachars=[ccs-init] 飛ばしました（パスにシェルの記号があります）: {path}
+init_skip_control=[ccs-init] 飛ばしました（パスに制御文字か向きを変える文字があります）: {path}
+init_skip_malformed=[ccs-init] 形の崩れた候補の行を飛ばしました: {line}
+init_nothing_selected=[ccs-init] 何もえらばれなかったので、repos.yml は変えていません
+init_added=[ccs-init] {file} にリポジトリを {n} 件足しました
+init_scaffold_ready=設定ファイルを用意しました: {file}\nそのまま書き足すか、ccs init --auto-discover と打つと、ホームのフォルダから git のリポジトリを探せます。
+scan_locked=[ccs-scan] ほかの読み込みが動いているので飛ばします（一覧が少し古いかもしれませんが、次に読み込み直すと追いつきます）
+db_migrated=[ccs] キャッシュの形を v{version} に更新しました
+db_chmod_failed=[ccs-db] 注意: {file} の権限を 0600 にできませんでした。ほかのユーザーがキャッシュを読めるかもしれません
+
+# --- bin/ccs-preview-session.ts
+session_not_found=会話の記録が見つかりません
+session_dir_unreadable=会話の記録の置き場を読めませんでした
+session_file_missing=会話の記録のファイルが見つかりません（消された会話かもしれません）
+session_too_large=長い会話なので、ここには中身を出しません（{mb}MB）。Enter で開けます
+session_file_unreadable=会話の記録のファイルを読めませんでした
+session_role_user=👤 あなた:
+session_role_claude=🤖 Claude:
+session_heading=  ──── これまでの会話 ────
+session_empty=  （まだやりとりはありません）
+
+# --- bin/ccs-preview.ts
+card_group_title={icon} グループ「{name}」
+card_group_is_heading=  ここは見出しです。開くときは、下のプロジェクトをえらんでください
+card_group_no_listed=  このグループには、一覧に出るプロジェクトがありません
+card_group_members=中のプロジェクト（{n}）
+card_no_cache=まだ一覧の準備ができていません。\nいちど Esc でやめて、ccs --refresh と打ってください。
+card_failed=ここに中身を出せませんでした。Enter で開くことはできます。
+card_not_in_cache=「{name}」はまだ一覧に入っていません。\nEsc でやめて、ccs --refresh と打ってください。
+card_repo_title=✨ {name} で、新しく Claude Code を始めます
+card_repo_lead=  👑 このグループの統括です
+card_folder=フォルダ
+card_folder_missing=     ⚠️  このフォルダが見つかりません。repos.yml の path を確かめてください
+card_last_opened=最後に開いた
+card_never_opened=まだ開いたことはありません
+card_changes_some=まだ保存（commit）していない変更が {n} ファイルあります
+card_changes_none=保存していない変更はありません
+card_branch=作業中のブランチ: {branch}
+card_changes=変更
+card_handoff=申し送り
+card_handoff_count={n} 件あります（前の作業からのメモ）
+card_pending=あとでやること
+card_pending_count={n} 件あります
+card_services=つながっているサービス
+card_list_separator=・
+card_recent_topics=最近の話題
+card_recent_topic_line=・{when}  {topic}
+card_repo_footer=Enter を押すと、このフォルダで Claude Code が開きます
+card_repo_footer_here=Enter を押すと、いまいるフォルダで Claude Code が開きます
+card_group_empty=  このグループには、まだプロジェクトがありません
+card_tag_group=（グループ）
+card_tag_lead=（統括）
+card_session_not_in_cache=この会話はまだ一覧に入っていません。\nEnter で開くことはできます。
+card_session_title=↩️  前の会話のつづきから再開します
+card_project=プロジェクト
+card_last_talked=最後に話した
+card_topic=前の話題
+card_session_footer=Enter を押すと、この会話のつづきが開きます
+card_separator=ここは区切りの行です。上か下の行をえらんでください
+card_cannot_open=この行は開けません。ほかの行をえらんでください
+
+# --- bin/ccs-utils.ts
+time_just_now=たった今
+time_minutes={n} 分前
+time_hours={n} 時間前
+time_yesterday=きのう
+time_days={n} 日前
+time_month_names=1月,2月,3月,4月,5月,6月,7月,8月,9月,10月,11月,12月
+time_date={mon}{day}日
+time_date_year={year}年{mon}{day}日
+time_with_clock={when} {clock}
+
+# --- --help
+help=ccs v{version} - Claude Code Station（fzf で動くランチャー）
+help+=
+help+=使い方:
+help+=  ccs                 一覧: 新しく始めるプロジェクトと前の会話をまとめて出す
+help+=  ccs .               いまのフォルダ（とその下）の前の会話だけ
+help+=  ccs --new           新しく始めるプロジェクトだけ
+help+=  ccs --resume        前の会話だけ
+help+=  ccs --refresh       一覧を出す前に、必ず読み込み直す
+help+=  ccs --no-scan       読み込みをせず、前の一覧を使う
+help+=  ccs --lang=ja|en    この回だけ ccs の文の言語を決める（CCS_LANG と
+help+=                      repos.yml の defaults.language より強い）
+help+=  ccs init            ひな形から ~/.config/ccs/repos.yml を作る
+help+=  ccs init --auto-discover [--depth N]
+help+=                      ホームのフォルダから git のリポジトリを探して（深さの
+help+=                      既定は 5）、repos.yml に足す物を fzf でえらぶ
+help+=  ccs [オプション]    ccs の知らないオプションは、開くコマンドにそのまま渡す
+help+=
+help+=スクリプトや道具から呼ぶ口（fzf を使わず、問いかけもせず、通信もしない。
+help+=--json は標準出力に JSON の答えを 1 つ出し、終了コードで結果を伝える）:
+help+=  ccs doctor [--json] ccs がここで動くか。終了 0 = 動く・1 = 動かない・
+help+=                      2 = 引数の誤り・3 = 分からなかった
+help+=  ccs list --json [--with-paths]
+help+=                      ccs の確認を通った repos.yml の項目（パスは
+help+=                      --with-paths の時だけ）
+help+=  ccs sessions --json [--project NAME] [--limit N] [--with-titles] [--no-scan]
+help+=                      プロジェクトごとの前の会話（新しい順・題は
+help+=                      --with-titles の時だけ）
+help+=  ccs repo add PATH [--name NAME] [--description TEXT] [--json]
+help+=  ccs repo remove NAME [--json]
+help+=                      $HOME の下のフォルダを repos.yml に足す・項目を
+help+=                      外す（フォルダには触らない）
+help+=  ccs config get [--json]
+help+=  ccs config set [--repo NAME] KEY VALUE [--json]
+help+=                      KEY は defaults.ui・defaults.language・
+help+=                      defaults.terminal・defaults.update_check か、
+help+=                      --repo で名指しした項目の label・description
+help+=  ccs open (--repo NAME | --session UUID) [--here | --new-window]
+help+=                      一覧を出さずに Claude Code を始める: このターミナルで
+help+=                      （--here・既定）か、defaults.terminal の新しい
+help+=                      ウィンドウで（--new-window・macOS）
+help+=  終了コード: 0 ok・1 失敗・2 引数の誤り・3 分からなかった・
+help+=  4 前提が足りない・5 見つからない・6 断った・7 途中まで・
+help+=  130 中断。doctor・list・sessions・repo・config・open は最初の引数の
+help+=  時だけコマンドになる（`ccs --new doctor` は doctor をそのまま渡す）。
+help+=  --json の出力は言語で変わらない。
+help+=
+help+=キー:
+help+=  Enter               えらんだ行を開く（前の会話はつづきから）。グループの
+help+=                      見出し（launch: false の項目）では何もしない
+help+=  Ctrl-Y              開くためのコマンドをコピーする
+help+=  Ctrl-I              会話の番号（前の会話）かフォルダの場所をコピーする
+help+=  Ctrl-R              読み込み直して一覧を出し直す
+help+=  Ctrl-D              前の会話を消す（前の会話の行だけ）
+help+=  Esc / Ctrl-C        やめる
+help+=
+help+=環境変数:
+help+=  CCS_CMD             command を書いていないプロジェクトで使うコマンド。
+help+=                      repos.yml の項目の command が必ず勝つ。
+help+=                      例: export CCS_CMD="opr claude"
+help+=  CCR_CMD             古い名前。CCS_CMD が無い時だけ、警告を出して使う
+help+=  CCS_LANG            ja | en — ccs の文の言語（--lang= が勝つ。次に
+help+=                      defaults.language、次に LC_ALL・LC_MESSAGES・LANG）
+help+=  CCS_NO_UPDATE_CHECK 空でない値で、更新の確認とお知らせを止める（通信せず、
+help+=                      キャッシュも読まない）。repos.yml の
+help+=                      defaults.update_check: false でも止まる
+help+=  CCS_UPDATE_REGISTRY https://registry.npmjs.org の代わりに問い合わせる所
+help+=
+help+=例:
+help+=  ccs                                     # 一覧をひらく
+help+=  ccs .                                   # このフォルダの前の会話をつづける
+help+=  ccs --new                               # プロジェクトをえらんで新しく始める
+help+=  ccs --refresh                           # 読み込み直してからひらく
+help+=  ccs --dangerously-skip-permissions      # claude にそのまま渡すオプション
+help+=
+help+=設定: ~/.config/ccs/repos.yml
+help+=キャッシュ: ~/.cache/ccs/state.db, ~/.cache/ccs/update-check
+help+=
+help+={copyright} MIT License.

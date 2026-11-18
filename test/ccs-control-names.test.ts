@@ -30,7 +30,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const CCS_BIN = process.env.CCS_TEST_BIN ?? fileURLToPath(new URL("../bin/ccs", import.meta.url));
 const BIN_DIR = dirname(CCS_BIN);
-const TSX = join(BIN_DIR, "..", "node_modules", ".bin", "tsx");
+// The modules run on Node itself (it strips the types of the .ts sources).
+const NODE = process.execPath;
 
 const RLO = "\u202e";
 const LRI = "\u2066";
@@ -84,9 +85,18 @@ async function dirs(box: Box, ...names: string[]): Promise<void> {
   for (const d of names) await mkdir(join(box.home, d), { recursive: true });
 }
 
-function envFor(box: Box): NodeJS.ProcessEnv {
+type Lang = "ja" | "en";
+const LANGS: readonly Lang[] = ["ja", "en"];
+
+/**
+ * The language is set by each test, never taken from the shell that runs it:
+ * the language variables are dropped and LANG is fixed. A test that reads
+ * the words passes CCS_LANG (bin/ccs) or CCS_LANG_RESOLVED (a module alone).
+ */
+function envFor(box: Box, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    LANG: "en_US.UTF-8",
     PATH: `${box.stubBin}:${process.env.PATH ?? ""}`,
     HOME: box.home,
     XDG_CONFIG_HOME: join(box.home, ".config"),
@@ -95,10 +105,11 @@ function envFor(box: Box): NodeJS.ProcessEnv {
     COLUMNS: "120",
     FAKE_FZF_ROWS: box.fzfRows,
     CCS_NO_UPDATE_CHECK: "1",
-    CCS_TSX_REAL: TSX,
+    CCS_TSX_REAL: NODE,
   };
   for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI", "CCS_UPDATE_REGISTRY", "CCS_TEST_EDIT_PAUSE_MS"]) delete env[k];
-  return env;
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  return { ...env, ...extra };
 }
 
 interface Result {
@@ -107,10 +118,10 @@ interface Result {
   stderr: string;
 }
 
-function run(box: Box, args: string[]): Result {
+function run(box: Box, args: string[], lang?: Lang): Result {
   const res = spawnSync("bash", [CCS_BIN, ...args], {
     encoding: "utf-8",
-    env: envFor(box),
+    env: envFor(box, lang ? { CCS_LANG: lang } : {}),
     cwd: box.root,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -140,18 +151,23 @@ function expect(box: Box, args: string[], code: number, word: string): Answer {
 }
 
 /** The rows the picker hands to fzf, split into columns. */
-async function rows(box: Box, ui: "classic" | "simple"): Promise<string[][]> {
+async function rows(box: Box): Promise<string[][]> {
   await rm(box.fzfRows, { force: true });
-  const res = run(box, [`--ui=${ui}`]);
+  const res = run(box, []);
   assert.equal(res.code, 0, res.stderr);
   const text = await readFile(box.fzfRows, "utf-8");
   return text.split("\n").filter((l) => l !== "").map((l) => l.split("\t"));
 }
 
-function preview(box: Box, key: string, ui: "classic" | "simple"): Result {
+/** What fzf runs for the preview pane: ccs-preview.ts {4} {5} (the card), in the language bin/ccs passes on. */
+function preview(box: Box, key: string, lang: Lang): Result {
   const args = [join(BIN_DIR, "ccs-tsx.sh"), join(BIN_DIR, "ccs-preview.ts"), key, ""];
-  if (ui === "simple") args.push("--ui=simple");
-  const res = spawnSync("bash", args, { encoding: "utf-8", env: envFor(box), cwd: box.root, stdio: ["ignore", "pipe", "pipe"] });
+  const res = spawnSync("bash", args, {
+    encoding: "utf-8",
+    env: envFor(box, { CCS_LANG_RESOLVED: lang }),
+    cwd: box.root,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
@@ -270,19 +286,17 @@ describe("a name written by hand", () => {
     try {
       await dirs(box, "w/web", "w/api");
       await writeFile(box.reposYml, `version: 1\nrepos:\n  - name: "x${RLO}y"\n    path: ~/w/web\n  - name: api\n    path: ~/w/api\n`);
-      for (const ui of ["classic", "simple"] as const) {
-        const all = await rows(box, ui);
-        const row = all.find((r) => r[3] === `new:x${RLO}y`);
-        assert.ok(row, `${ui}: the row keeps its key: ${JSON.stringify(all.map((r) => r[3]))}`);
-        for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `${ui}: shown columns of ${JSON.stringify(r[3])}`);
-        assert.match(row.slice(0, 3).join(" "), /x y/, `${ui}: the name is drawn without the mark`);
-      }
+      const all = await rows(box);
+      const row = all.find((r) => r[3] === `new:x${RLO}y`);
+      assert.ok(row, `the row keeps its key: ${JSON.stringify(all.map((r) => r[3]))}`);
+      for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `shown columns of ${JSON.stringify(r[3])}`);
+      assert.match(row.slice(0, 3).join(" "), /x y/, "the name is drawn without the mark");
     } finally {
       await box.cleanup();
     }
   });
 
-  test("the preview draws it without U+202E, also in the (name) after a label", async () => {
+  test("the card draws it without U+202E, with a label or without", async () => {
     const box = await makeBox();
     try {
       await dirs(box, "w/web", "w/api");
@@ -291,17 +305,15 @@ describe("a name written by hand", () => {
         ["with a label", `  - name: "x${RLO}y"\n    path: ~/w/web\n    label: Web front\n`],
       ] as const) {
         await writeFile(box.reposYml, `version: 1\nrepos:\n${entry}  - name: api\n    path: ~/w/api\n`);
-        await rows(box, "classic"); // scan, so the preview reads a fresh cache
-        for (const ui of ["classic", "simple"] as const) {
-          const res = preview(box, `new:x${RLO}y`, ui);
-          assert.equal(res.code, 0, `${what} ${ui}: ${res.stderr}`);
-          assert.doesNotMatch(res.stdout, RAW, `${what} ${ui}: ${JSON.stringify(res.stdout.slice(0, 300))}`);
-          if (what === "no label") assert.match(res.stdout, /x y/, `${what} ${ui}: the name is the title, cleaned`);
-          else {
-            assert.match(res.stdout, /Web front/, `${what} ${ui}`);
-            // only the classic header adds the dim (name) after a label
-            if (ui === "classic") assert.match(res.stdout, /\(x y\)/, `${what} ${ui}: the (name) after the label, cleaned`);
-          }
+        await rows(box); // scan, so the preview reads a fresh cache
+        const shown = what === "no label" ? "x y" : "Web front";
+        for (const lang of LANGS) {
+          const res = preview(box, `new:x${RLO}y`, lang);
+          assert.equal(res.code, 0, `${what} ${lang}: ${res.stderr}`);
+          assert.doesNotMatch(res.stdout, RAW, `${what} ${lang}: ${JSON.stringify(res.stdout.slice(0, 300))}`);
+          // The card's title is the label, or the name cleaned when there is none.
+          const title = lang === "ja" ? `✨ ${shown} で、新しく Claude Code を始めます` : `✨ Start Claude Code in ${shown}`;
+          assert.ok(res.stdout.includes(title), `${what} ${lang}: the title ${JSON.stringify(title)}: ${JSON.stringify(res.stdout.slice(0, 300))}`);
         }
       }
     } finally {
@@ -332,13 +344,11 @@ describe("a group id without a label", () => {
       const groups = json(res, "list --json").groups as { id: string; label: string }[];
       assert.deepEqual(groups.map((g) => g.id), ids);
       assert.deepEqual(groups.map((g) => g.label), ["a b", "a b", "?"]);
-      for (const ui of ["classic", "simple"] as const) {
-        const all = await rows(box, ui);
-        const headers = all.filter((r) => (r[3] ?? "").startsWith("group:@"));
-        assert.equal(headers.length, 3, `${ui}: ${JSON.stringify(all.map((r) => r[3]))}`);
-        assert.deepEqual(headers.map((r) => r[3]), ids.map((id) => `group:@${id}`), `${ui}: the keys stay as written`);
-        for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `${ui}: shown columns of ${JSON.stringify(r[3])}`);
-      }
+      const all = await rows(box);
+      const headers = all.filter((r) => (r[3] ?? "").startsWith("group:@"));
+      assert.equal(headers.length, 3, JSON.stringify(all.map((r) => r[3])));
+      assert.deepEqual(headers.map((r) => r[3]), ids.map((id) => `group:@${id}`), "the keys stay as written");
+      for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `shown columns of ${JSON.stringify(r[3])}`);
     } finally {
       await box.cleanup();
     }

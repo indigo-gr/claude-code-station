@@ -47,7 +47,7 @@ import {
   type Outcome,
 } from "./ccs-machine.ts";
 import { pathForDisplay, SHELL_METACHARS } from "./ccs-sanitize.ts";
-import { UI_MODES } from "./ccs-utils.ts";
+import { isLanguageSetting, LANGUAGE_SETTINGS, t } from "./ccs-i18n.ts";
 
 const NAME_MAX = 100;
 const LABEL_MAX = 80;
@@ -249,7 +249,8 @@ export async function repoRemove(args: readonly string[]): Promise<Outcome> {
 
 /** The values `config set` takes, per key (shown by `config get` as `allowed`). */
 export const SETTABLE_DEFAULTS = {
-  "defaults.ui": [...UI_MODES] as unknown[],
+  "defaults.ui": ["simple"] as unknown[],
+  "defaults.language": [...LANGUAGE_SETTINGS] as unknown[],
   "defaults.terminal": [...TERMINAL_APPS] as unknown[],
   "defaults.update_check": [true, false] as unknown[],
 } as const;
@@ -271,7 +272,9 @@ export function configGet(args: readonly string[]): Outcome {
   }
   return okOutcome({
     settings: {
-      "defaults.ui": config?.defaults.ui ?? "classic",
+      // One look since v0.6.0; the key stays for readers of the answer.
+      "defaults.ui": "simple",
+      "defaults.language": config?.settings.language ?? "auto",
       "defaults.terminal": config?.settings.terminal ?? null,
       "defaults.update_check": config?.settings.updateCheck ?? true,
       "defaults.groups_dir": groupsDir,
@@ -305,19 +308,25 @@ export function configGetText(outcome: Outcome): string {
 
 type SetKey =
   | "defaults.ui"
+  | "defaults.language"
   | "defaults.terminal"
   | "defaults.update_check"
   | "label"
   | "description";
 
-const DEFAULT_KEYS = new Set<SetKey>(["defaults.ui", "defaults.terminal", "defaults.update_check"]);
+const DEFAULT_KEYS = new Set<SetKey>(["defaults.ui", "defaults.language", "defaults.terminal", "defaults.update_check"]);
 const ENTRY_KEYS = new Set<SetKey>(["label", "description"]);
 
 /** The value to write for this key, or undefined to delete the key. Throws EditStop. */
 function parseSetValue(key: SetKey, raw: string): unknown {
   switch (key) {
     case "defaults.ui":
-      if (!(UI_MODES as readonly string[]).includes(raw)) stop("invalid_value");
+      // One look since v0.6.0: simple is the only value left to write.
+      if (raw !== "simple") stop("invalid_value");
+      return raw;
+    case "defaults.language":
+      // auto / ja / en are all written as given (auto keeps the key visible).
+      if (!isLanguageSetting(raw)) stop("invalid_value");
       return raw;
     case "defaults.terminal":
       if (raw === "") return undefined;
@@ -358,7 +367,7 @@ export async function configSet(args: readonly string[]): Promise<Outcome> {
   const [keyRaw, valueRaw] = flags.positionals;
   const isDefaultKey = DEFAULT_KEYS.has(keyRaw as SetKey);
   if (!isDefaultKey && !ENTRY_KEYS.has(keyRaw as SetKey)) {
-    return cliOutcome("key_not_settable", {}, "only defaults.ui, defaults.terminal, defaults.update_check, label and description can be set");
+    return cliOutcome("key_not_settable", {}, t("note_key_not_settable"));
   }
   const key = keyRaw as SetKey;
   const repoName = flags.values.get("--repo");

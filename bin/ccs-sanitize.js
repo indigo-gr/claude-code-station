@@ -1,0 +1,110 @@
+/**
+ * ccs-sanitize.ts — Shared input-sanitization helpers for ccs.
+ *
+ * Single source of truth for the shell-metacharacter policy and control
+ * character stripping. Two consumers:
+ *   - ccs-config.ts: rejects repos.yml fields at load time (trusted-ish input)
+ *   - ccs-scan.ts:   normalizes session JSONL fields at intake (untrusted
+ *     input — any process able to write ~/.claude/projects can plant values)
+ *
+ * Threat model (audit H-1 / NEW-1, 2026-06-12): session `cwd`/`topic` reach
+ * the fzf list, the preview pane, and the Ctrl-Y clipboard command. Shell
+ * metacharacters enable deferred command injection on paste; raw ESC/OSC
+ * sequences enable terminal spoofing (fzf runs with --ansi). Both classes are
+ * neutralized here, at the trust boundary.
+ */
+// Shell metacharacters forbidden in path/cwd/command values that are ever
+// interpolated into a shell line (fzf execute bindings, clipboard, final
+// launch in bin/ccs). \x00-\x1f covers TAB, NL, CR, ESC and all other C0
+// control characters, so this single class blocks command injection and
+// terminal-escape injection at once.
+export const SHELL_METACHARS = /[;&|<>$`"'\\\n\r\x00-\x1f]/;
+/** True when the value contains any shell metacharacter / control char. */
+export function hasShellMetachars(value) {
+    return SHELL_METACHARS.test(value);
+}
+// The marks that reorder displayed text: U+061C, U+200E-F, U+202A-E, U+2066-9.
+// The one list for every check below and for ccs-config-edit's
+// hasControlChars (bin/ccs's text_is_plain is the bash counterpart and has to
+// be changed with it). Emoji joiners and variation selectors are not in it.
+const REORDER_MARKS = "\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069";
+// DEL and C1 (U+0080-U+009F: a terminal may read U+009B as ESC [).
+const DEL_AND_C1 = "\\x7f-\\x9f";
+// All C0 control characters, DEL, C1 and the reordering marks.
+// \n and \t are NOT exempted: every ccs display surface is
+// single-line-per-field (TSV rows, preview lines), and the TSV protocol between
+// ccs-list and fzf breaks on embedded tabs/newlines.
+const CONTROL_CHARS_RE = new RegExp(`[\\x00-\\x1f${DEL_AND_C1}${REORDER_MARKS}]+`, "g");
+const CONTROL_CHARS_EXCEPT_NEWLINE_RE = new RegExp(`[\\x00-\\x09\\x0b-\\x1f${DEL_AND_C1}${REORDER_MARKS}]+`, "g");
+const HAS_CONTROL_CHAR_RE = new RegExp(`[\\x00-\\x1f${DEL_AND_C1}${REORDER_MARKS}]`);
+/** True when the value has a C0, DEL or C1 character or a reordering mark. */
+export function hasControlChars(value) {
+    return HAS_CONTROL_CHAR_RE.test(value);
+}
+/**
+ * Strip C0 control characters (incl. ESC) and DEL from display text,
+ * collapsing each run into a single space. Defense against terminal-escape
+ * injection (audit NEW-1) for fields that are rendered but never executed:
+ * topic, summary, branch, first_line, commit subjects.
+ */
+export function stripControlChars(text) {
+    return text.replace(CONTROL_CHARS_RE, " ").replace(/\s+/g, " ").trim();
+}
+/** The same cleaning for text shown as several lines: only newlines survive. */
+export function stripControlCharsKeepLines(text) {
+    return text.replace(CONTROL_CHARS_EXCEPT_NEWLINE_RE, " ");
+}
+/**
+ * A key (a repos.yml `name`, a group `id`) as shown on the screen. The key
+ * itself stays as written (it ties rows, the cache and `--repo` together);
+ * only what is drawn loses control and reordering characters. A key made of
+ * nothing else is drawn as `?`.
+ */
+export function keyForDisplay(key) {
+    return stripControlChars(key) || "?";
+}
+/**
+ * A path (a repos.yml `path`, a session cwd, `defaults.groups_dir`) as shown
+ * on the screen: the same cleaning as a key. The path itself stays as written
+ * wherever it is used (launch, `cd`, the cache, `--json`); only what is drawn
+ * loses control and reordering characters, and an empty result is `?`.
+ */
+// Its own name although the rule is a key's today: callers say what they
+// draw, so a path's drawing can change (e.g. a shortened form) without
+// touching every place that draws a key, and the reverse.
+export function pathForDisplay(path) {
+    return keyForDisplay(path);
+}
+// What JSON.stringify leaves raw although a terminal acts on it: DEL, C1,
+// the reordering marks, and the two line separators JavaScript treats as
+// newlines. C0 is already written as \uXXXX by JSON.stringify.
+const JSON_RAW_CONTROLS_RE = new RegExp(`[${DEL_AND_C1}${REORDER_MARKS}\\u2028\\u2029]`, "g");
+/**
+ * JSON.stringify, with the characters above written as `\uXXXX`. The parsed
+ * value is the same; only the bytes on the terminal differ. These characters
+ * can only appear inside JSON strings, so the escape is always valid JSON.
+ */
+export function jsonForTerminal(value) {
+    return JSON.stringify(value).replace(JSON_RAW_CONTROLS_RE, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+/**
+ * Sanitize a session-provided cwd at intake (audit H-1).
+ *
+ * Unlike display text, cwd is later interpolated into a shell `cd` command
+ * (clipboard via Ctrl-Y, launch via bin/ccs), so a tainted value cannot be
+ * "cleaned" — it must be rejected outright. Returns null when the value is
+ * unusable; callers store the "unknown" sentinel instead.
+ */
+export function sanitizeSessionCwd(cwd) {
+    if (cwd.length === 0)
+        return null;
+    if (hasShellMetachars(cwd))
+        return null;
+    if (!cwd.startsWith("/"))
+        return null;
+    // A `..` segment walks out of the checks made on the prefix (the $HOME gate
+    // in bin/ccs), and this value also reaches the clipboard through Ctrl-Y.
+    if (cwd.split("/").includes(".."))
+        return null;
+    return cwd;
+}

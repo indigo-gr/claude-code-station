@@ -31,12 +31,21 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, ensureConfigDir, ConfigError, type CcsConfig } from "../bin/ccs-config.ts";
 import { appendReposToYaml } from "../bin/ccs-init.ts";
 
+// The messages checked in this file are the English ones. Pin the language
+// of this process (and of what it starts) so the shell's locale or a
+// CCS_LANG left in it cannot change them; a test that wants Japanese sets
+// CCS_LANG_RESOLVED itself.
+for (const k of ["CCS_LANG", "LC_ALL", "LC_MESSAGES"]) delete process.env[k];
+process.env.LANG = "en_US.UTF-8";
+process.env.CCS_LANG_RESOLVED = "en";
+
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DOC = readFileSync(join(REPO_ROOT, "docs", "design", "repos-yml-schema.md"), "utf-8");
 const CONFIG_SOURCE = readFileSync(join(REPO_ROOT, "bin", "ccs-config.ts"), "utf-8");
 const CCS_BIN = join(REPO_ROOT, "bin", "ccs");
 const INIT_TS = join(REPO_ROOT, "bin", "ccs-init.ts");
-const TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
+// The modules run on Node itself (it strips the types of the .ts sources).
+const NODE = process.execPath;
 
 // The minimal repos.yml an installer writes. Changing this text is changing the
 // contract: the document's sample has to change with it, and readers be told.
@@ -576,7 +585,7 @@ function autoDiscover(h: { env: NodeJS.ProcessEnv; root: string }): Cli {
 }
 
 function append(h: { env: NodeJS.ProcessEnv; root: string }, candidates: string): Cli {
-  const res = spawnSync(TSX, [INIT_TS, "append"], { encoding: "utf-8", env: h.env, cwd: h.root, input: candidates });
+  const res = spawnSync(NODE, [INIT_TS, "append"], { encoding: "utf-8", env: h.env, cwd: h.root, input: candidates });
   return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 

@@ -175,6 +175,10 @@ function envFor(box: Box, opts: RunOptions = {}): NodeJS.ProcessEnv {
   for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI", "CCS_NO_UPDATE_CHECK", "CCS_UPDATE_REGISTRY", "CCS_DOCTOR_TIMEOUT"]) {
     delete env[k];
   }
+  // The language: English from a fixed locale unless a test sets it, so the
+  // shell's own locale or CCS_LANG cannot change an answer.
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  env.LANG = "en_US.UTF-8";
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     if (v === undefined) delete env[k];
     else env[k] = v;
@@ -217,9 +221,9 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
   return out;
 }
 
-/** What is left in TMPDIR. The TypeScript runner keeps its own cache there (`tsx-<uid>`); that is not ccs's. */
+/** What is left in TMPDIR. Node runs the modules itself (no tsx since v0.6.0), so nothing may stay there. */
 async function leftInTmp(box: Box): Promise<string[]> {
-  return (await readdir(box.tmp)).filter((n) => !n.startsWith("tsx-"));
+  return readdir(box.tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +231,11 @@ async function leftInTmp(box: Box): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 interface CopyOptions {
-  /** `link`: the real node_modules. `no-sqlite`: every module but better-sqlite3. `none`: nothing. */
-  modules?: "link" | "no-sqlite" | "none";
+  /**
+   * `link`: the real node_modules. `no-sqlite`: every module but better-sqlite3.
+   * `no-tsx`: every module but tsx (and no .bin). `none`: nothing.
+   */
+  modules?: "link" | "no-sqlite" | "no-tsx" | "none";
   /** Text of a package.json above the scripts (null = none). */
   manifest?: string | null;
   /** Replace ccs-doctor.ts with this source. */
@@ -245,10 +252,11 @@ async function copyLayout(dir: string, opts: CopyOptions = {}): Promise<string> 
   const modules = opts.modules ?? "link";
   if (modules === "link") {
     await symlink(NODE_MODULES, join(scripts, "node_modules"));
-  } else if (modules === "no-sqlite") {
+  } else if (modules === "no-sqlite" || modules === "no-tsx") {
+    const left = modules === "no-sqlite" ? ["better-sqlite3"] : ["tsx", ".bin"];
     await mkdir(join(scripts, "node_modules"));
     for (const name of await readdir(NODE_MODULES)) {
-      if (name !== "better-sqlite3") await symlink(join(NODE_MODULES, name), join(scripts, "node_modules", name));
+      if (!left.includes(name)) await symlink(join(NODE_MODULES, name), join(scripts, "node_modules", name));
     }
   }
   if (opts.doctor !== undefined) await writeFile(join(scripts, "ccs-doctor.ts"), opts.doctor);
@@ -308,7 +316,7 @@ interface Answer {
   running?: string;
   checks?: Check[];
   platform?: { os: string; arch: string };
-  settings?: { ui: string; update_check: string; update_check_off_by: string | null };
+  settings?: { ui: string; update_check: string; update_check_off_by: string | null; language?: string };
   repos?: Record<string, unknown>[];
   groups?: unknown[];
 }
@@ -398,19 +406,25 @@ describe("ccs doctor: everything in place", () => {
       assert.equal(stateOf(a, "terminal"), "skipped:not_set");
       assert.equal(stateOf(a, "groups_dir"), "skipped:not_set");
       assert.match(a.written_at, /\.\d{3}Z$/, "the module answers with milliseconds");
-      assert.deepEqual(a.settings, { ui: "classic", update_check: "on", update_check_off_by: null });
+      assert.deepEqual(a.settings, { ui: "simple", update_check: "on", update_check_off_by: null, language: "en" });
       assert.equal(res.stderr, "");
     } finally {
       await box.cleanup();
     }
   });
 
-  test("settings follow CCS_UI, defaults.ui and CCS_NO_UPDATE_CHECK", async () => {
+  test("settings: ui is always simple (defaults.ui and CCS_UI change nothing); update_check follows CCS_NO_UPDATE_CHECK", async () => {
     const box = await makeBox();
     try {
-      await config(box, ONE.replace("repos:", "defaults:\n  ui: simple\nrepos:"), ["proj/one"]);
-      assert.equal(doctor(box).a.settings?.ui, "simple");
-      assert.equal(doctor(box, { env: { CCS_UI: "classic" } }).a.settings?.ui, "classic");
+      for (const ui of ["simple", "classic"]) {
+        await config(box, ONE.replace("repos:", `defaults:\n  ui: ${ui}\nrepos:`), ["proj/one"]);
+        assert.equal(doctor(box).a.settings?.ui, "simple", `defaults.ui: ${ui}`);
+        for (const env of ["classic", "simple", "fancy"]) {
+          const { res, a } = doctor(box, { env: { CCS_UI: env } });
+          assert.equal(res.code, 0, res.stderr);
+          assert.equal(a.settings?.ui, "simple", `defaults.ui: ${ui}, CCS_UI=${env}`);
+        }
+      }
       const off = doctor(box, { env: { CCS_NO_UPDATE_CHECK: "1" } }).a.settings;
       assert.deepEqual({ check: off?.update_check, by: off?.update_check_off_by }, { check: "off", by: "env" });
     } finally {
@@ -473,30 +487,30 @@ describe("ccs doctor: something it needs is missing", () => {
     }
   });
 
-  test("an fzf too old to run ccs fails; one only too old for a feature warns", async () => {
+  test("fzf under 0.61 fails with fzf_too_old; 0.61 and later is ok; no feature warnings remain", async () => {
     const box = await makeBox();
     try {
-      await config(box, ONE, ["proj/one"]);
-      const old = doctor(box, { env: { FAKE_FZF_VERSION: "0.41.0" } });
-      assert.equal(old.res.code, 1);
-      assert.equal(stateOf(old.a, "fzf"), "fail:fzf_too_old");
-      assert.deepEqual(codes(old.a), ["ccs.health:fzf_too_old"]);
-
-      const headers = doctor(box, { env: { FAKE_FZF_VERSION: "0.44.0" } });
-      assert.equal(headers.res.code, 0);
-      assert.equal(stateOf(headers.a, "fzf"), "warn:fzf_too_old_for_headers");
-      assert.equal(check(headers.a, "fzf").version, "0.44.0");
-      assert.deepEqual(codes(headers.a), ["ccs.health:ok"], "a warning leaves the whole ok");
-
-      // The simple look needs a newer fzf; the classic one does not.
-      assert.equal(stateOf(doctor(box, { env: { FAKE_FZF_VERSION: "0.55.0" } }).a, "fzf"), "ok:ok");
-      await config(box, ONE.replace("repos:", "defaults:\n  ui: simple\nrepos:"), ["proj/one"]);
-      const simple = doctor(box, { env: { FAKE_FZF_VERSION: "0.55.0" } });
-      assert.equal(simple.res.code, 0);
-      assert.equal(stateOf(simple.a, "fzf"), "warn:fzf_too_old_for_simple");
-      // One word per check: under 0.45 it is the headers word, simple look or not.
-      assert.equal(stateOf(doctor(box, { env: { FAKE_FZF_VERSION: "0.44.0" } }).a, "fzf"), "warn:fzf_too_old_for_headers");
-      assert.equal(stateOf(doctor(box, { env: { FAKE_FZF_VERSION: "0.61.0" } }).a, "fzf"), "ok:ok");
+      for (const ui of [null, "simple", "classic"]) {
+        await config(box, ui ? ONE.replace("repos:", `defaults:\n  ui: ${ui}\nrepos:`) : ONE, ["proj/one"]);
+        for (const old of ["0.41.0", "0.44.0", "0.55.0", "0.60.9"]) {
+          const { res, a } = doctor(box, { env: { FAKE_FZF_VERSION: old } });
+          assert.equal(res.code, 1, `${old} (ui ${ui}): ${res.stdout}`);
+          assert.equal(stateOf(a, "fzf"), "fail:fzf_too_old", `${old} (ui ${ui})`);
+          assert.equal(check(a, "fzf").version, old);
+          assert.deepEqual(codes(a), ["ccs.health:fzf_too_old"], `${old} (ui ${ui})`);
+        }
+        for (const fine of ["0.61.0", "0.65.0"]) {
+          const { res, a } = doctor(box, { env: { FAKE_FZF_VERSION: fine } });
+          assert.equal(res.code, 0, `${fine} (ui ${ui}): ${res.stderr}`);
+          assert.equal(stateOf(a, "fzf"), "ok:ok", `${fine} (ui ${ui})`);
+          assert.deepEqual(codes(a), ["ccs.health:ok"]);
+        }
+      }
+      // The two v0.5 warning words are gone from every answer.
+      for (const v of ["0.44.0", "0.55.0", "0.61.0"]) {
+        const { res } = doctor(box, { env: { FAKE_FZF_VERSION: v } });
+        assert.doesNotMatch(res.stdout, /fzf_too_old_for_(headers|simple)/, v);
+      }
     } finally {
       await box.cleanup();
     }
@@ -933,18 +947,40 @@ describe("ccs list --json", () => {
     }
   });
 
-  test("tsx nowhere: exit 4, dependency_missing with the detail tsx", async () => {
+  // v0.6.0: ccs no longer uses tsx. The check keeps its name and place and is always ok;
+  // dependency_missing never carries the detail tsx.
+  test("tsx nowhere (not on PATH, not in node_modules): list and doctor work, the tsx check is ok", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, SAMPLE, SAMPLE_DIRS);
+      const bin = await copyLayout(join(box.root, "copy"), { modules: "no-tsx" });
+      const path = await pathOf(box, "no-tsx", ["node", "fzf", "claude"]);
+      const { res, a } = list(box, ["--json"], { bin, path });
+      assert.equal(res.code, 0, res.stdout + res.stderr);
+      assert.deepEqual(codes(a), ["ccs.cli:ok"]);
+      assert.ok((a.repos?.length ?? 0) > 0, "the repos are listed");
+      const d = doctor(box, { bin, path });
+      assert.equal(d.res.code, 0, d.res.stdout + d.res.stderr);
+      assert.deepEqual(codes(d.a), ["ccs.health:ok"]);
+      assert.equal(stateOf(d.a, "tsx"), "ok:ok");
+      assert.equal(stateOf(d.a, "modules"), "ok:ok");
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("no modules and no tsx: list stops with a reason, never the detail tsx", async () => {
     const box = await makeBox();
     try {
       await config(box, SAMPLE, SAMPLE_DIRS);
       const bin = await copyLayout(join(box.root, "copy"), { modules: "none" });
       const path = await pathOf(box, "no-tsx", ["node", "fzf", "claude"]);
       const { res, a } = list(box, ["--json"], { bin, path });
-      assert.equal(res.code, 4, res.stdout + res.stderr);
-      assert.deepEqual(a.reasons, [{ vocab: "ccs.cli", code: "dependency_missing", detail: "tsx" }]);
+      assert.notEqual(res.code, 0, res.stdout + res.stderr);
+      assert.ok(a.reasons.length > 0, "a reason is given");
+      for (const r of a.reasons) assert.notEqual(r.detail, "tsx");
       const d = doctor(box, { bin, path });
-      assert.equal(d.res.code, 1);
-      assert.equal(stateOf(d.a, "tsx"), "fail:tsx_missing");
+      assert.equal(stateOf(d.a, "tsx"), "ok:ok");
     } finally {
       await box.cleanup();
     }
@@ -1020,6 +1056,129 @@ describe("ccs doctor and ccs list: a line of repos.yml the parser warns about", 
       }
     },
   );
+});
+
+describe("defaults.ui: classic (removed in v0.6.0) is a warning, not an error", () => {
+  const CLASSIC = ONE.replace("repos:", "defaults:\n  ui: classic\nrepos:");
+  const WARNING = "[ccs] defaults.ui: classic was removed in v0.6.0; ccs opens the simple look (ignored)";
+  const count = (text: string, part: string): number => text.split(part).length - 1;
+
+  test("the launcher says so in one line and opens the simple list", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, CLASSIC, ["proj/one"]);
+      const res = run(box, [], { env: { CCS_NO_UPDATE_CHECK: "1" } });
+      assert.equal(res.code, 0, res.stdout + res.stderr);
+      assert.equal(count(res.stdout + res.stderr, WARNING), 1, res.stderr);
+      const rows = (await readFile(box.fzfRows, "utf-8")).split("\n").filter((r) => r !== "");
+      assert.deepEqual(
+        rows.map((r) => r.split("\t")[3]),
+        ["separator:-", "new:one"],
+        "the simple rows: a heading, then the project",
+      );
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("list --json: exit 0, ok, and nothing on stderr", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, CLASSIC, ["proj/one"]);
+      const { res, a } = list(box, ["--json"]);
+      assert.equal(res.code, 0, res.stdout + res.stderr);
+      assert.deepEqual(codes(a), ["ccs.cli:ok"]);
+      assert.deepEqual(a.repos?.map((r) => r.name), ["one"]);
+      assert.equal(res.stderr, "");
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("doctor: config is ok, classic is not an unknown key, the look is simple", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, CLASSIC, ["proj/one"]);
+      const { res, a } = doctor(box);
+      assert.equal(res.code, 0, res.stdout + res.stderr);
+      assert.deepEqual(codes(a), ["ccs.health:ok"]);
+      assert.equal(stateOf(a, "config"), "ok:ok");
+      assert.equal(check(a, "config").unknown_keys, 0);
+      assert.equal(a.settings?.ui, "simple");
+      assert.equal(res.stderr, "");
+    } finally {
+      await box.cleanup();
+    }
+  });
+});
+
+describe("the language: doctor --json names the decided one; an unknown defaults.language is a warning", () => {
+  const withLanguage = (value: string): string => ONE.replace("repos:", `defaults:\n  language: ${value}\nrepos:`);
+
+  test("settings.language: the locale, then defaults.language, then CCS_LANG; always ja or en", async () => {
+    const box = await makeBox();
+    try {
+      const cases: [string | null, Record<string, string>, string][] = [
+        [null, {}, "en"],
+        [null, { LANG: "ja_JP.UTF-8" }, "ja"],
+        [null, { LANG: "C" }, "en"],
+        ["auto", { LANG: "ja_JP.UTF-8" }, "ja"],
+        ["ja", {}, "ja"],
+        ["en", { LANG: "ja_JP.UTF-8" }, "en"],
+        ["en", { CCS_LANG: "ja" }, "ja"],
+      ];
+      for (const [setting, env, want] of cases) {
+        await config(box, setting === null ? ONE : withLanguage(setting), ["proj/one"]);
+        const { res, a } = doctor(box, { env });
+        const what = `defaults.language ${setting} ${JSON.stringify(env)}`;
+        assert.equal(res.code, 0, `${what}: ${res.stderr}`);
+        assert.equal(a.settings?.language, want, what);
+      }
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("an unknown defaults.language: doctor's config is ok, not an unknown key, and the locale decides", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, withLanguage("fr"), ["proj/one"]);
+      for (const [env, want] of [[{}, "en"], [{ LANG: "ja_JP.UTF-8" }, "ja"]] as const) {
+        const { res, a } = doctor(box, { env });
+        assert.equal(res.code, 0, res.stdout + res.stderr);
+        assert.deepEqual(codes(a), ["ccs.health:ok"]);
+        assert.equal(stateOf(a, "config"), "ok:ok");
+        assert.equal(check(a, "config").unknown_keys, 0);
+        assert.equal(a.settings?.language, want);
+        assert.equal(res.stderr, "");
+      }
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("an unknown defaults.language: list --json is 0 and quiet; the launcher warns in one line", async () => {
+    const box = await makeBox();
+    try {
+      await config(box, withLanguage("fr"), ["proj/one"]);
+      const { res, a } = list(box, ["--json"]);
+      assert.equal(res.code, 0, res.stdout + res.stderr);
+      assert.deepEqual(codes(a), ["ccs.cli:ok"]);
+      assert.equal(res.stderr, "");
+
+      const opened = run(box, [], { env: { CCS_NO_UPDATE_CHECK: "1" } });
+      assert.equal(opened.code, 0, opened.stdout + opened.stderr);
+      const warnings = (opened.stdout + opened.stderr).split("\n").filter((l) => l.includes("defaults.language"));
+      assert.deepEqual(
+        warnings.map((l) => l.trim()),
+        ['[ccs] defaults.language: "fr" is not a language ccs knows (auto, ja, en); ignored'],
+      );
+      const rows = (await readFile(box.fzfRows, "utf-8")).split("\n").filter((r) => r !== "");
+      assert.deepEqual(rows.map((r) => r.split("\t")[3]), ["separator:-", "new:one"], "the list still opens");
+    } finally {
+      await box.cleanup();
+    }
+  });
 });
 
 describe("ccs doctor and ccs list: nothing written, nothing sent, nothing leaked", () => {

@@ -11,6 +11,7 @@
 
 import { keyForDisplay, stripControlChars } from "./ccs-sanitize.ts";
 import { parseDbTime } from "./ccs-time.ts";
+import { t as tr } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // Cross-module constants
@@ -160,13 +161,13 @@ export function formatRelativeTime(
 }
 
 // ---------------------------------------------------------------------------
-// Friendly (ui: simple) time — Japanese, calendar-aware
+// Friendly time — in the run's language, calendar-aware
 // ---------------------------------------------------------------------------
 
 export interface FriendlyTimeOptions {
   /** Reference time (tests pin it). */
   nowMs?: number;
-  /** Append the local clock ("きのう 17:40", "11月1日 09:05"). */
+  /** Append the local clock ("yesterday 17:40", "11月1日 09:05"). */
   clock?: boolean;
   /** Returned for null/unparseable input. */
   invalid?: string;
@@ -182,12 +183,13 @@ function localDayIndex(ms: number): number {
 }
 
 /**
- * Relative time for the simple UI, written the way people say it:
- * たった今 / N 分前 / N 時間前 / きのう / N 日前 / M月D日 (YYYY年 when the
- * year differs). "きのう" and "N 日前" follow the local calendar, not 24-hour
- * blocks, so a session from last night reads "きのう" the next morning —
- * except within the first 6 hours, where "N 時間前" is the clearer answer
- * (23:00 seen at 01:00 is "2 時間前", not "きのう").
+ * Relative time for the list and the cards, written the way people say it
+ * (the words come from the string table, time_*): just now / N min ago /
+ * N h ago / yesterday / N days ago / a date (with the year when it differs).
+ * "yesterday" and "N days ago" follow the local calendar, not 24-hour
+ * blocks, so a session from last night reads "yesterday" the next morning —
+ * except within the first 6 hours, where "N h ago" is the clearer answer
+ * (23:00 seen at 01:00 is "2 h ago", not "yesterday").
  */
 export function formatFriendlyTime(
   iso: string | null | undefined,
@@ -201,27 +203,31 @@ export function formatFriendlyTime(
   const d = new Date(t);
   const pad = (n: number) => String(n).padStart(2, "0");
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const withClock = (s: string) => (opts.clock ? `${s} ${hm}` : s);
+  const withClock = (s: string) => (opts.clock ? tr("time_with_clock", { when: s, clock: hm }) : s);
 
   const diffMs = now - t;
-  if (diffMs < 60_000) return "たった今";
+  if (diffMs < 60_000) return tr("time_just_now");
   const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return `${minutes} 分前`;
+  if (minutes < 60) return tr("time_minutes", { n: minutes });
   const hours = Math.floor(minutes / 60);
   const days = localDayIndex(now) - localDayIndex(t);
-  if (days <= 0 || hours < 6) return `${hours} 時間前`;
-  if (days === 1) return withClock("きのう");
-  if (days < 7) return withClock(`${days} 日前`);
-  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  if (days <= 0 || hours < 6) return tr("time_hours", { n: hours });
+  if (days === 1) return withClock(tr("time_yesterday"));
+  if (days < 7) return withClock(tr("time_days", { n: days }));
+  const parts = {
+    year: d.getFullYear(),
+    mon: (tr("time_month_names").split(",")[d.getMonth()] ?? String(d.getMonth() + 1)).trim(),
+    day: d.getDate(),
+  };
   const date =
     d.getFullYear() === new Date(now).getFullYear()
-      ? md
-      : `${d.getFullYear()}年${md}`;
+      ? tr("time_date", parts)
+      : tr("time_date_year", parts);
   return withClock(date);
 }
 
 // ---------------------------------------------------------------------------
-// Terminal display width (ui: simple column alignment)
+// Terminal display width (list column alignment)
 // ---------------------------------------------------------------------------
 
 const WIDE_RANGES: [number, number][] = [
@@ -284,28 +290,6 @@ export function tildePath(p: string, home: string): string {
   if (!p) return "";
   if (p === home) return "~";
   return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
-}
-
-// ---------------------------------------------------------------------------
-// UI mode (repos.yml `defaults.ui`)
-// ---------------------------------------------------------------------------
-
-export type UiMode = "classic" | "simple";
-export const UI_MODES: readonly UiMode[] = ["classic", "simple"];
-
-export function isUiMode(v: unknown): v is UiMode {
-  return typeof v === "string" && (UI_MODES as readonly string[]).includes(v);
-}
-
-/** `--ui=simple` / `--ui=classic` from argv; anything else → classic. */
-export function uiFromArgv(argv: string[]): UiMode {
-  for (const a of argv) {
-    if (a.startsWith("--ui=")) {
-      const v = a.slice("--ui=".length);
-      return isUiMode(v) ? v : "classic";
-    }
-  }
-  return "classic";
 }
 
 /** Render a DB timestamp as local "YYYY-MM-DD HH:MM"; `invalid` on failure. */

@@ -3,12 +3,11 @@
  * here U+0085) and the marks that reorder displayed text (here U+202E).
  *
  * What a caller relies on, and what these tests hold:
- *  - what is drawn never carries those characters: the line under the preview
- *    title, the relative paths under a group's Entries, the folder on the
- *    simple card, the session row without a project, the session card and
- *    preview, the `defaults.groups_dir` line of `config get`, and the preview
- *    shown before the cache exists or for a key missing from it. Each run of
- *    them becomes one space; a path made of nothing else is drawn as `?`;
+ *  - what is drawn never carries those characters: the folder on the repo
+ *    card, the group card, the session row without a project, the session
+ *    card, the `defaults.groups_dir` line of `config get`, and the card shown
+ *    before the cache exists or for a key missing from it. Each run of them
+ *    becomes one space;
  *  - the path itself stays as written where it is used: the CWD column of
  *    the row (launch, Ctrl-Y, Ctrl-I read it), `list --json --with-paths` and
  *    `config get --with-paths --json` (there the characters are \uXXXX on
@@ -31,7 +30,8 @@ import { fileURLToPath } from "node:url";
 
 const CCS_BIN = process.env.CCS_TEST_BIN ?? fileURLToPath(new URL("../bin/ccs", import.meta.url));
 const BIN_DIR = dirname(CCS_BIN);
-const TSX = join(BIN_DIR, "..", "node_modules", ".bin", "tsx");
+// The modules run on Node itself (it strips the types of the .ts sources).
+const NODE = process.execPath;
 
 const ch = (code: number): string => String.fromCharCode(code);
 const RLO = ch(0x202e);
@@ -100,9 +100,18 @@ async function makeBox(): Promise<Box> {
   };
 }
 
-function envFor(box: Box): NodeJS.ProcessEnv {
+type Lang = "ja" | "en";
+const LANGS: readonly Lang[] = ["ja", "en"];
+
+/**
+ * The language is set by each test, never taken from the shell that runs it:
+ * the language variables are dropped and LANG is fixed. A test that reads
+ * the words passes CCS_LANG (bin/ccs) or CCS_LANG_RESOLVED (a module alone).
+ */
+function envFor(box: Box, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    LANG: "en_US.UTF-8",
     PATH: `${box.stubBin}:${process.env.PATH ?? ""}`,
     HOME: box.home,
     XDG_CONFIG_HOME: join(box.home, ".config"),
@@ -111,10 +120,11 @@ function envFor(box: Box): NodeJS.ProcessEnv {
     COLUMNS: "120",
     FAKE_FZF_ROWS: box.fzfRows,
     CCS_NO_UPDATE_CHECK: "1",
-    CCS_TSX_REAL: TSX,
+    CCS_TSX_REAL: NODE,
   };
   for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI", "CCS_UPDATE_REGISTRY", "CCS_TEST_EDIT_PAUSE_MS"]) delete env[k];
-  return env;
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  return { ...env, ...extra };
 }
 
 interface Result {
@@ -123,10 +133,10 @@ interface Result {
   stderr: string;
 }
 
-function run(box: Box, args: string[]): Result {
+function run(box: Box, args: string[], lang?: Lang): Result {
   const res = spawnSync("bash", [CCS_BIN, ...args], {
     encoding: "utf-8",
-    env: envFor(box),
+    env: envFor(box, lang ? { CCS_LANG: lang } : {}),
     cwd: box.root,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -142,25 +152,53 @@ function parse(res: Result, what: string): Record<string, unknown> {
 }
 
 /** The rows the picker hands to fzf, split into columns. */
-async function rows(box: Box, ui: "classic" | "simple"): Promise<string[][]> {
+async function rows(box: Box): Promise<string[][]> {
   await rm(box.fzfRows, { force: true });
-  const res = run(box, [`--ui=${ui}`]);
+  const res = run(box, []);
   assert.equal(res.code, 0, res.stderr);
   const text = await readFile(box.fzfRows, "utf-8");
   return text.split("\n").filter((l) => l !== "").map((l) => l.split("\t"));
 }
 
-/** What fzf runs for the preview pane: ccs-preview.ts {4} {5} [--ui=simple]. */
-function preview(box: Box, key: string, cwd: string, ui: "classic" | "simple"): Result {
+/** What fzf runs for the preview pane: ccs-preview.ts {4} {5} (the card), in the language bin/ccs passes on. */
+function preview(box: Box, key: string, cwd: string, lang: Lang): Result {
   const args = [join(BIN_DIR, "ccs-tsx.sh"), join(BIN_DIR, "ccs-preview.ts"), key, cwd];
-  if (ui === "simple") args.push("--ui=simple");
-  const res = spawnSync("bash", args, { encoding: "utf-8", env: envFor(box), cwd: box.root, stdio: ["ignore", "pipe", "pipe"] });
+  const res = spawnSync("bash", args, {
+    encoding: "utf-8",
+    env: envFor(box, { CCS_LANG_RESOLVED: lang }),
+    cwd: box.root,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
 /** Drop the ANSI styling, so a line reads as drawn. */
 function plain(text: string): string {
   return text.replace(new RegExp(ch(27) + "\\[[0-9;]*m", "g"), "");
+}
+
+/** The card's fixed words this file looks at, as bin/ccs-lang-<lang>.txt has them. */
+const WORDS: Record<Lang, { folder: string; group: (name: string) => string; notReady: string; notInList: (name: string) => string }> = {
+  ja: {
+    folder: "📂 フォルダ",
+    group: (name) => `📂 グループ「${name}」`,
+    notReady: "まだ一覧の準備ができていません。",
+    notInList: (name) => `「${name}」はまだ一覧に入っていません。`,
+  },
+  en: {
+    folder: "📂 Folder",
+    group: (name) => `📂 Group "${name}"`,
+    notReady: "The list is not ready yet.",
+    notInList: (name) => `"${name}" is not in the list yet.`,
+  },
+};
+
+/** The card's lines, styling dropped and the indent trimmed. */
+function cardLines(text: string): string[] {
+  return plain(text)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
 }
 
 // Made-up layout: a group header, an entry whose path has U+202E, U+0085 and
@@ -194,15 +232,13 @@ describe("a repos.yml path with U+202E, U+0085 and DEL (cache built)", () => {
     const box = await makeBox();
     try {
       const { groupPath, webPath } = await groupLayout(box);
-      for (const ui of ["classic", "simple"] as const) {
-        const all = await rows(box, ui);
-        const web = all.find((r) => r[3] === "new:web");
-        const studio = all.find((r) => r[3] === "group:studio");
-        assert.ok(web && studio, `${ui}: ${JSON.stringify(all.map((r) => r[3]))}`);
-        assert.equal(web[4], webPath, `${ui}: the CWD column (launch, Ctrl-Y) is the path as written`);
-        assert.equal(studio[4], groupPath, `${ui}: the group header's CWD column is the path as written`);
-        for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `${ui}: shown columns of ${JSON.stringify(r[3])}`);
-      }
+      const all = await rows(box);
+      const web = all.find((r) => r[3] === "new:web");
+      const studio = all.find((r) => r[3] === "group:studio");
+      assert.ok(web && studio, JSON.stringify(all.map((r) => r[3])));
+      assert.equal(web[4], webPath, "the CWD column (launch, Ctrl-Y) is the path as written");
+      assert.equal(studio[4], groupPath, "the group header's CWD column is the path as written");
+      for (const r of all) assert.doesNotMatch(r.slice(0, 3).join("\t"), RAW, `shown columns of ${JSON.stringify(r[3])}`);
     } finally {
       await box.cleanup();
     }
@@ -223,41 +259,39 @@ describe("a repos.yml path with U+202E, U+0085 and DEL (cache built)", () => {
     }
   });
 
-  test("the repo preview: the line under the title is the path with each run as one space (classic and simple)", async () => {
+  test("the repo card: the folder is the path with each run as one space", async () => {
     const box = await makeBox();
     try {
       const { webPath } = await groupLayout(box);
-      await rows(box, "classic"); // scan, so the preview reads a fresh cache
-      const res = preview(box, "new:web", webPath, "classic");
-      assert.equal(res.code, 0, res.stderr);
-      assert.doesNotMatch(res.stdout, RAW, JSON.stringify(res.stdout.slice(0, 400)));
-      const lines = plain(res.stdout).split("\n");
-      assert.equal(lines[1], join(box.home, "g s", "a b c d"), `the line under the title: ${JSON.stringify(lines.slice(0, 3))}`);
-
-      const simple = preview(box, "new:web", webPath, "simple");
-      assert.equal(simple.code, 0, simple.stderr);
-      assert.doesNotMatch(simple.stdout, RAW, JSON.stringify(simple.stdout.slice(0, 400)));
-      assert.match(plain(simple.stdout), /~\/g s\/a b c d/, "the folder on the simple card");
+      await rows(box); // scan, so the preview reads a fresh cache
+      for (const lang of LANGS) {
+        const res = preview(box, "new:web", webPath, lang);
+        assert.equal(res.code, 0, `${lang}: ${res.stderr}`);
+        assert.doesNotMatch(res.stdout, RAW, `${lang}: ${JSON.stringify(res.stdout.slice(0, 400))}`);
+        const lines = cardLines(res.stdout);
+        const folder = lines.indexOf(WORDS[lang].folder);
+        assert.notEqual(folder, -1, `${lang}: the folder heading: ${JSON.stringify(lines)}`);
+        assert.equal(lines[folder + 1], "~/g s/a b c d", `${lang}: the folder on the card: ${JSON.stringify(lines)}`);
+      }
     } finally {
       await box.cleanup();
     }
   });
 
-  test("the group preview: the header path and the Entries' relative paths are cleaned; one made only of U+202E is ?/", async () => {
+  test("the group card: nothing raw; the members under paths with the marks are listed by name", async () => {
     const box = await makeBox();
     try {
       const { groupPath } = await groupLayout(box);
-      await rows(box, "classic");
-      for (const ui of ["classic", "simple"] as const) {
-        const res = preview(box, "group:studio", groupPath, ui);
-        assert.equal(res.code, 0, `${ui}: ${res.stderr}`);
-        assert.doesNotMatch(res.stdout, RAW, `${ui}: ${JSON.stringify(res.stdout.slice(0, 600))}`);
-        if (ui === "classic") {
-          const text = plain(res.stdout);
-          assert.equal(text.split("\n")[1], join(box.home, "g s"), "the line under the title");
-          assert.match(text, /^ {2}\S+ web\s+a b c d\/$/m, `web's relative path: ${text}`);
-          assert.match(text, /^ {2}\S+ only\s+\?\/$/m, `a relative path of only U+202E: ${text}`);
-        }
+      await rows(box);
+      for (const lang of LANGS) {
+        const res = preview(box, "group:studio", groupPath, lang);
+        assert.equal(res.code, 0, `${lang}: ${res.stderr}`);
+        assert.doesNotMatch(res.stdout, RAW, `${lang}: ${JSON.stringify(res.stdout.slice(0, 600))}`);
+        const lines = cardLines(res.stdout);
+        assert.ok(lines.includes(WORDS[lang].group("studio")), `${lang}: the title: ${JSON.stringify(lines)}`);
+        // The members, the one whose relative path is only U+202E included.
+        const members = lines.slice(lines.findIndex((l) => l.startsWith("🗂")) + 1);
+        assert.deepEqual(members, ["📁 only", "📁 web"], `${lang}: the members: ${JSON.stringify(lines)}`);
       }
     } finally {
       await box.cleanup();
@@ -270,7 +304,7 @@ describe("a repos.yml path with U+202E, U+0085 and DEL (cache built)", () => {
 // ---------------------------------------------------------------------------
 
 describe("a session without a project whose cwd has U+202E", () => {
-  test("the row, the session preview and the simple card draw the cwd without it; the CWD column keeps it", async () => {
+  test("the row and the session card draw the cwd without it; the CWD column keeps it", async () => {
     const box = await makeBox();
     try {
       await mkdir(join(box.home, "w", "api"), { recursive: true });
@@ -284,22 +318,22 @@ describe("a session without a project whose cwd has U+202E", () => {
         join(project, `${uuid}.jsonl`),
         JSON.stringify({ type: "user", cwd, timestamp: new Date().toISOString(), message: { content: "hello there" } }) + "\n",
       );
-      const all = await rows(box, "classic");
+      const all = await rows(box);
       const row = all.find((r) => r[3] === `resume:${uuid}`);
       assert.ok(row, `the session row: ${JSON.stringify(all.map((r) => r[3]))}`);
       assert.equal(row[4], cwd, "the CWD column (launch, Ctrl-Y) is the cwd as written");
       assert.doesNotMatch(row.slice(0, 3).join("\t"), RAW, JSON.stringify(row.slice(0, 3)));
       assert.match(row[0], /~\/p q/, "the cwd shown in place of a project name");
 
-      const pv = preview(box, `resume:${uuid}`, cwd, "classic");
-      assert.equal(pv.code, 0, pv.stderr);
-      assert.doesNotMatch(pv.stdout, RAW, JSON.stringify(pv.stdout.slice(0, 400)));
-      assert.match(plain(pv.stdout), new RegExp(`📁 ${join(box.home, "p q").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the 📁 line");
-
-      const card = preview(box, `resume:${uuid}`, cwd, "simple");
-      assert.equal(card.code, 0, card.stderr);
-      assert.doesNotMatch(card.stdout, RAW, JSON.stringify(card.stdout.slice(0, 400)));
-      assert.match(plain(card.stdout), /~\/p q/, "the folder on the session card");
+      for (const lang of LANGS) {
+        const card = preview(box, `resume:${uuid}`, cwd, lang);
+        assert.equal(card.code, 0, `${lang}: ${card.stderr}`);
+        assert.doesNotMatch(card.stdout, RAW, `${lang}: ${JSON.stringify(card.stdout.slice(0, 400))}`);
+        const lines = cardLines(card.stdout);
+        const folder = lines.indexOf(WORDS[lang].folder);
+        assert.notEqual(folder, -1, `${lang}: the folder heading: ${JSON.stringify(lines)}`);
+        assert.equal(lines[folder + 1], "~/p q", `${lang}: the folder on the session card: ${JSON.stringify(lines)}`);
+      }
     } finally {
       await box.cleanup();
     }
@@ -345,19 +379,18 @@ describe("the preview without a cache entry", () => {
   const name = `na${RLO}me`;
   const cwd = `/made/up/a${RLO}b`;
 
-  test("before the cache exists: the title and the path line carry no U+202E", async () => {
+  test("before the cache exists: the card carries no U+202E", async () => {
     const box = await makeBox();
     try {
       for (const kind of ["new", "group"] as const) {
-        for (const ui of ["classic", "simple"] as const) {
-          const res = preview(box, `${kind}:${name}`, cwd, ui);
-          assert.equal(res.code, 0, `${kind} ${ui}: ${res.stderr}`);
-          assert.doesNotMatch(res.stdout, RAW, `${kind} ${ui}: ${JSON.stringify(res.stdout.slice(0, 400))}`);
-          if (ui === "classic") {
-            const lines = plain(res.stdout).split("\n");
-            assert.equal(lines[0], "📁 na me", `${kind}: the title`);
-            assert.equal(lines[1], "/made/up/a b", `${kind}: the path line`);
-          }
+        for (const lang of LANGS) {
+          const res = preview(box, `${kind}:${name}`, cwd, lang);
+          assert.equal(res.code, 0, `${kind} ${lang}: ${res.stderr}`);
+          assert.doesNotMatch(res.stdout, RAW, `${kind} ${lang}: ${JSON.stringify(res.stdout.slice(0, 400))}`);
+          // The card says the list is not ready; it draws neither the name nor the path.
+          const lines = cardLines(res.stdout);
+          assert.equal(lines[0], WORDS[lang].notReady, `${kind} ${lang}: ${JSON.stringify(lines)}`);
+          assert.ok(!plain(res.stdout).includes("na me") && !plain(res.stdout).includes("/made/up"), `${kind} ${lang}: ${JSON.stringify(lines)}`);
         }
       }
     } finally {
@@ -365,24 +398,20 @@ describe("the preview without a cache entry", () => {
     }
   });
 
-  test("a key missing from the cache: the title, the not-found line and the path line carry no U+202E", async () => {
+  test("a key missing from the cache: the not-found line names it without U+202E", async () => {
     const box = await makeBox();
     try {
       await mkdir(join(box.home, "w", "api"), { recursive: true });
       await writeFile(box.reposYml, "version: 1\nrepos:\n  - name: api\n    path: ~/w/api\n");
-      await rows(box, "classic"); // build the cache
-      for (const [kind, word] of [["new", "Repo"], ["group", "Group"]] as const) {
-        for (const ui of ["classic", "simple"] as const) {
-          const res = preview(box, `${kind}:${name}`, cwd, ui);
-          assert.equal(res.code, 0, `${kind} ${ui}: ${res.stderr}`);
-          assert.doesNotMatch(res.stdout, RAW, `${kind} ${ui}: ${JSON.stringify(res.stdout.slice(0, 400))}`);
-          if (ui === "classic") {
-            const text = plain(res.stdout);
-            const lines = text.split("\n");
-            assert.equal(lines[0], "📁 na me", `${kind}: the title`);
-            assert.equal(lines[1], "/made/up/a b", `${kind}: the path line`);
-            assert.match(text, new RegExp(`^${word} "na me" not found in cache\\.$`, "m"), `${kind}: the not-found line`);
-          }
+      await rows(box); // build the cache
+      for (const kind of ["new", "group"] as const) {
+        for (const lang of LANGS) {
+          const res = preview(box, `${kind}:${name}`, cwd, lang);
+          assert.equal(res.code, 0, `${kind} ${lang}: ${res.stderr}`);
+          assert.doesNotMatch(res.stdout, RAW, `${kind} ${lang}: ${JSON.stringify(res.stdout.slice(0, 400))}`);
+          const lines = cardLines(res.stdout);
+          assert.equal(lines[0], WORDS[lang].notInList("na me"), `${kind} ${lang}: the not-found line: ${JSON.stringify(lines)}`);
+          assert.ok(!plain(res.stdout).includes("/made/up"), `${kind} ${lang}: the path is not drawn: ${JSON.stringify(lines)}`);
         }
       }
     } finally {

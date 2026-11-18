@@ -3,12 +3,9 @@
  * which read the same sandbox DB)
  *
  * We populate the state DB directly (bypassing YAML->DB sync) and invoke
- * ccs-list.ts as a subprocess via `tsx` — capturing stdout. XDG env vars
- * are overridden to point at a sandbox DB.
- *
- * NOTE: these tests depend on `tsx` being available on PATH. If `tsx` is
- * not installed, these tests are skipped with a diagnostic. See review
- * notes for mocking limitation discussion.
+ * ccs-list.ts as a subprocess on Node itself (process.execPath; Node strips
+ * the types of the .ts sources) — capturing stdout. XDG env vars are
+ * overridden to point at a sandbox DB.
  */
 
 import { test, describe } from "node:test";
@@ -144,30 +141,50 @@ function seedStudio(db: Database.Database): void {
   });
 }
 
-/** LABEL column without ANSI styling and the trailing ` │` separator. */
+/** LABEL column without ANSI styling. */
 function plain(label: string): string {
-  return label.replace(/\x1b\[[0-9;]*m/g, "").replace(/ │$/, "");
+  return label.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function plainLabels(stdout: string): string[] {
-  return stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => plain(l.split("\t")[0] ?? ""));
+/** LABEL column without styling, padding runs collapsed to one space. */
+function flat(label: string): string {
+  return plain(label).replace(/\s+/g, " ").trim();
 }
+
+/** Leading spaces of a LABEL column: the nesting depth, three per level. */
+function indentOf(label: string): number {
+  return (plain(label).match(/^ */) ?? [""])[0].length;
+}
+
+/**
+ * The rows and cards here are checked in Japanese unless a test says
+ * otherwise: the modules get the language the way bin/ccs passes it
+ * (CCS_LANG_RESOLVED). The other inputs are cleared so the machine's locale
+ * or a CCS_LANG in the shell changes nothing.
+ */
+function inLanguage(env: NodeJS.ProcessEnv, lang: "ja" | "en" = "ja"): NodeJS.ProcessEnv {
+  for (const k of ["CCS_LANG", "LC_ALL", "LC_MESSAGES", "LANG"]) delete env[k];
+  env.CCS_LANG_RESOLVED = lang;
+  return env;
+}
+const inJapanese = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => inLanguage(env, "ja");
 
 function runList(
   sb: ListSandbox,
   args: string[],
   cwd?: string,
+  lang: "ja" | "en" = "ja",
 ): { stdout: string; stderr: string; code: number } {
-  const res = spawnSync("tsx", [LIST_TS, ...args], {
-    env: {
-      ...process.env,
-      HOME: sb.home,
-      XDG_CONFIG_HOME: sb.xdgConfig,
-      XDG_CACHE_HOME: sb.xdgCache,
-    },
+  const res = spawnSync(process.execPath, [LIST_TS, ...args], {
+    env: inLanguage(
+      {
+        ...process.env,
+        HOME: sb.home,
+        XDG_CONFIG_HOME: sb.xdgConfig,
+        XDG_CACHE_HOME: sb.xdgCache,
+      },
+      lang,
+    ),
     cwd,
     encoding: "utf-8",
   });
@@ -178,14 +195,9 @@ function runList(
   };
 }
 
-function tsxAvailable(): boolean {
-  const res = spawnSync("tsx", ["--version"], { encoding: "utf-8" });
-  return res.status === 0;
-}
-
 // ---------------------------------------------------------------------------
 
-describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-list", () => {
   test("output is tab-separated with 6 columns; disabled repos excluded", async () => {
     const sb = await makeListSandbox();
     try {
@@ -220,22 +232,27 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
     try {
       // Do NOT create state.db — simulate cold start
       await rm(sb.dbPath, { force: true });
-      const { stdout, stderr, code } = runList(sb, []);
-      const combined = stdout + stderr;
-      assert.match(
-        stderr,
-        /\[ccs-list\] state\.db not found\. Run `ccs --refresh` first/,
-        `expected the friendly-hint branch, got code=${code}, combined=${combined}`,
-      );
-      assert.ok(
-        !/\[ccs-list\] fatal:/.test(combined),
-        `cold start must not go through the raw fatal path: ${combined}`,
-      );
-      // Raw stack trace indicators must NOT appear
-      assert.ok(
-        !/at Database|SqliteError|unable to open database/.test(combined),
-        `raw error leak in output: ${combined}`,
-      );
+      for (const [lang, hint] of [
+        ["en", /^\[ccs-list\] state\.db not found\. Run `ccs --refresh` first/],
+        ["ja", /^\[ccs-list\] state\.db がありません。先に ccs --refresh と打って/],
+      ] as const) {
+        const { stdout, stderr, code } = runList(sb, [], undefined, lang);
+        const combined = stdout + stderr;
+        assert.match(
+          stderr,
+          hint,
+          `${lang}: expected the friendly-hint branch, got code=${code}, combined=${combined}`,
+        );
+        assert.ok(
+          !/\[ccs-list\] fatal:/.test(combined),
+          `${lang}: cold start must not go through the raw fatal path: ${combined}`,
+        );
+        // Raw stack trace indicators must NOT appear
+        assert.ok(
+          !/at Database|SqliteError|unable to open database/.test(combined),
+          `${lang}: raw error leak in output: ${combined}`,
+        );
+      }
     } finally {
       await sb.cleanup();
     }
@@ -341,7 +358,7 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
     }
   });
 
-  test("--repos-only yields only KIND=new rows", async () => {
+  test("--repos-only yields the プロジェクト heading, then only KIND=new rows", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -350,17 +367,19 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
 
       const { stdout } = runList(sb, ["--repos-only"]);
       const lines = stdout.split("\n").filter(Boolean);
-      for (const l of lines) {
+      assert.equal(lines[0].split("\t")[3], "separator:-");
+      assert.equal(flat(lines[0].split("\t")[0]), "──────── プロジェクト ────────");
+      for (const l of lines.slice(1)) {
         const kind = l.split("\t")[3] ?? "";
         assert.ok(kind.startsWith("new:"), `expected new:*, got ${kind}`);
       }
-      assert.ok(lines.length >= 1);
+      assert.ok(lines.length >= 2);
     } finally {
       await sb.cleanup();
     }
   });
 
-  test("nested repos follow their parent, indented, with a dim ‹parent› hint", async () => {
+  test("nested repos follow their parent, indented, with a dim （parent） hint", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -393,27 +412,31 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
 
       const { stdout, code } = runList(sb, ["--repos-only"]);
       assert.equal(code, 0, `ccs-list failed: ${stdout}`);
-      const labels = stdout
-        .split("\n")
-        .filter(Boolean)
-        .map((l) => (l.split("\t")[0] ?? "").replace(/\x1b\[[0-9;]*m/g, "").replace(/ │$/, ""));
-      assert.deepEqual(labels, [
-        "📁 Aardvark",
-        "📁 Series",
-        "  ├ 📁 Mid  ‹Series›",
-        "  └ 📁 Zeta  ‹Series›",
-        "    └ 📁 Inner  ‹Zeta›",
-        "📁 Series Other",
-        "📁 Visible",
-      ]);
-      // The hint is dimmed, not plain text.
-      assert.ok(stdout.includes("\x1b[2m‹Series›\x1b[0m"), "parent hint should be dim");
+      const rows = cols(stdout);
+      assert.deepEqual(
+        rows.map((r) => [r[3], indentOf(r[0]), flat(r[0])]),
+        [
+          ["separator:-", 0, "──────── プロジェクト ────────"],
+          ["new:Aardvark", 0, "📁 Aardvark"],
+          ["new:Series", 0, "📁 Series"],
+          ["new:Mid", 3, "📁 Mid （Series）"],
+          ["new:Zeta", 3, "📁 Zeta （Series）"],
+          ["new:Inner", 6, "📁 Inner （Zeta）"],
+          // A string prefix of /home/u/series, but a sibling folder.
+          ["new:Series Other", 0, "📁 Series Other"],
+          // Its parent is disabled and not listed, so it stays at the top.
+          ["new:Visible", 0, "📁 Visible"],
+        ],
+      );
+      // The hint is dimmed, not plain text; no tree glyphs are drawn.
+      assert.ok(stdout.includes("\x1b[2m（Series）\x1b[0m"), "parent hint should be dim");
+      assert.ok(!rows.some((r) => /[├└│‹›]/.test(r[0])), "no tree glyphs");
     } finally {
       await sb.cleanup();
     }
   });
 
-  test("tree glyphs: ├ for earlier siblings, └ for the last, │ rails while an ancestor has later siblings", async () => {
+  test("deep nesting: each child right after its parent's earlier children, one indent step per level", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -433,22 +456,26 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
 
       const { stdout, code } = runList(sb, ["--repos-only"]);
       assert.equal(code, 0, `ccs-list failed: ${stdout}`);
-      assert.deepEqual(plainLabels(stdout), [
-        "📁 Root",
-        "  ├ 📁 A  ‹Root›",
-        "  │ ├ 📁 A1  ‹A›",
-        "  │ │ └ 📁 A1x  ‹A1›",
-        "  │ └ 📁 A2  ‹A›",
-        "  └ 📁 B  ‹Root›",
-        "    └ 📁 B1  ‹B›",
-        "📁 Solo",
-      ]);
+      assert.deepEqual(
+        cols(stdout).map((r) => [r[3], indentOf(r[0]), flat(r[0])]),
+        [
+          ["separator:-", 0, "──────── プロジェクト ────────"],
+          ["new:Root", 0, "📁 Root"],
+          ["new:A", 3, "📁 A （Root）"],
+          ["new:A1", 6, "📁 A1 （A）"],
+          ["new:A1x", 9, "📁 A1x （A1）"],
+          ["new:A2", 6, "📁 A2 （A）"],
+          ["new:B", 3, "📁 B （Root）"],
+          ["new:B1", 6, "📁 B1 （B）"],
+          ["new:Solo", 0, "📁 Solo"],
+        ],
+      );
     } finally {
       await sb.cleanup();
     }
   });
 
-  test("launch: false renders a group:<name> header; children show their label and nest under it", async () => {
+  test("launch: false renders a group:<name> header under グループ; children show their label and nest under it", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -473,32 +500,36 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       const rows = stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
       for (const r of rows) assert.equal(r.length, 6, `6 columns: ${r.join("|")}`);
 
-      const header = rows[0];
+      assert.deepEqual(rows[0].slice(3), ["separator:-", "", ""]);
+      assert.equal(flat(rows[0][0]), "──────── グループ ────────");
+      const header = rows[1];
       assert.equal(header[3], "group:Studio");
-      assert.equal(plain(header[0]), "🎬 Studio");
+      assert.equal(flat(header[0]), "🎬 Studio 制作チーム");
       assert.equal(header[1], "制作チーム");
       assert.equal(header[2], "", "a header carries no badges");
       assert.equal(header[4], "/home/u/studio", "CWD carries the path (for ^I / preview)");
       assert.equal(header[5], "", "a header has no command");
 
       assert.deepEqual(
-        rows.slice(1, 4).map((r) => [plain(r[0]), r[3], r[5]]),
+        rows.slice(2, 5).map((r) => [indentOf(r[0]), flat(r[0]), r[3], r[5]]),
         [
-          ["  ├ 📱 App team  ‹Studio›", "new:Studio-app", "claude"],
-          // ‹Studio› would only repeat the row's own label — omitted.
-          ["  ├ 🎬 Studio", "new:Studio-hq", "claude"],
-          ["  └ 🌐 Web team  ‹Studio›", "new:Studio-web", "claude"],
+          [3, "📱 App team アプリ app/ （Studio）", "new:Studio-app", "claude"],
+          // （Studio） would only repeat the row's own label — omitted.
+          [3, "🎬 Studio 統括 hq/", "new:Studio-hq", "claude"],
+          [3, "🌐 Web team サイト web/ （Studio）", "new:Studio-web", "claude"],
         ],
       );
+      assert.equal(flat(rows[5][0]), "──────── プロジェクト ────────");
 
       const zed = rows.find((r) => r[3] === "new:Zed")!;
       assert.ok(!zed[0].includes("\x1b[2J"), "raw ESC from the label must not reach fzf");
-      assert.equal(plain(zed[0]), "📁 Evil [2JLabel");
-      assert.equal(plain(rows.find((r) => r[3] === "new:Zz")![0]), "📁 Zz");
+      assert.equal(flat(zed[0]), "📁 Evil [2JLabel");
+      assert.equal(flat(rows.find((r) => r[3] === "new:Zz")![0]), "📁 Zz");
 
-      // Session rows keep the unique name, not the label.
+      // A session row names the group and the repo's label; the key keeps the uuid.
       const session = rows.find((r) => r[3] === "resume:ebebebeb-0000-4000-8000-000000000000")!;
-      assert.equal(plain(session[0]), "🔄 🌐 Studio-web");
+      assert.equal(flat(session[0]), "💬 たった今 Studio・Web team landing page");
+      assert.deepEqual(session.slice(4), ["/home/u/studio/web", "claude"]);
     } finally {
       await sb.cleanup();
     }
@@ -521,13 +552,15 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
       const { stdout, stderr, code } = runList(sb, ["--repos-only"]);
       assert.equal(code, 0, `list must not crash on a v2 cache: ${stderr}`);
       const rows = stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+      // No launch column: the parent is an ordinary project, not a group.
       assert.deepEqual(
-        rows.map((r) => [plain(r[0]), r[3]]),
+        rows.map((r) => [indentOf(r[0]), flat(r[0]), r[3]]),
         [
-          ["🎬 Studio", "new:Studio"],
-          ["  ├ 📱 Studio-app  ‹Studio›", "new:Studio-app"],
-          ["  ├ 🎬 Studio-hq  ‹Studio›", "new:Studio-hq"],
-          ["  └ 🌐 Studio-web  ‹Studio›", "new:Studio-web"],
+          [0, "──────── プロジェクト ────────", "separator:-"],
+          [0, "🎬 Studio 制作チーム", "new:Studio"],
+          [3, "📱 Studio-app アプリ app/ （Studio）", "new:Studio-app"],
+          [3, "🎬 Studio-hq 統括 hq/ （Studio）", "new:Studio-hq"],
+          [3, "🌐 Studio-web サイト web/ （Studio）", "new:Studio-web"],
         ],
       );
     } finally {
@@ -535,7 +568,7 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
     }
   });
 
-  test("--sessions-only yields only KIND=resume rows", async () => {
+  test("--sessions-only yields the 前の会話のつづき heading, then only KIND=resume rows", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -544,17 +577,19 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
 
       const { stdout } = runList(sb, ["--sessions-only"]);
       const lines = stdout.split("\n").filter(Boolean);
-      for (const l of lines) {
+      assert.equal(lines[0].split("\t")[3], "separator:-");
+      assert.equal(flat(lines[0].split("\t")[0]), "──────── 前の会話のつづき ────────");
+      for (const l of lines.slice(1)) {
         const kind = l.split("\t")[3] ?? "";
         assert.ok(kind.startsWith("resume:"), `expected resume:*, got ${kind}`);
       }
-      assert.ok(lines.length >= 1);
+      assert.ok(lines.length >= 2);
     } finally {
       await sb.cleanup();
     }
   });
 
-  test("badges column respects 60-char limit", async () => {
+  test("the badge column stays empty, even for a repo with many services and changes", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
@@ -594,8 +629,9 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
         .split("\n")
         .find((l) => l.includes("heavy"));
       assert.ok(heavy, "heavy row should exist");
-      const badges = heavy!.split("\t")[2] ?? "";
-      assert.ok(badges.length <= 60, `badges length > 60: ${badges.length} "${badges}"`);
+      // The simple look shows no badges; column 3 is kept for the row's shape.
+      assert.equal(heavy!.split("\t").length, 6);
+      assert.equal(heavy!.split("\t")[2], "");
     } finally {
       await sb.cleanup();
     }
@@ -607,57 +643,31 @@ describe("ccs-list", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
 // ---------------------------------------------------------------------------
 
 function runPreview(sb: ListSandbox, kindKey: string, cwd: string): string {
-  const res = spawnSync("tsx", [PREVIEW_TS, kindKey, cwd], {
-    env: {
+  const res = spawnSync(process.execPath, [PREVIEW_TS, kindKey, cwd], {
+    env: inJapanese({
       ...process.env,
       HOME: sb.home,
       XDG_CONFIG_HOME: sb.xdgConfig,
       XDG_CACHE_HOME: sb.xdgCache,
-    },
+    }),
     encoding: "utf-8",
   });
   return (res.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-describe("ccs-preview — group header & label", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
-  test("group:<name> shows the header, a not-launchable note, and its entries", async () => {
+describe("ccs-preview — group header & label", () => {
+  test("new:<name> is titled with the label; without a label, with the name", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedStudio(h.db);
-      // Deeper repos belong to their own parent, not to the header.
-      upsertRepo(h.db, repoRow("Studio-web-docs", "/home/u/studio/web/docs"));
+      upsertRepo(h.db, { ...repoRow("Zz", "/home/u/zz"), label: " \t " });
       h.close();
 
-      const out = runPreview(sb, "group:Studio", "/home/u/studio");
-      const lines = out.split("\n");
-      assert.equal(lines[0], "🎬 Studio");
-      assert.equal(lines[1], "/home/u/studio");
-      assert.equal(lines[2], "制作チーム");
-      assert.match(out, /not launchable/);
-      assert.match(out, /Entries \(3\)/);
-      const entries = lines
-        .filter((l) => l.startsWith("  "))
-        .map((l) => l.trim().replace(/\s+/g, " "));
-      assert.deepEqual(entries, [
-        "📱 App team app/",
-        "🎬 Studio hq/",
-        "🌐 Web team web/",
-      ]);
-    } finally {
-      await sb.cleanup();
-    }
-  });
-
-  test("new:<name> is titled with the label, followed by the dim name", async () => {
-    const sb = await makeListSandbox();
-    try {
-      const h = openDb(sb.dbPath);
-      seedStudio(h.db);
-      h.close();
-
-      const out = runPreview(sb, "new:Studio-web", "/home/u/studio/web");
-      assert.equal(out.split("\n")[0], "🌐 Web team  (Studio-web)");
+      const titled = runPreview(sb, "new:Studio-web", "/home/u/studio/web");
+      assert.equal(titled.split("\n")[1], "  ✨ Web team で、新しく Claude Code を始めます");
+      const unlabelled = runPreview(sb, "new:Zz", "/home/u/zz");
+      assert.equal(unlabelled.split("\n")[1], "  ✨ Zz で、新しく Claude Code を始めます");
     } finally {
       await sb.cleanup();
     }
@@ -678,7 +688,7 @@ function sandboxEnv(sb: ListSandbox): NodeJS.ProcessEnv {
   // The developer's own launch command must not leak into the rows.
   delete env.CCS_CMD;
   delete env.CCR_CMD;
-  return env;
+  return inJapanese(env);
 }
 
 // bin/ccs feeds ccs-list into fzf through a real pipe(2), but spawnSync's
@@ -692,7 +702,7 @@ function runListPiped(
 ): { stdout: string; stderr: string; code: number } {
   const res = spawnSync(
     "bash",
-    ["-c", `set -o pipefail; tsx "$@" | ${reader}`, "bash", LIST_TS, ...args],
+    ["-c", `set -o pipefail; "$0" "$@" | ${reader}`, process.execPath, LIST_TS, ...args],
     {
       env: sandboxEnv(sb),
       encoding: "utf-8",
@@ -721,7 +731,7 @@ function seedManySessions(db: Database.Database, count: number): void {
   }
 }
 
-describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-list — pipe delivery", () => {
   test("a list larger than the pipe buffer reaches the reader in full", async () => {
     const sb = await makeListSandbox();
     try {
@@ -733,16 +743,20 @@ describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PA
       const { stdout, stderr, code } = runListPiped(sb, []);
       assert.equal(code, 0, `ccs-list failed: ${stderr}`);
       const rows = stdout.split("\n").filter((l) => l.length > 0);
-      // alpha + separator + seeded session + SESSIONS (~150 KB in total)
+      // two headings + alpha + seeded session + SESSIONS (~150 KB in total)
       assert.equal(
         rows.length,
-        1 + 1 + 1 + SESSIONS,
+        2 + 1 + 1 + SESSIONS,
         `got ${rows.length} rows / ${Buffer.byteLength(stdout)} bytes`,
       );
       assert.ok(stdout.endsWith("\n"), "last row must be complete");
       for (const row of rows) {
         assert.equal(row.split("\t").length, 6, `truncated row: ${row}`);
       }
+      assert.deepEqual(
+        rows.map((r) => r.split("\t")[3]).filter((k) => !k.startsWith("resume:")),
+        ["separator:-", "new:alpha", "separator:-"],
+      );
     } finally {
       await sb.cleanup();
     }
@@ -773,7 +787,7 @@ describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PA
       await mkdir(join(sb.home, ".claude", "projects"), { recursive: true });
 
       // Same invocation as the pre-scan in bin/ccs.
-      const scan = spawnSync("tsx", [SCAN_TS, "--quiet"], {
+      const scan = spawnSync(process.execPath, [SCAN_TS, "--quiet"], {
         env: sandboxEnv(sb),
         encoding: "utf-8",
       });
@@ -790,7 +804,7 @@ describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PA
         .split("\n")
         .filter((l) => l.length > 0)
         .map((l) => l.split("\t")[3]);
-      assert.deepEqual(kinds, expected);
+      assert.deepEqual(kinds, ["separator:-", ...expected]);
     } finally {
       await sb.cleanup();
     }
@@ -815,7 +829,7 @@ describe("ccs-list — pipe delivery", { skip: !tsxAvailable() && "tsx not on PA
 });
 
 // ---------------------------------------------------------------------------
-// ui: simple (v0.3.0) — list rows and preview cards
+// The simple look (the only one since v0.6.0) — list rows and preview cards
 // ---------------------------------------------------------------------------
 
 /** Studio group + a standalone repo + three sessions (one unmapped). */
@@ -836,14 +850,14 @@ function cols(stdout: string): string[][] {
   return stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
 }
 
-describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-list — simple rows", () => {
   test("groups first, then projects, then conversations — each under a heading row", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedSimple(h.db);
       h.close();
-      const res = runList(sb, ["--ui=simple"]);
+      const res = runList(sb, []);
       assert.equal(res.code, 0, res.stderr);
       const rows = cols(res.stdout);
       // Six columns, keys in list order, no badges anywhere.
@@ -884,13 +898,13 @@ describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" },
     }
   });
 
-  test("launch columns stay the classic ones (cwd, command; groups have none)", async () => {
+  test("launch columns: cwd and command (groups have none)", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedSimple(h.db);
       h.close();
-      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const rows = cols(runList(sb, []).stdout);
       const byKey = new Map(rows.map((r) => [r[3], r]));
       assert.deepEqual(byKey.get("group:Studio")!.slice(4), ["/home/u/studio", ""]);
       assert.deepEqual(byKey.get("new:Studio-web")!.slice(4), ["/home/u/studio/web", "claude"]);
@@ -909,7 +923,7 @@ describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" },
       const h = openDb(sb.dbPath);
       seedSimple(h.db);
       h.close();
-      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const rows = cols(runList(sb, []).stdout);
       const hits = rows.filter((r) => plain(r[0]).includes("Studio")).map((r) => r[3]);
       assert.deepEqual(hits, [
         "group:Studio",
@@ -929,9 +943,9 @@ describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" },
       const h = openDb(sb.dbPath);
       seedSimple(h.db);
       h.close();
-      const reposOnly = cols(runList(sb, ["--ui=simple", "--repos-only"]).stdout);
+      const reposOnly = cols(runList(sb, ["--repos-only"]).stdout);
       assert.ok(!reposOnly.some((r) => plain(r[0]).includes("前の会話")));
-      const sessionsOnly = cols(runList(sb, ["--ui=simple", "--sessions-only"]).stdout);
+      const sessionsOnly = cols(runList(sb, ["--sessions-only"]).stdout);
       assert.equal(plain(sessionsOnly[0][0]).replace(/\s+/g, " "), "──────── 前の会話のつづき ────────");
       assert.equal(sessionsOnly.length, 4);
     } finally {
@@ -942,7 +956,7 @@ describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" },
       const h = openDb(sb2.dbPath);
       upsertRepo(h.db, repoRow("solo", "/home/u/solo"));
       h.close();
-      const rows = cols(runList(sb2, ["--ui=simple"]).stdout);
+      const rows = cols(runList(sb2, []).stdout);
       assert.deepEqual(rows.map((r) => r[3]), ["separator:-", "new:solo"]);
       assert.match(plain(rows[0][0]), /プロジェクト/);
     } finally {
@@ -950,59 +964,55 @@ describe("ccs-list --ui=simple", { skip: !tsxAvailable() && "tsx not on PATH" },
     }
   });
 
-  test("--print-ui returns the stored defaults.ui, and classic for anything else", async () => {
+  test("--print-ui is gone; --print-settings prints update_check only, whatever an old cache says about ui", async () => {
     const sb = await makeListSandbox();
     try {
-      // No cache yet → classic, exit 0.
-      let res = runList(sb, ["--print-ui"]);
-      assert.equal(res.code, 0);
-      assert.equal(res.stdout, "classic\n");
       const h = openDb(sb.dbPath);
-      setMeta(h.db, "defaults_ui", "simple");
+      seedSimple(h.db);
+      // What a v0.5 scan left behind.
+      setMeta(h.db, "defaults_ui", "classic");
+      setMeta(h.db, "defaults_update_check", "off");
       h.close();
-      res = runList(sb, ["--print-ui"]);
-      assert.equal(res.stdout, "simple\n");
-      const h2 = openDb(sb.dbPath);
-      setMeta(h2.db, "defaults_ui", "$(evil)");
-      h2.close();
-      res = runList(sb, ["--print-ui"]);
-      assert.equal(res.stdout, "classic\n");
+      const settings = runList(sb, ["--print-settings"]);
+      assert.equal(settings.code, 0, settings.stderr);
+      assert.equal(settings.stdout, "update_check=off\n");
+      // --print-ui is no flag any more: no mode line, the rows as without it.
+      const printUi = runList(sb, ["--print-ui"]);
+      const plainRun = runList(sb, []);
+      assert.equal(printUi.code, 0, printUi.stderr);
+      assert.doesNotMatch(printUi.stdout, /^(?:ui=)?(?:classic|simple)$/m);
+      assert.deepEqual(cols(printUi.stdout).map((r) => r[3]), cols(plainRun.stdout).map((r) => r[3]));
+      assert.equal(cols(plainRun.stdout)[0][3], "separator:-", "the stored classic opens nothing classic");
     } finally {
       await sb.cleanup();
     }
   });
 
-  test("without --ui the classic rows are unchanged (tree glyphs, badges)", async () => {
+  test("--ui=classic, --ui=simple or none: the same simple rows (ccs-list ignores --ui=)", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedSimple(h.db);
       h.close();
-      const rows = cols(runList(sb, []).stdout);
-      // Classic keeps plain name order: groups are not moved to the top.
-      assert.deepEqual(rows.slice(0, 2).map((r) => r[3]), ["new:alpha", "group:Studio"]);
-      assert.ok(rows.some((r) => /[├└]/.test(plain(r[0]))));
-      assert.ok(rows.some((r) => r[2].length > 0), "classic rows keep their badges");
+      const none = runList(sb, []);
+      assert.equal(none.code, 0, none.stderr);
+      for (const arg of ["--ui=classic", "--ui=simple", "--ui=fancy"]) {
+        const res = runList(sb, [arg]);
+        assert.equal(res.code, 0, `${arg}: ${res.stderr}`);
+        assert.deepEqual(cols(res.stdout).map((r) => [r[3], flat(r[0])]), cols(none.stdout).map((r) => [r[3], flat(r[0])]), arg);
+      }
+      const rows = cols(none.stdout);
+      // Groups first under their heading; no tree glyphs, no badges.
+      assert.deepEqual(rows.slice(0, 2).map((r) => r[3]), ["separator:-", "group:Studio"]);
+      assert.ok(!rows.some((r) => /[├└│‹›]/.test(plain(r[0]))), "no tree glyphs");
+      assert.ok(rows.every((r) => r[2] === ""), "no badges");
     } finally {
       await sb.cleanup();
     }
   });
 });
 
-function runPreviewSimple(sb: ListSandbox, kindKey: string, cwd: string): string {
-  const res = spawnSync("tsx", [PREVIEW_TS, kindKey, cwd, "--ui=simple"], {
-    env: {
-      ...process.env,
-      HOME: sb.home,
-      XDG_CONFIG_HOME: sb.xdgConfig,
-      XDG_CACHE_HOME: sb.xdgCache,
-    },
-    encoding: "utf-8",
-  });
-  return (res.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-preview (cards, the only preview)", () => {
   test("new: says what Enter does, the folder, last use, and plain-word state", async () => {
     const sb = await makeListSandbox();
     try {
@@ -1022,7 +1032,7 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
         )
         .run();
       h.close();
-      const out = runPreviewSimple(sb, "new:site", join(sb.home, "work", "site"));
+      const out = runPreview(sb, "new:site", join(sb.home, "work", "site"));
       assert.match(out, /✨ Web team で、新しく Claude Code を始めます/);
       assert.match(out, /📂 フォルダ\n {5}~\/work\/site\n/);
       assert.match(out, /🕒 最後に開いた\n {5}まだ開いたことはありません/);
@@ -1043,7 +1053,7 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
       const h = openDb(sb.dbPath);
       upsertRepo(h.db, repoRow("gone", join(sb.home, "nowhere")));
       h.close();
-      const out = runPreviewSimple(sb, "new:gone", join(sb.home, "nowhere"));
+      const out = runPreview(sb, "new:gone", join(sb.home, "nowhere"));
       assert.match(out, /このフォルダが見つかりません。repos\.yml の path を確かめてください/);
       assert.match(out, /Enter を押すと、いまいるフォルダで Claude Code が開きます/);
     } finally {
@@ -1051,18 +1061,25 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
     }
   });
 
-  test("group: is a heading that points to the projects inside", async () => {
+  test("group: is a heading that points to the projects inside (its own children only)", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedStudio(h.db);
+      // Deeper repos belong to their own parent, not to the header.
+      upsertRepo(h.db, repoRow("Studio-web-docs", "/home/u/studio/web/docs"));
       h.close();
-      const out = runPreviewSimple(sb, "group:Studio", "/home/u/studio");
+      const out = runPreview(sb, "group:Studio", "/home/u/studio");
       assert.match(out, /📂 グループ「Studio」/);
+      assert.match(out, /\n {2}制作チーム\n/);
       assert.match(out, /ここは見出しです。開くときは、下のプロジェクトをえらんでください/);
       assert.match(out, /中のプロジェクト（3）/);
-      assert.match(out, /📱 App team/);
-      assert.doesNotMatch(out, /launch: false|not launchable/);
+      const entries = out
+        .split("\n")
+        .filter((l) => /^ {5}\S/.test(l))
+        .map((l) => l.trim().replace(/\s+/g, " "));
+      assert.deepEqual(entries, ["📱 App team アプリ app/", "🎬 Studio 統括 hq/", "🌐 Web team サイト web/"]);
+      assert.doesNotMatch(out, /launch: false|not launchable|Entries|Studio-web-docs/);
     } finally {
       await sb.cleanup();
     }
@@ -1091,7 +1108,7 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
         )
         .run(uuid, now, now, now);
       h.close();
-      const out = runPreviewSimple(sb, `resume:${uuid}`, "/home/u/alpha");
+      const out = runPreview(sb, `resume:${uuid}`, "/home/u/alpha");
       assert.match(out, /↩️ {2}前の会話のつづきから再開します/);
       assert.match(out, /プロジェクト\n {5}アルファ/);
       assert.match(out, /最後に話した\n {5}たった今/);
@@ -1110,10 +1127,10 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
   test("separator: and a missing cache answer in one sentence", async () => {
     const sb = await makeListSandbox();
     try {
-      assert.match(runPreviewSimple(sb, "separator:-", ""), /ここは区切りの行です/);
+      assert.match(runPreview(sb, "separator:-", ""), /ここは区切りの行です/);
       // No state.db at all.
       assert.match(
-        runPreviewSimple(sb, "new:x", "/home/u/x"),
+        runPreview(sb, "new:x", "/home/u/x"),
         /まだ一覧の準備ができていません。\n {2}いちど Esc でやめて、ccs --refresh と打ってください。/,
       );
     } finally {
@@ -1122,7 +1139,7 @@ describe("ccs-preview --ui=simple (cards)", { skip: !tsxAvailable() && "tsx not 
   });
 });
 
-describe("ccs-list --ui=simple — display hardening", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-list — display hardening", () => {
   test("a group label with $& / $' is drawn literally, and an escape in the icon is neutralized", async () => {
     const sb = await makeListSandbox();
     try {
@@ -1130,7 +1147,7 @@ describe("ccs-list --ui=simple — display hardening", { skip: !tsxAvailable() &
       upsertRepo(h.db, { ...repoRow("G", "/home/u/g"), label: "R$&D $' $$", icon: "\x1b[31m🎬", launch: 0 });
       upsertRepo(h.db, repoRow("G-a", "/home/u/g/a"));
       h.close();
-      const rows = cols(runList(sb, ["--ui=simple"]).stdout);
+      const rows = cols(runList(sb, []).stdout);
       const header = rows.find((r) => r[3] === "group:G")!;
       // ESC is removed, which neutralizes the sequence; the printable rest
       // ("[31m") stays as harmless text — the same policy as truncate().
@@ -1142,7 +1159,7 @@ describe("ccs-list --ui=simple — display hardening", { skip: !tsxAvailable() &
   });
 });
 
-describe("lead: true (v0.3.1)", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("lead: true (v0.3.1)", () => {
   /** Studio group whose lead (hq) sorts after app by name. */
   function seedLead(db: Database.Database): void {
     seedStudio(db);
@@ -1156,7 +1173,7 @@ describe("lead: true (v0.3.1)", { skip: !tsxAvailable() && "tsx not on PATH" }, 
       const h = openDb(sb.dbPath);
       seedLead(h.db);
       h.close();
-      const rows = cols(runList(sb, ["--ui=simple", "--repos-only"]).stdout);
+      const rows = cols(runList(sb, ["--repos-only"]).stdout);
       assert.deepEqual(rows.map((r) => r[3]), [
         "separator:-",
         "group:Studio",
@@ -1181,35 +1198,18 @@ describe("lead: true (v0.3.1)", { skip: !tsxAvailable() && "tsx not on PATH" }, 
     }
   });
 
-  test("classic: the lead is first among its siblings too, icon unchanged; no lead = name order as before", async () => {
-    const sb = await makeListSandbox();
-    try {
-      const h = openDb(sb.dbPath);
-      seedLead(h.db);
-      h.close();
-      const rows = cols(runList(sb, ["--repos-only"]).stdout);
-      assert.deepEqual(rows.map((r) => r[3]), ["group:Studio", "new:Studio-hq", "new:Studio-app", "new:Studio-web", "new:Studio-zz"]);
-      assert.match(plain(rows[1][0]), /^ {2}├ 🎬 Studio/);
-    } finally {
-      await sb.cleanup();
-    }
-  });
-
   test("cards: the group card lists the lead first as 👑 （統括）; the lead's own card says so", async () => {
     const sb = await makeListSandbox();
     try {
       const h = openDb(sb.dbPath);
       seedLead(h.db);
       h.close();
-      const group = runPreviewSimple(sb, "group:Studio", "/home/u/studio");
+      const group = runPreview(sb, "group:Studio", "/home/u/studio");
       const entries = group.split("\n").filter((l) => /^ {5}\S/.test(l)).map((l) => l.trim());
       assert.match(entries[0], /^👑 Studio .*（統括）$/);
       assert.match(entries[1], /App team/);
-      const card = runPreviewSimple(sb, "new:Studio-hq", "/home/u/studio/hq");
+      const card = runPreview(sb, "new:Studio-hq", "/home/u/studio/hq");
       assert.match(card, /👑 このグループの統括です/);
-      const classic = runPreview(sb, "group:Studio", "/home/u/studio");
-      const classicEntries = classic.split("\n").filter((l) => l.startsWith("  ")).map((l) => l.trim().split(/\s+/).slice(0, 2).join(" "));
-      assert.equal(classicEntries[0], "🎬 Studio", "classic preview: lead first, own icon");
     } finally {
       await sb.cleanup();
     }

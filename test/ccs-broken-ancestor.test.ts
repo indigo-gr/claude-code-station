@@ -9,8 +9,9 @@
  *
  * Layout A — what npm installs, and a checkout: <root>/bin holds all of bin/
  *   (with bin/package.json), <root>/package.json is broken. The list opens.
- * Layout B — what install.sh copies: <root>/scripts holds ccs, ccs-*.ts and
- *   ccs-*.sh only, <root>/package.json is broken. ccs stops: exit 1, nothing
+ * Layout B — what install.sh copies: <root>/scripts holds ccs, ccs-*.ts,
+ *   ccs-*.sh and the string tables ccs-lang-*.txt only, <root>/package.json
+ *   is broken. ccs stops: exit 1, nothing
  *   on stdout, one line on stderr carrying the reason word; fzf never starts.
  *
  * fzf and claude are stubs on PATH, HOME is a temp directory and the update
@@ -49,11 +50,8 @@ const BROKEN = [
   ["a binary", "\u0000\u0001\u0002�"],
 ] as const;
 
-// One registered repo: the simple look adds a separator row above it.
-const LOOKS = [
-  ["simple", 2],
-  ["classic", 1],
-] as const;
+// One registered repo, under the "projects" separator row: two rows.
+const EXPECTED_ROWS = 2;
 
 // The reason word scripts match on: lowercase snake_case, like every reason
 // word of the machine interface.
@@ -112,7 +110,9 @@ async function layoutB(dir: string, manifest: string | null): Promise<string> {
   const scripts = join(dir, "scripts");
   await mkdir(scripts, { recursive: true });
   for (const name of await readdir(BIN_DIR)) {
-    if (name === "ccs" || /^ccs-.*\.(ts|sh)$/.test(name)) await copyFile(join(BIN_DIR, name), join(scripts, name));
+    if (name === "ccs" || /^ccs-.*\.(ts|sh)$/.test(name) || /^ccs-lang-.*\.txt$/.test(name)) {
+      await copyFile(join(BIN_DIR, name), join(scripts, name));
+    }
   }
   await symlink(NODE_MODULES, join(scripts, "node_modules"));
   if (manifest !== null) await writeFile(join(dir, "package.json"), manifest);
@@ -128,10 +128,14 @@ interface Run {
   launched: boolean;
 }
 
-async function run(sb: Sandbox, bin: string, args: string[], cwd?: string): Promise<Run> {
+type Lang = "ja" | "en";
+
+async function run(sb: Sandbox, bin: string, args: string[], cwd?: string, lang?: Lang): Promise<Run> {
   await rm(sb.rowsFile, { force: true });
+  // The language is set here, never taken from the shell that runs the tests.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    LANG: "en_US.UTF-8",
     PATH: `${sb.stubBin}:${process.env.PATH ?? ""}`,
     HOME: sb.home,
     XDG_CONFIG_HOME: join(sb.home, ".config"),
@@ -145,6 +149,8 @@ async function run(sb: Sandbox, bin: string, args: string[], cwd?: string): Prom
   delete env.CCR_CMD;
   delete env.CCS_UI;
   delete env.CCS_UPDATE_REGISTRY;
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  if (lang) env.CCS_LANG = lang;
   const res = spawnSync("bash", [bin, ...args], { encoding: "utf-8", env, cwd: cwd ?? sb.root });
   const given = await readFile(sb.rowsFile, "utf-8").catch(() => null);
   const launched = await readFile(sb.claudeLog, "utf-8").then(
@@ -160,7 +166,8 @@ async function run(sb: Sandbox, bin: string, args: string[], cwd?: string): Prom
   };
 }
 
-const withAndWithoutScan = (look: string): string[][] => [[`--ui=${look}`], [`--ui=${look}`, "--no-scan"]];
+const WITH_AND_WITHOUT_SCAN: string[][] = [[], ["--no-scan"]];
+const what = (args: string[]): string => `ccs ${args.join(" ")}`.trim();
 
 function assertOpened(res: Run, expectedRows: number, what: string): void {
   assert.equal(res.code, 0, `${what}: ${res.stderr}`);
@@ -169,6 +176,10 @@ function assertOpened(res: Run, expectedRows: number, what: string): void {
   assert.ok(
     res.rows?.some((r) => r.split("\t")[3] === "new:one"),
     `${what}: the registered repo is in the list: ${JSON.stringify(res.rows)}`,
+  );
+  assert.ok(
+    res.rows?.some((r) => (r.split("\t")[3] ?? "").startsWith("separator:")),
+    `${what}: the separator row above it: ${JSON.stringify(res.rows)}`,
   );
   const said = res.stdout + res.stderr;
   assert.doesNotMatch(said, NODE_NOISE, what);
@@ -191,86 +202,80 @@ function assertStopped(res: Run, what: string): void {
 
 describe("bin/ccs under a package.json Node cannot parse (stub fzf)", () => {
   for (const [name, text] of BROKEN) {
-    for (const [look, expectedRows] of LOOKS) {
-      test(`layout A, ${look}: the list opens under ${name} package.json`, async () => {
-        const sb = await makeSandbox();
-        try {
-          const bin = await layoutA(join(sb.root, "pkg"), text);
-          for (const args of withAndWithoutScan(look)) {
-            assertOpened(await run(sb, bin, args), expectedRows, args.join(" "));
-          }
-        } finally {
-          await sb.cleanup();
-        }
-      });
-
-      test(`layout B, ${look}: stops with the reason under ${name} package.json`, async () => {
-        const sb = await makeSandbox();
-        try {
-          const bin = await layoutB(join(sb.root, "copy"), text);
-          for (const args of withAndWithoutScan(look)) {
-            assertStopped(await run(sb, bin, args), args.join(" "));
-          }
-        } finally {
-          await sb.cleanup();
-        }
-      });
-    }
-  }
-
-  // The stop above comes from the broken file, not from the copy layout itself.
-  for (const [look, expectedRows] of LOOKS) {
-    test(`layout B, ${look}: opens when no package.json is broken`, async () => {
+    test(`layout A: the list opens under ${name} package.json`, async () => {
       const sb = await makeSandbox();
       try {
-        const bin = await layoutB(join(sb.root, "copy"), null);
-        for (const args of withAndWithoutScan(look)) {
-          assertOpened(await run(sb, bin, args), expectedRows, args.join(" "));
+        const bin = await layoutA(join(sb.root, "pkg"), text);
+        for (const args of WITH_AND_WITHOUT_SCAN) {
+          assertOpened(await run(sb, bin, args), EXPECTED_ROWS, what(args));
+        }
+      } finally {
+        await sb.cleanup();
+      }
+    });
+
+    test(`layout B: stops with the reason under ${name} package.json`, async () => {
+      const sb = await makeSandbox();
+      try {
+        const bin = await layoutB(join(sb.root, "copy"), text);
+        for (const args of WITH_AND_WITHOUT_SCAN) {
+          assertStopped(await run(sb, bin, args), what(args));
         }
       } finally {
         await sb.cleanup();
       }
     });
   }
+
+  // The stop above comes from the broken file, not from the copy layout itself.
+  test("layout B: opens when no package.json is broken", async () => {
+    const sb = await makeSandbox();
+    try {
+      const bin = await layoutB(join(sb.root, "copy"), null);
+      for (const args of WITH_AND_WITHOUT_SCAN) {
+        assertOpened(await run(sb, bin, args), EXPECTED_ROWS, what(args));
+      }
+    } finally {
+      await sb.cleanup();
+    }
+  });
 
   // Node also reads the package.json above the directory a program starts in.
   // ccs starts its modules from its own folder, so where the user stands does
   // not matter.
-  for (const [look, expectedRows] of LOOKS) {
-    test(`${look}: started below a broken package.json, the list still opens`, async () => {
-      const sb = await makeSandbox();
-      try {
-        const healthy = JSON.stringify({ name: "@example/healthy", version: "1.2.3", type: "module" }, null, 2) + "\n";
-        const bin = await layoutA(join(sb.root, "pkg"), healthy);
-        const below = join(sb.root, "work", "sub");
-        await mkdir(below, { recursive: true });
-        await writeFile(join(sb.root, "work", "package.json"), BROKEN[0][1]);
-        for (const args of withAndWithoutScan(look)) {
-          assertOpened(await run(sb, bin, args, below), expectedRows, args.join(" "));
-        }
-      } finally {
-        await sb.cleanup();
+  test("started below a broken package.json, the list still opens", async () => {
+    const sb = await makeSandbox();
+    try {
+      const healthy = JSON.stringify({ name: "@example/healthy", version: "1.2.3", type: "module" }, null, 2) + "\n";
+      const bin = await layoutA(join(sb.root, "pkg"), healthy);
+      const below = join(sb.root, "work", "sub");
+      await mkdir(below, { recursive: true });
+      await writeFile(join(sb.root, "work", "package.json"), BROKEN[0][1]);
+      for (const args of WITH_AND_WITHOUT_SCAN) {
+        assertOpened(await run(sb, bin, args, below), EXPECTED_ROWS, what(args));
       }
-    });
-  }
+    } finally {
+      await sb.cleanup();
+    }
+  });
 
   // The stop line names the broken file, unless the path could repaint the
-  // terminal: then it says where to look without printing it.
-  for (const [look] of LOOKS) {
-    test(`layout B, ${look}: a path with control characters is not printed`, async () => {
-      const sb = await makeSandbox();
-      try {
-        const bin = await layoutB(join(sb.root, "esc\u001b[31mred"), BROKEN[0][1]);
-        for (const args of withAndWithoutScan(look)) {
-          const res = await run(sb, bin, args);
-          assertStopped(res, args.join(" "));
+  // terminal: then it says where to look without printing it. In either language.
+  test("layout B: a path with control characters is not printed", async () => {
+    const sb = await makeSandbox();
+    try {
+      const bin = await layoutB(join(sb.root, "esc\u001b[31mred"), BROKEN[0][1]);
+      for (const lang of ["ja", "en"] as const) {
+        for (const args of WITH_AND_WITHOUT_SCAN) {
+          const res = await run(sb, bin, args, undefined, lang);
+          assertStopped(res, `${lang}: ${what(args)}`);
           // eslint-disable-next-line no-control-regex
-          assert.doesNotMatch(res.stdout + res.stderr, /[\u0000-\u0008\u000b-\u001f\u007f]/, args.join(" "));
+          assert.doesNotMatch(res.stdout + res.stderr, /[\u0000-\u0008\u000b-\u001f\u007f]/, `${lang}: ${what(args)}`);
           assert.ok(!res.stderr.includes("31mred"), res.stderr);
         }
-      } finally {
-        await sb.cleanup();
       }
-    });
-  }
+    } finally {
+      await sb.cleanup();
+    }
+  });
 });

@@ -1,0 +1,368 @@
+/**
+ * ccs-db.ts - SQLite initialization & migration module for ccs v0.2.0
+ *
+ * Responsibilities:
+ *   - Open better-sqlite3 connection with secure defaults
+ *   - Apply idempotent schema migrations inside per-migration transactions
+ *   - Provide prepared-statement helpers for repo sync (upsert/list/delete)
+ *
+ * Source of truth: docs/design/sqlite-schema.md
+ */
+import Database from "better-sqlite3";
+import { mkdirSync, chmodSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { t } from "./ccs-i18n.js";
+export const CURRENT_SCHEMA_VERSION = 4;
+// ---------------------------------------------------------------------------
+// Migrations
+// ---------------------------------------------------------------------------
+const MIGRATION_V1 = `
+CREATE TABLE IF NOT EXISTS schema_version (
+  version     INTEGER PRIMARY KEY,
+  applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS repos (
+  name            TEXT PRIMARY KEY,
+  path            TEXT NOT NULL,
+  description     TEXT NOT NULL DEFAULT '',
+  command         TEXT NOT NULL DEFAULT '',
+  cwd             TEXT,
+  tags_json       TEXT NOT NULL DEFAULT '[]',
+  icon            TEXT NOT NULL DEFAULT '📁',
+  disabled        INTEGER NOT NULL DEFAULT 0,
+  scan_enabled    INTEGER NOT NULL DEFAULT 1,
+  custom_json     TEXT NOT NULL DEFAULT '{}',
+  config_hash     TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repos_path ON repos(path);
+CREATE INDEX IF NOT EXISTS idx_repos_disabled ON repos(disabled);
+
+CREATE TABLE IF NOT EXISTS repo_stats (
+  name                   TEXT PRIMARY KEY,
+  is_git                 INTEGER NOT NULL DEFAULT 0,
+  branch                 TEXT,
+  last_commit_hash       TEXT,
+  last_commit_subject    TEXT,
+  last_commit_at         TEXT,
+  uncommitted_files      INTEGER NOT NULL DEFAULT 0,
+  uncommitted_insertions INTEGER NOT NULL DEFAULT 0,
+  uncommitted_deletions  INTEGER NOT NULL DEFAULT 0,
+  handoff_count          INTEGER NOT NULL DEFAULT 0,
+  pending_count          INTEGER NOT NULL DEFAULT 0,
+  claude_room_latest     TEXT,
+  claude_room_latest_at  TEXT,
+  session_count_total    INTEGER NOT NULL DEFAULT 0,
+  session_last_at        TEXT,
+  scanned_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  scan_duration_ms       INTEGER NOT NULL DEFAULT 0,
+  scan_error             TEXT,
+  FOREIGN KEY (name) REFERENCES repos(name) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_stats_scanned_at ON repo_stats(scanned_at);
+CREATE INDEX IF NOT EXISTS idx_repo_stats_session_last_at ON repo_stats(session_last_at DESC);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  uuid             TEXT PRIMARY KEY,
+  repo_name        TEXT,
+  project_dir      TEXT NOT NULL,
+  cwd              TEXT NOT NULL,
+  branch           TEXT,
+  started_at       TEXT NOT NULL,
+  last_activity_at TEXT NOT NULL,
+  message_count    INTEGER NOT NULL DEFAULT 0,
+  topic            TEXT,
+  summary          TEXT,
+  jsonl_size       INTEGER NOT NULL DEFAULT 0,
+  jsonl_mtime      TEXT NOT NULL,
+  indexed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (repo_name) REFERENCES repos(name) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_name, last_activity_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
+
+CREATE TABLE IF NOT EXISTS handoff_files (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_name  TEXT NOT NULL,
+  filename   TEXT NOT NULL,
+  size       INTEGER NOT NULL DEFAULT 0,
+  mtime      TEXT NOT NULL,
+  first_line TEXT,
+  FOREIGN KEY (repo_name) REFERENCES repos(name) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_repo ON handoff_files(repo_name, mtime DESC);
+
+CREATE TABLE IF NOT EXISTS pending_items (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_name  TEXT NOT NULL,
+  filename   TEXT NOT NULL,
+  size       INTEGER NOT NULL DEFAULT 0,
+  mtime      TEXT NOT NULL,
+  first_line TEXT,
+  FOREIGN KEY (repo_name) REFERENCES repos(name) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_repo ON pending_items(repo_name, mtime DESC);
+`;
+// v2: key/value store for scan-time resolved settings. First consumer is
+// `defaults_command` — the resolved launch-command fallback (defaults.command
+// > CCS_CMD > "claude") that ccs-list needs for sessions not mapped to any
+// repo (review A-8). ccs-list opens the DB readonly+skipMigrate, so it must
+// tolerate this table being absent on a not-yet-migrated cache (getMeta).
+const MIGRATION_V2 = `
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`;
+// v3: repos.yml `launch` / `label` (display-only group headers and display
+// names). Plain ADD COLUMN with defaults, so older ccs builds keep working
+// against a v3 cache: their INSERTs name explicit columns (the new ones take
+// the defaults) and their SELECTs name explicit columns (the new ones are
+// never read). The other direction — a v3 reader (ccs-list/ccs-preview,
+// readonly+skipMigrate) meeting a not-yet-migrated v2 cache — goes through
+// reposV3Columns().
+const MIGRATION_V3 = `
+ALTER TABLE repos ADD COLUMN launch INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE repos ADD COLUMN label  TEXT    NOT NULL DEFAULT '';
+`;
+// v4: repos.yml `lead` (the group's lead entry, listed first among its
+// siblings). Same plain ADD COLUMN pattern as v3: older builds keep working
+// against a v4 cache, and readonly readers meeting a v3 cache get the default
+// through reposV3Columns().
+const MIGRATION_V4 = `
+ALTER TABLE repos ADD COLUMN lead INTEGER NOT NULL DEFAULT 0;
+`;
+const migrations = [
+    { version: 1, up: MIGRATION_V1 },
+    { version: 2, up: MIGRATION_V2 },
+    { version: 3, up: MIGRATION_V3 },
+    { version: 4, up: MIGRATION_V4 },
+];
+// ---------------------------------------------------------------------------
+// Migration runner
+// ---------------------------------------------------------------------------
+export function getCurrentSchemaVersion(db) {
+    const row = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'`)
+        .get();
+    if (!row)
+        return 0;
+    const v = db
+        .prepare(`SELECT MAX(version) AS v FROM schema_version`)
+        .get();
+    return v?.v ?? 0;
+}
+export function migrate(db) {
+    const current = getCurrentSchemaVersion(db);
+    const pending = migrations.filter((m) => m.version > current);
+    for (const m of pending) {
+        try {
+            db.transaction(() => {
+                db.exec(m.up);
+                db.prepare(`INSERT INTO schema_version (version) VALUES (?)`).run(m.version);
+            })();
+            process.stderr.write(`${t("db_migrated", { version: m.version })}\n`);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`[ccs-db] migration v${m.version} failed: ${msg}`);
+        }
+    }
+}
+// ---------------------------------------------------------------------------
+// Open / close
+// ---------------------------------------------------------------------------
+export function openDb(stateDbPath, opts = {}) {
+    const readOnly = opts.readonly === true;
+    if (readOnly) {
+        if (!existsSync(stateDbPath)) {
+            throw new Error(`[ccs-db] state.db not found at ${stateDbPath} — run \`ccs --refresh\` first`);
+        }
+    }
+    else {
+        // Ensure parent directory exists with restrictive permissions.
+        const parent = dirname(stateDbPath);
+        mkdirSync(parent, { recursive: true, mode: 0o700 });
+    }
+    const db = readOnly
+        ? new Database(stateDbPath, { readonly: true })
+        : new Database(stateDbPath);
+    // PRAGMAs: foreign keys must be ON before migrations.
+    // journal_mode/synchronous are session-scoped write pragmas — skip on readonly.
+    if (!readOnly) {
+        db.pragma("journal_mode = WAL");
+        db.pragma("synchronous = NORMAL");
+        // Scan-workload throughput pragmas (backlog: PRAGMA tuning). Negative
+        // cache_size is KiB (≈8MB page cache); temp_store=MEMORY keeps sort/temp
+        // b-trees off disk; mmap_size lets reads go through the page cache
+        // mapping (64MB ≫ any ccs-sized DB). All session-scoped, write path only.
+        db.pragma("cache_size = -8000");
+        db.pragma("temp_store = MEMORY");
+        db.pragma("mmap_size = 67108864");
+    }
+    db.pragma("foreign_keys = ON");
+    // WAL allows one writer at a time; concurrent `--force` scans (Ctrl-R right
+    // after `ccs --refresh`, or two terminals) would otherwise fail immediately
+    // with SQLITE_BUSY (audit NEW-4). 3s is ample for ccs-sized transactions.
+    db.pragma("busy_timeout = 3000");
+    if (!readOnly) {
+        // Tighten file permissions, including WAL side files which inherit the
+        // main DB's content. Best-effort, but a failure is no longer silent
+        // (audit L-4): on umask-hostile or foreign filesystems the cache may stay
+        // group/world-readable, and the user should know.
+        for (const suffix of ["", "-wal", "-shm"]) {
+            const p = stateDbPath + suffix;
+            if (suffix !== "" && !existsSync(p))
+                continue;
+            try {
+                chmodSync(p, 0o600);
+            }
+            catch {
+                process.stderr.write(`${t("db_chmod_failed", { file: p })}\n`);
+            }
+        }
+    }
+    if (!opts.skipMigrate && !readOnly) {
+        migrate(db);
+    }
+    return {
+        db,
+        close() {
+            try {
+                // Passive checkpoint flushes WAL pages back to the main DB without
+                // blocking other readers. Safe to ignore errors (checkpoint is hygiene,
+                // not correctness). Readonly connections cannot checkpoint — skip.
+                if (!readOnly) {
+                    db.pragma("wal_checkpoint(PASSIVE)");
+                }
+            }
+            catch {
+                // ignore
+            }
+            db.close();
+        },
+    };
+}
+export function upsertRepo(db, row) {
+    // Update updated_at only when config_hash changes; created_at is preserved
+    // on conflict via excluded.created_at being ignored.
+    const stmt = db.prepare(`
+    INSERT INTO repos (
+      name, path, description, command, cwd, tags_json, icon,
+      disabled, scan_enabled, launch, label, lead, custom_json, config_hash,
+      created_at, updated_at
+    ) VALUES (
+      @name, @path, @description, @command, @cwd, @tags_json, @icon,
+      @disabled, @scan_enabled, @launch, @label, @lead, @custom_json, @config_hash,
+      datetime('now'), datetime('now')
+    )
+    ON CONFLICT(name) DO UPDATE SET
+      path         = excluded.path,
+      description  = excluded.description,
+      command      = excluded.command,
+      cwd          = excluded.cwd,
+      tags_json    = excluded.tags_json,
+      icon         = excluded.icon,
+      disabled     = excluded.disabled,
+      scan_enabled = excluded.scan_enabled,
+      launch       = excluded.launch,
+      label        = excluded.label,
+      lead         = excluded.lead,
+      custom_json  = excluded.custom_json,
+      config_hash  = excluded.config_hash,
+      updated_at   = CASE
+        WHEN repos.config_hash != excluded.config_hash
+          THEN datetime('now')
+        ELSE repos.updated_at
+      END
+  `);
+    stmt.run({ ...row, launch: row.launch ?? 1, label: row.label ?? "", lead: row.lead ?? 0 });
+}
+export function getAllRepos(db) {
+    return db
+        .prepare(`SELECT name, path, description, command, cwd, tags_json, icon,
+              disabled, scan_enabled, launch, label, lead, custom_json, config_hash,
+              created_at, updated_at
+       FROM repos
+       ORDER BY name`)
+        .all();
+}
+/**
+ * SELECT-list fragment for the repos columns added after v2 — `launch, label`
+ * (v3) and `lead` (v4) — qualified with `alias` when given.
+ *
+ * ccs-list and ccs-preview open the DB readonly+skipMigrate, so they can meet
+ * a v2 cache that predates migration v3 (`ccs --no-scan` right after an
+ * upgrade, or a pre-scan that failed). There the columns are synthesized with
+ * their defaults, and every repo renders exactly as it did on v2: launchable,
+ * no label. Same degrade-don't-crash rule as getMeta() for the v2 meta table.
+ */
+export function reposV3Columns(db, alias = "") {
+    const have = new Set(db.prepare(`PRAGMA table_info(repos)`).all()
+        .map((c) => c.name));
+    const q = alias ? `${alias}.` : "";
+    return [
+        have.has("launch") ? `${q}launch` : `1 AS launch`,
+        have.has("label") ? `${q}label` : `'' AS label`,
+        have.has("lead") ? `${q}lead` : `0 AS lead`,
+    ].join(", ");
+}
+/**
+ * Delete a single session row by UUID using a bound parameter.
+ *
+ * Exists so shell callers (ccs-delete.sh via ccs-delete-session.ts) never
+ * have to assemble SQL strings themselves (audit M-3 — the old sqlite3 CLI
+ * one-liner interpolated the UUID into the statement; safe only as long as
+ * the upstream regex gate held).
+ *
+ * Returns the number of rows removed (0 when the UUID was not cached).
+ */
+export function deleteSession(db, uuid) {
+    const res = db.prepare(`DELETE FROM sessions WHERE uuid = ?`).run(uuid);
+    return res.changes;
+}
+/** Upsert one key into the meta table (schema v2). */
+export function setMeta(db, key, value) {
+    db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+}
+/**
+ * Read one key from the meta table. Returns null when the key is absent OR
+ * when the table itself does not exist yet — readonly/skipMigrate consumers
+ * (ccs-list) can hit a schema-v1 cache that predates migration v2, and a
+ * missing setting must degrade to the caller's default, not crash the list.
+ */
+export function getMeta(db, key) {
+    try {
+        const row = db
+            .prepare(`SELECT value FROM meta WHERE key = ?`)
+            .get(key);
+        return row?.value ?? null;
+    }
+    catch {
+        return null;
+    }
+}
+export function deleteReposNotIn(db, names) {
+    if (names.length === 0) {
+        // Preserve existing semantic: empty array deletes all repos.
+        const res = db.prepare(`DELETE FROM repos`).run();
+        return res.changes;
+    }
+    // Use json_each(JSON array) to avoid SQLite's 999-variable bind limit
+    // when syncing large numbers of repos. JSON1 is default-enabled since
+    // SQLite 3.38 (bundled with better-sqlite3).
+    const res = db
+        .prepare(`DELETE FROM repos
+       WHERE name NOT IN (SELECT value FROM json_each(?))`)
+        .run(JSON.stringify(names));
+    return res.changes;
+}

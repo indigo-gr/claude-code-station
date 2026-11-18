@@ -89,13 +89,9 @@ export class EditStop extends Error {
 // Value checks shared by the writing commands
 // ---------------------------------------------------------------------------
 
-// C0, DEL, C1 and the marks that reorder displayed text (same set as
-// ccs-sanitize's stripControlChars).
-const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
-
-export function hasControlChars(value: string): boolean {
-  return CONTROL_CHAR_RE.test(value);
-}
+// C0, DEL, C1 and the marks that reorder displayed text: the set lives in
+// ccs-sanitize (one list for the checks and the display cleaning).
+export { hasControlChars } from "./ccs-sanitize.ts";
 
 /** Length in code points (a surrogate pair counts once). */
 export function codePointLength(value: string): number {

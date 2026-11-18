@@ -26,6 +26,14 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// The messages checked in this file are the English ones. Pin the language
+// of this process (and of what it starts) so the shell's locale or a
+// CCS_LANG left in it cannot change them; a test that wants Japanese sets
+// CCS_LANG_RESOLVED itself.
+for (const k of ["CCS_LANG", "LC_ALL", "LC_MESSAGES"]) delete process.env[k];
+process.env.LANG = "en_US.UTF-8";
+process.env.CCS_LANG_RESOLVED = "en";
+
 interface ScanSandbox {
   root: string;
   home: string;
@@ -855,17 +863,17 @@ describe("scan() — audit M-3 remap", () => {
 });
 
 // ---------------------------------------------------------------------------
-// defaults.ui → meta + --print-ui (v0.3.0)
+// defaults.ui: one look since v0.6.0 — nothing stored, no --print-ui
 // ---------------------------------------------------------------------------
 
 describe("scan() — defaults.ui", () => {
-  test("stores defaults.ui in meta and returns it; the CLI prints ui=<mode> with --print-ui", async () => {
+  test("stores no ui and returns none; --print-ui prints nothing; --print-settings prints update_check only", async () => {
     const sb = await makeScanSandbox();
     const repoDir = join(sb.home, "proj");
     await mkdir(repoDir, { recursive: true });
     await writeFile(
       sb.reposYml,
-      `version: 1\ndefaults:\n  ui: simple\nrepos:\n  - name: proj\n    path: ${repoDir}\n`,
+      `version: 1\ndefaults:\n  ui: classic\n  update_check: false\nrepos:\n  - name: proj\n    path: ${repoDir}\n`,
     );
     const env = {
       HOME: sb.home,
@@ -877,25 +885,37 @@ describe("scan() — defaults.ui", () => {
     const restore = applyEnv(env);
     try {
       const { scan } = await freshScan();
-      const res = await scan({ force: true, scanSessions: false });
-      assert.equal(res.ui, "simple");
+      // The classic warning is the loader's; the scan itself goes on.
+      const res = await scan({ force: true, scanSessions: false, quietConfig: true });
+      assert.equal("ui" in res, false, "ScanResult carries no ui");
+      assert.equal(res.updateCheck, false);
       const { openDb, getMeta } = await import("../bin/ccs-db.ts");
       const h = openDb(join(sb.xdgCache, "ccs", "state.db"), { readonly: true, skipMigrate: true });
       try {
-        assert.equal(getMeta(h.db, "defaults_ui"), "simple");
+        assert.equal(getMeta(h.db, "defaults_ui"), null, "no ui in meta");
+        assert.equal(getMeta(h.db, "defaults_update_check"), "off");
       } finally {
         h.close();
       }
 
       const cli = (args: string[]) =>
-        spawnSync("tsx", [new URL("../bin/ccs-scan.ts", import.meta.url).pathname, ...args], {
+        spawnSync(process.execPath, [new URL("../bin/ccs-scan.ts", import.meta.url).pathname, ...args], {
           encoding: "utf-8",
           env: { ...process.env, HOME: sb.home, XDG_CONFIG_HOME: sb.xdgConfig, XDG_CACHE_HOME: sb.xdgCache },
         });
+      const classicWarning =
+        "[ccs] defaults.ui: classic was removed in v0.6.0; ccs opens the simple look (ignored)";
+      // --print-ui is gone: no ui= line, the scan still runs.
       const printed = cli(["--quiet", "--no-sessions", "--print-ui"]);
       assert.equal(printed.status, 0, printed.stderr);
-      assert.equal(printed.stdout, "ui=simple\n");
-      // Without the flag ccs-scan keeps stdout empty, as before.
+      assert.equal(printed.stdout, "");
+      // --print-settings: exactly one line, update_check only (no ui=).
+      const settings = cli(["--quiet", "--no-sessions", "--print-settings"]);
+      assert.equal(settings.status, 0, settings.stderr);
+      assert.equal(settings.stdout, "update_check=off\n");
+      // The launcher's load warns once about classic, on stderr.
+      assert.equal(settings.stderr.split(classicWarning).length - 1, 1, settings.stderr);
+      // Without a flag ccs-scan keeps stdout empty, as before.
       const quiet = cli(["--quiet", "--no-sessions"]);
       assert.equal(quiet.status, 0, quiet.stderr);
       assert.equal(quiet.stdout, "");

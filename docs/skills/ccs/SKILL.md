@@ -17,7 +17,7 @@ Answer in the user's language. Prefer the ccs commands below over editing files 
 
 ## First steps
 
-1. `ccs doctor` — checks Node (22+), fzf (0.42+), `claude`, `repos.yml` and the cache. Exit 0 means ccs works; otherwise each failing line names what is missing.
+1. `ccs doctor` — checks Node (24.12+), fzf (0.61+), `claude`, `repos.yml` and the cache. Exit 0 means ccs works; otherwise each failing line names what is missing.
 2. `ccs init --auto-discover` — scans `$HOME` (depth 5, `--depth N` to change) for git repositories and lets the user pick which to register (TAB to toggle, Enter to add). It runs fzf, so the user has to run it in their own terminal; you cannot drive it. Suggest they type `! ccs init --auto-discover` in the Claude Code prompt or run it in another terminal.
 3. The first run leaves a template entry named `Example Project` (`path: ~/path/to/your/project`). Remove it once real entries exist: `ccs repo remove "Example Project"`.
 4. `ccs` — opens the picker. This is interactive too; the user runs it, not you.
@@ -31,7 +31,6 @@ Answer in the user's language. Prefer the ccs commands below over editing files 
 | `ccs --resume` | Past sessions only |
 | `ccs .` | Sessions under the current folder |
 | `ccs --refresh` | Rescans before showing |
-| `ccs --ui=simple` | Friendlier full-screen look (Japanese text, fzf 0.61+) |
 
 | Key | Action |
 |---|---|
@@ -53,7 +52,6 @@ ccs repo add ~/projects/my-app --name my-app --description "Web front end"
 ccs repo remove my-app                         # the folder and its sessions are not touched
 ccs config set --repo my-app label "My App"    # display name; "" removes it
 ccs config set --repo my-app description "…"
-ccs config set defaults.ui simple              # or classic
 ccs config get                                 # what can be changed, and current values
 ccs list --json --with-paths                   # entries after ccs's checks
 ```
@@ -70,7 +68,7 @@ Shape:
 version: 1
 defaults:
   command: "claude"
-  ui: simple                # classic (default) or simple
+  ui: simple                # optional; simple is the only look since v0.6.0 (classic warns and opens simple)
 repos:
   - name: my-app            # unique key; shown in the list
     path: ~/projects/my-app # must be under $HOME
@@ -96,7 +94,7 @@ Grouping:
 
 - An entry whose `path` is inside another entry's `path` is listed under it automatically.
 - `launch: false` makes a display-only header (Enter does nothing; `path` required). Its children nest under it by `path`.
-- `lead: true` puts the entry first among its siblings (shown with 👑 in the simple look).
+- `lead: true` puts the entry first among its siblings (shown with 👑).
 
 Integration fields go under `custom` only — never as new keys at the top of an item. Known keys get a badge: `plane_project_id` (with optional `plane_url`), `attio_workspace`, `notion_db`, `linear_team`, `slack_channel`, `github_repo` (`owner/repo`), `figma_file`. Any other key is shown under "Other". Store IDs and URLs only; never put API keys, tokens or passwords in `repos.yml`. `custom` is limited to 64,000 characters of JSON.
 
@@ -112,8 +110,8 @@ If the check fails, show the user the message, fix the named key, or restore `re
 ## Troubleshooting
 
 - `ccs: command not found` — npm's global bin is not on `PATH`. Add `"$(npm prefix -g)/bin"` to `PATH` in the shell profile.
-- `fzf_too_old` in `ccs doctor` — ccs needs fzf 0.42+ (0.61+ for the simple look). Linux package managers often ship older ones; install from the fzf releases.
-- Node older than 22 — upgrade Node, then reinstall ccs so better-sqlite3 is built for that Node.
+- `fzf_too_old` in `ccs doctor` — ccs needs fzf 0.61+. Linux package managers often ship older ones; install from the fzf releases.
+- Node older than 24.12 — upgrade Node, then reinstall ccs so better-sqlite3 is built for that Node.
 - `path not found` warning — the folder moved or was deleted. Fix `path`, or set `disabled: true`.
 - A project does not show up — run `ccs --refresh`, then `ccs list --json` to see whether the entry passed the checks.
 - Native Windows is not supported; use WSL and follow the Linux steps there.

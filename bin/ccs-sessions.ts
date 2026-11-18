@@ -26,6 +26,7 @@ import {
 } from "./ccs-machine.ts";
 import { maskSecrets } from "./ccs-secrets.ts";
 import { stripControlChars } from "./ccs-sanitize.ts";
+import { t } from "./ccs-i18n.ts";
 
 const LIMIT_DEFAULT = 5;
 const LIMIT_MAX = 50;
@@ -82,7 +83,7 @@ export async function sessionsOutcome(args: readonly string[]): Promise<Outcome>
   if (!flags.ok) return cliOutcome(flags.code);
   if (flags.positionals.length > 0 || flags.rest.length > 0) return cliOutcome("extra_argument");
   if (!flags.booleans.has("--json")) {
-    return cliOutcome("json_required", {}, "`ccs sessions` needs --json (to pick a conversation by hand, run ccs --resume)");
+    return cliOutcome("json_required", {}, t("note_sessions_json"));
   }
   let limit = LIMIT_DEFAULT;
   const rawLimit = flags.values.get("--limit");
@@ -101,7 +102,7 @@ export async function sessionsOutcome(args: readonly string[]): Promise<Outcome>
     try {
       const result = readConfig();
       if (!result.found) {
-        return cliOutcome("config_missing", {}, "no repos.yml yet (config_missing)");
+        return cliOutcome("config_missing", {}, t("note_config_missing"));
       }
       if (!result.config.repos.some((r) => r.name === project)) {
         return cliOutcome("repo_not_found");
@@ -117,7 +118,7 @@ export async function sessionsOutcome(args: readonly string[]): Promise<Outcome>
   }
 
   if (!existsSync(paths.stateDb)) {
-    return cliOutcome("cache_missing", {}, "no cache yet (cache_missing); open the list once, or run ccs --refresh");
+    return cliOutcome("cache_missing", {}, t("note_cache_missing"));
   }
   let rows: Row[];
   try {
@@ -137,7 +138,7 @@ export async function sessionsOutcome(args: readonly string[]): Promise<Outcome>
       handle.db.close();
     }
   } catch {
-    return cliOutcome("cache_not_readable", {}, "cannot open the cache (cache_not_readable)");
+    return cliOutcome("cache_not_readable", {}, t("note_cache_not_readable"));
   }
 
   let unmapped = 0;

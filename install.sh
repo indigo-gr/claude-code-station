@@ -25,22 +25,25 @@ echo ""
 
 # ── Dependency check ────────────────────────────────────────────────────────
 MISSING=()
+# Node >= 24.12.0: the copied .ts modules run with Node's own type stripping
+# (stable from 24.12.0, no flag; tsx is no longer used).
 if command -v node &>/dev/null; then
-  NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
-  (( NODE_MAJOR >= 22 )) || MISSING+=("node >= 22 (found $(node -v))")
-else
-  MISSING+=("node >= 22")
-fi
-# fzf >= 0.42.0 required for the change-header binding used by Ctrl-Y/Ctrl-I toasts.
-if command -v fzf &>/dev/null; then
-  FZF_VER=$(fzf --version 2>/dev/null | awk '{print $1}')
-  if [[ -n "$FZF_VER" ]] && [[ "$(printf '%s\n0.42.0\n' "$FZF_VER" | sort -V | head -n1)" != "0.42.0" ]]; then
-    MISSING+=("fzf >= 0.42.0 (found $FZF_VER; 'change-header' binding requires 0.42+)")
+  NODE_VER=$(node -p 'process.versions.node' 2>/dev/null || echo 0.0.0)
+  if [[ "$(printf '%s\n24.12.0\n' "$NODE_VER" | sort -V | head -n1)" != "24.12.0" ]]; then
+    MISSING+=("node >= 24.12.0 (found v${NODE_VER})")
   fi
 else
-  MISSING+=("fzf >= 0.42.0 (brew install fzf / apt install fzf)")
+  MISSING+=("node >= 24.12.0")
 fi
-command -v tsx    &>/dev/null || MISSING+=("tsx (npm install -g tsx)")
+# fzf >= 0.61.0 required for the list's look (--style, the labels, --ghost).
+if command -v fzf &>/dev/null; then
+  FZF_VER=$(fzf --version 2>/dev/null | awk '{print $1}')
+  if [[ -n "$FZF_VER" ]] && [[ "$(printf '%s\n0.61.0\n' "$FZF_VER" | sort -V | head -n1)" != "0.61.0" ]]; then
+    MISSING+=("fzf >= 0.61.0 (found $FZF_VER; the list needs 0.61+)")
+  fi
+else
+  MISSING+=("fzf >= 0.61.0 (brew install fzf / apt install fzf)")
+fi
 command -v claude &>/dev/null || MISSING+=("claude (Claude Code CLI)")
 
 if (( ${#MISSING[@]} > 0 )); then
@@ -67,7 +70,8 @@ fi
 mkdir -p "$INSTALL_DIR"
 echo "Installing to ${INSTALL_DIR}/ ..."
 cp -p "$REPO_BIN/ccs" "$INSTALL_DIR/"
-for f in "$REPO_BIN"/ccs-*.ts "$REPO_BIN"/ccs-*.sh; do
+# ccs-lang-*.txt: the string tables (bin/ccs and the modules read them).
+for f in "$REPO_BIN"/ccs-*.ts "$REPO_BIN"/ccs-*.sh "$REPO_BIN"/ccs-lang-*.txt; do
   [[ -e "$f" ]] && cp -p "$f" "$INSTALL_DIR/"
 done
 chmod +x "$INSTALL_DIR/ccs"
@@ -78,7 +82,7 @@ chmod +x "$INSTALL_DIR/ccs"
 find "$INSTALL_DIR" -maxdepth 1 -name 'ccs*' -exec basename {} \; | sort | sed 's/^/  /'
 
 # ── Runtime dependency resolution (backlog HIGH: node_modules) ──────────────
-# tsx resolves better-sqlite3/yaml by walking up from the SCRIPT's directory,
+# Node resolves better-sqlite3/yaml by walking up from the SCRIPT's directory,
 # not the caller's cwd — so the installed copies under ~/.claude/scripts/
 # need a node_modules within reach. Symlink the repo checkout's tree (short-
 # term fix; npm-package distribution is the long-term plan, see backlog).

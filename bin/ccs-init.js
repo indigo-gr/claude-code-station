@@ -1,0 +1,279 @@
+#!/usr/bin/env node
+/**
+ * ccs-init.ts — repos.yml bootstrap helpers for `ccs init`.
+ *
+ * Three modes, wired by bin/ccs:
+ *   scaffold            ensure ~/.config/ccs/ exists, print where config lives
+ *   discover [--depth N]  walk $HOME for git repos not yet in repos.yml and
+ *                         emit fzf candidate lines: "<name>\t<~/path>"
+ *   append              read selected candidate lines from stdin and append
+ *                         them to repos.yml (comment/format-preserving), with
+ *                         backup + post-write validation rollback
+ *
+ * Spec: docs/v0.2.1-backlog.md "ccs init --auto-discover".
+ */
+import { readdir } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join, relative } from "node:path";
+import { parseDocument, isSeq } from "yaml";
+import { ensureConfigDir, getPaths, loadConfig } from "./ccs-config.js";
+import { EditStop, runEditSync } from "./ccs-config-edit.js";
+import { hasControlChars, hasShellMetachars, jsonForTerminal } from "./ccs-sanitize.js";
+import { pathToFileURL } from "node:url";
+import { t } from "./ccs-i18n.js";
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+const DEFAULT_MAX_DEPTH = 5;
+// Non-hidden directories that never contain the user's own repos. Hidden
+// directories (.venv, .cache, .Trash*, .next, ...) are skipped wholesale by
+// the dot rule below, so only visible noise needs listing here.
+const EXCLUDED_DIR_NAMES = new Set([
+    "node_modules",
+    "Library",
+    "Applications",
+    "__pycache__",
+    "dist",
+    "build",
+    "target",
+]);
+/**
+ * Find git checkout roots under $HOME. A directory containing a `.git`
+ * entry (dir for normal clones, file for worktrees/submodules) is emitted
+ * and NOT descended into — nested repos inside a found repo are the found
+ * repo's business. Symlinked directories are skipped (cycle safety).
+ *
+ * Exception: the walk root itself ($HOME-as-dotfiles-repo pattern) is
+ * emitted but still descended, otherwise one `.git` at $HOME would mask
+ * every real project below it.
+ */
+export async function discoverGitRepos(opts = {}) {
+    const home = opts.home ?? homedir();
+    const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const found = [];
+    async function walk(dir, depth) {
+        let entries;
+        try {
+            entries = await readdir(dir, { withFileTypes: true });
+        }
+        catch {
+            return; // unreadable dir — not ours to report
+        }
+        if (entries.some((e) => e.name === ".git")) {
+            found.push(dir);
+            if (depth > 0)
+                return; // stop at repo roots (root-dir exception above)
+        }
+        if (depth >= maxDepth)
+            return;
+        const subdirs = entries.filter((e) => e.isDirectory() &&
+            !e.name.startsWith(".") &&
+            !EXCLUDED_DIR_NAMES.has(e.name));
+        await Promise.all(subdirs.map((e) => walk(join(dir, e.name), depth + 1)));
+    }
+    await walk(home, 0);
+    return found.sort();
+}
+/**
+ * Turn discovered absolute paths into repos.yml candidates: subtract repos
+ * already registered, skip paths the SHELL_METACHARS policy would reject at
+ * load time anyway, suggest names from the directory basename, and uniquify
+ * against existing + already-suggested names ("foo", "foo-2", ...).
+ */
+export function buildCandidates(foundAbsPaths, existing, home) {
+    const out = [];
+    const taken = new Set(existing.names);
+    for (const abs of foundAbsPaths) {
+        if (existing.paths.has(abs))
+            continue;
+        if (hasShellMetachars(abs)) {
+            process.stderr.write(`${t("init_skip_metachars", { path: jsonForTerminal(abs) })}\n`);
+            continue;
+        }
+        // Anywhere in the path, not only the folder's own name: the picker line
+        // is the value written to repos.yml, so a parent folder's mark would
+        // reorder the picker too. ccs repo add refuses such a name
+        // (invalid_value); suggest none.
+        if (hasControlChars(abs)) {
+            process.stderr.write(`${t("init_skip_control", { path: jsonForTerminal(abs) })}\n`);
+            continue;
+        }
+        const base = abs === home ? "home" : basename(abs);
+        let name = base;
+        for (let i = 2; taken.has(name); i++)
+            name = `${base}-${i}`;
+        taken.add(name);
+        out.push({
+            name,
+            path: abs === home ? "~" : `~/${relative(home, abs)}`,
+        });
+    }
+    return out;
+}
+// ---------------------------------------------------------------------------
+// YAML append (comment/format-preserving)
+// ---------------------------------------------------------------------------
+/**
+ * `repos: [{name: a, path: ~/a}]` (one line, YAML flow style) is valid, but
+ * appending to it keeps it on one line, and tools that read repos.yml line by
+ * line (`name:` and `path:` under each `- ` item) see none of it. ccs init
+ * only writes the block form, so it refuses here and leaves the file as is.
+ * `flow_style_repos` is the reason word for scripts to match on.
+ */
+export function rejectFlowStyleRepos(repos) {
+    if (isSeq(repos) && repos.flow) {
+        throw new Error("flow_style_repos: repos.yml lists `repos:` on one line ([...]); ccs init only adds to a block list. " +
+            "Rewrite it with one `- name: ...` / `path: ...` item per entry, then run ccs init --auto-discover again. repos.yml unchanged");
+    }
+}
+/** The repos.yml source's `repos:` node, for the checks before any scan. */
+function reposNodeOf(source) {
+    return parseDocument(source).get("repos", true);
+}
+/**
+ * Append candidates to the `repos:` sequence of a repos.yml source string.
+ * parseDocument round-trips comments and the user's existing formatting —
+ * never re-serialize the whole config from plain objects.
+ */
+export function appendReposToYaml(source, candidates) {
+    const doc = parseDocument(source);
+    const repos = doc.get("repos", true);
+    if (!isSeq(repos)) {
+        throw new Error("repos.yml: top-level `repos` sequence not found");
+    }
+    rejectFlowStyleRepos(repos);
+    for (const c of candidates) {
+        repos.add(doc.createNode({ name: c.name, path: c.path }));
+    }
+    // lineWidth: 0 — never re-fold long lines the user wrote on one line;
+    // flowCollectionPadding: false — keep `tags: [work]`, not `[ work ]`.
+    // Without these, toString() normalizes UNTOUCHED lines (observed on a real
+    // config: every tags entry repadded + a long description folded in two).
+    return doc.toString({ lineWidth: 0, flowCollectionPadding: false });
+}
+/**
+ * Write candidates into repos.yml through the common write path
+ * (ccs-config-edit: lock, check, `.bak`, write in place, check again, put the
+ * old text back on failure) — `ccs init` must never leave a config the
+ * launcher cannot load. A one-line `repos:` is refused before anything else,
+ * even when the file fails the other checks.
+ */
+export function appendAndValidate(reposYmlPath, candidates) {
+    rejectFlowStyleRepos(reposNodeOf(readFileSync(reposYmlPath, "utf-8")));
+    try {
+        runEditSync({
+            reposYml: reposYmlPath,
+            transform: ({ doc }) => {
+                const repos = doc.get("repos", true);
+                if (!isSeq(repos)) {
+                    throw new Error("repos.yml: top-level `repos` sequence not found");
+                }
+                rejectFlowStyleRepos(repos);
+                for (const c of candidates) {
+                    repos.add(doc.createNode({ name: c.name, path: c.path }));
+                }
+            },
+        });
+    }
+    catch (err) {
+        if (err instanceof EditStop && err.code === "validation_after_write_failed") {
+            throw new Error(`[ccs-init] validation failed after append — repos.yml restored (backup kept at .bak): ${err.message}`);
+        }
+        if (err instanceof EditStop) {
+            throw new Error(`${err.code}: ${err.message}`);
+        }
+        throw err;
+    }
+}
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+function parseDepth(argv) {
+    const i = argv.indexOf("--depth");
+    if (i < 0)
+        return DEFAULT_MAX_DEPTH;
+    const n = parseInt(argv[i + 1] ?? "", 10);
+    if (!Number.isFinite(n) || n < 1 || n > 12) {
+        throw new Error(`[ccs-init] --depth must be an integer 1-12, got: ${argv[i + 1]}`);
+    }
+    return n;
+}
+async function cliDiscover(argv) {
+    const maxDepth = parseDepth(argv);
+    ensureConfigDir();
+    const config = loadConfig(); // throws ConfigError on a broken repos.yml
+    // Refuse before the $HOME scan and the picker, not after the user chose.
+    rejectFlowStyleRepos(reposNodeOf(readFileSync(getPaths().reposYml, "utf-8")));
+    const existing = {
+        names: new Set(config.repos.map((r) => r.name)),
+        paths: new Set(config.repos.map((r) => r.path)),
+    };
+    const home = homedir();
+    const found = await discoverGitRepos({ maxDepth, home });
+    const candidates = buildCandidates(found, existing, home);
+    for (const c of candidates) {
+        process.stdout.write(`${c.name}\t${c.path}\n`);
+    }
+    return 0;
+}
+async function cliAppend() {
+    const stdin = readFileSync(0, "utf-8");
+    const candidates = [];
+    for (const line of stdin.split("\n")) {
+        if (!line.trim())
+            continue;
+        const tab = line.indexOf("\t");
+        if (tab <= 0) {
+            process.stderr.write(`${t("init_skip_malformed", { line: jsonForTerminal(line) })}\n`);
+            continue;
+        }
+        candidates.push({ name: line.slice(0, tab), path: line.slice(tab + 1) });
+    }
+    if (candidates.length === 0) {
+        process.stderr.write(`${t("init_nothing_selected")}\n`);
+        return 0;
+    }
+    const paths = getPaths();
+    appendAndValidate(paths.reposYml, candidates);
+    process.stderr.write(`${t("init_added", { n: candidates.length, file: paths.reposYml })}\n`);
+    return 0;
+}
+function cliScaffold() {
+    ensureConfigDir();
+    const paths = getPaths();
+    process.stdout.write(`${t("init_scaffold_ready", { file: paths.reposYml })}\n`);
+    return 0;
+}
+async function main() {
+    const mode = process.argv[2] ?? "";
+    const rest = process.argv.slice(3);
+    try {
+        if (mode === "discover")
+            return await cliDiscover(rest);
+        if (mode === "append")
+            return await cliAppend();
+        if (mode === "scaffold")
+            return cliScaffold();
+        process.stderr.write("Usage: ccs-init.ts <scaffold | discover [--depth N] | append>\n");
+        return 1;
+    }
+    catch (err) {
+        process.stderr.write(`[ccs-init] ${err instanceof Error ? err.message : String(err)}\n`);
+        return 1;
+    }
+}
+// pathToFileURL, not `file://${argv[1]}`: a folder with a space (or any
+// character a URL escapes) in its name would never match.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+    main().then(
+    // exitCode, not process.exit(): bin/ccs captures discover's candidates
+    // with $(...), a pipe, and exiting right after the writes dropped every
+    // candidate past the pipe buffer (same bug as ccs-list, 2026-10-07).
+    (code) => {
+        process.exitCode = code;
+    }, (err) => {
+        process.stderr.write(`[ccs-init] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exit(1);
+    });
+}

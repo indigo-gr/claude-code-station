@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-preview-session.ts - Display conversation history in fzf preview pane
  * Args: sessionId
@@ -8,7 +8,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { maskSecrets } from "./ccs-secrets.ts";
-import { pathForDisplay, stripControlChars } from "./ccs-sanitize.ts";
+import { stripControlChars } from "./ccs-sanitize.ts";
 import {
   extractText,
   truncate,
@@ -16,6 +16,7 @@ import {
   UUID_RE,
 } from "./ccs-utils.ts";
 import { pathToFileURL } from "node:url";
+import { t } from "./ccs-i18n.ts";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const MAX_PREVIEW_MESSAGES = 20;
@@ -31,29 +32,21 @@ function safeText(text: string, max: number): string {
 // drift apart (review A-1/A-2). The preview passes includeToolBlocks below
 // because tool activity is part of the conversation flow it renders.
 
-export interface SessionPreviewOptions {
-  /**
-   * ui: simple — print only the conversation, under a Japanese heading and
-   * with "あなた" / "Claude" speakers (the caller already drew the card with
-   * the folder and time); errors are one Japanese line each.
-   */
-  simple?: boolean;
-}
-
-export async function renderSessionPreview(
-  sessionId: string,
-  opts: SessionPreviewOptions = {},
-): Promise<void> {
-  const simple = opts.simple ?? false;
-  const say = (classic: string, ja: string) => console.log(simple ? ja : classic);
+/**
+ * Print only the conversation, under a heading and with "you" / "Claude"
+ * speakers in the run's language (the caller already drew the card with the folder and
+ * time); errors are one Japanese line each.
+ */
+export async function renderSessionPreview(sessionId: string): Promise<void> {
+  const say = (ja: string) => console.log(ja);
   if (!sessionId) {
-    say("No session ID provided", "会話の記録が見つかりません");
+    say(t("session_not_found"));
     return;
   }
 
   // UUID validation (injection prevention)
   if (!UUID_RE.test(sessionId)) {
-    say("Invalid session ID format", "会話の記録が見つかりません");
+    say(t("session_not_found"));
     return;
   }
 
@@ -75,12 +68,12 @@ export async function renderSessionPreview(
       }
     }
   } catch {
-    say("Cannot read projects directory", "会話の記録の置き場を読めませんでした");
+    say(t("session_dir_unreadable"));
     return;
   }
 
   if (!targetFile) {
-    say("Session file not found", "会話の記録のファイルが見つかりません（消された会話かもしれません）");
+    say(t("session_file_missing"));
     return;
   }
 
@@ -89,52 +82,36 @@ export async function renderSessionPreview(
     const stats = await stat(targetFile);
     if (stats.size > MAX_JSONL_SIZE) {
       const mb = Math.round(stats.size / 1024 / 1024);
-      say(
-        `⚠️ File too large (${mb}MB). Skipping preview.`,
-        `長い会話なので、ここには中身を出しません（${mb}MB）。Enter で開けます`,
-      );
+      say(t("session_too_large", { mb }));
       return;
     }
   } catch {
-    say("Cannot stat session file", "会話の記録のファイルを読めませんでした");
+    say(t("session_file_unreadable"));
     return;
   }
 
   const content = await readFile(targetFile, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim());
 
-  let cwd = "";
-  let gitBranch = "";
-  let version = "";
   const messages: { role: string; text: string }[] = [];
 
   for (const line of lines) {
     try {
       const entry = JSON.parse(line);
 
-      if (!cwd && entry.cwd) cwd = entry.cwd;
-      if (!gitBranch && entry.gitBranch) gitBranch = entry.gitBranch;
-      if (!version && entry.version) version = entry.version;
-
       if (
         (entry.type === "user" || entry.type === "assistant") &&
         entry.message?.content
       ) {
-        // The simple look leaves out the "[tool: …]" / "[tool result]"
-        // placeholders: they are machinery, not the conversation a person
-        // remembers (a tool-result-only turn then has no text and is skipped).
+        // The "[tool: …]" / "[tool result]" placeholders are left out: they
+        // are machinery, not the conversation a person remembers (a
+        // tool-result-only turn then has no text and is skipped).
         const text = extractText(entry.message.content, {
-          includeToolBlocks: !simple,
+          includeToolBlocks: false,
         });
         if (text) {
           messages.push({
-            role: simple
-              ? entry.type === "user"
-                ? "👤 あなた:"
-                : "🤖 Claude:"
-              : entry.type === "user"
-                ? "👤"
-                : "🤖",
+            role: entry.type === "user" ? t("session_role_user") : t("session_role_claude"),
             text: safeText(text, MAX_MSG_LEN),
           });
           // Memory optimization: keep at most 2x display limit
@@ -148,35 +125,14 @@ export async function renderSessionPreview(
     }
   }
 
-  if (simple) {
-    console.log("  ──── これまでの会話 ────");
-    console.log();
-    if (messages.length === 0) {
-      console.log("  （まだやりとりはありません）");
-      return;
-    }
-    for (const msg of messages.slice(-MAX_PREVIEW_MESSAGES)) {
-      console.log(`  ${msg.role} ${msg.text}`);
-      console.log();
-    }
+  console.log(t("session_heading"));
+  console.log();
+  if (messages.length === 0) {
+    console.log(t("session_empty"));
     return;
   }
-
-  // Header — cwd/gitBranch/version are untrusted JSONL fields read straight
-  // from disk (NOT the sanitized DB copy), so apply the same two-step
-  // treatment as message text: maskSecrets for credential leakage (audit
-  // M-2), truncate to strip control chars / escape sequences (audit NEW-1).
-  console.log("━━━ Session Info ━━━");
-  console.log(`📁 ${pathForDisplay(safeText(cwd, 200))}`);
-  if (gitBranch) console.log(`🌿 ${safeText(gitBranch, 100)}`);
-  if (version) console.log(`📌 Claude ${safeText(version, 50)}`);
-  console.log(`💬 ${messages.length} messages`);
-  console.log("━━━ Conversation ━━━");
-  console.log();
-
-  const display = messages.slice(-MAX_PREVIEW_MESSAGES);
-  for (const msg of display) {
-    console.log(`${msg.role} ${msg.text}`);
+  for (const msg of messages.slice(-MAX_PREVIEW_MESSAGES)) {
+    console.log(`  ${msg.role} ${msg.text}`);
     console.log();
   }
 }

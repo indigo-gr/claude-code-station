@@ -1,0 +1,287 @@
+/**
+ * ccs-utils.ts — Shared helpers for ccs scan/list/preview modules.
+ *
+ * Single source of truth for display-text truncation, repo display names and
+ * nesting, relative-time bucketing, JSONL message-content extraction, and
+ * cross-module constants (review A-1/A-2/A-3/K-8). Before this module
+ * existed, each renderer kept its own copy of these helpers with "keep in
+ * sync" comments — and they drifted. Behavioral differences must now be
+ * expressed as explicit options, never as parallel implementations.
+ */
+import { keyForDisplay, stripControlChars } from "./ccs-sanitize.js";
+import { parseDbTime } from "./ccs-time.js";
+import { t as tr } from "./ccs-i18n.js";
+// ---------------------------------------------------------------------------
+// Cross-module constants
+// ---------------------------------------------------------------------------
+/** Session JSONL files above this size are never read into memory. */
+export const MAX_JSONL_SIZE = 50 * 1024 * 1024;
+/** Canonical session-UUID gate. Bash copies live in bin/ccs and ccs-delete.sh. */
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Current time as ISO 8601 UTC — the only timestamp format ccs writes. */
+export function nowIso() {
+    return new Date().toISOString();
+}
+// ---------------------------------------------------------------------------
+// Display truncation
+// ---------------------------------------------------------------------------
+/**
+ * Single-line display truncation: strips control chars (incl. ESC, DEL),
+ * collapses whitespace runs, and clips to `max` with an ellipsis.
+ *
+ * Display-side defense against terminal-escape injection (audit NEW-1):
+ * fzf renders the list with --ansi and the preview pane prints raw to the
+ * terminal. Intake sanitization in ccs-scan is the first line of defense.
+ */
+export function truncate(s, max) {
+    if (!s)
+        return "";
+    const flat = stripControlChars(s);
+    return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
+}
+/** A repos.yml icon as drawn: never a tab or an escape, 📁 when nothing is left. */
+export function displayIcon(icon) {
+    return stripControlChars(icon ?? "") || "📁";
+}
+// ---------------------------------------------------------------------------
+// Repo display name & nesting
+// ---------------------------------------------------------------------------
+/** Display cap for repos.yml `label` (it is a name, not a sentence). */
+export const LABEL_MAX = 40;
+/**
+ * Name shown for a repo in the NEW row and the repo/group preview: the
+ * repos.yml `label` when set, else the unique `name`. The label is
+ * display-only (never part of a row key or a shell line), so like
+ * `description` it is not rejected at load time — control chars are stripped
+ * here by truncate(). A label that strips down to nothing falls back to name,
+ * which loses the same characters on the screen (keyForDisplay).
+ */
+export function repoDisplayName(r) {
+    return truncate(r.label ?? "", LABEL_MAX) || keyForDisplay(r.name);
+}
+/**
+ * True when `child` sits strictly inside `parent` (path-segment aware). An
+ * empty parent (a repos.yml entry without `path`) contains nothing — as a
+ * bare prefix it would have claimed every absolute path.
+ */
+export function isUnderPath(child, parent) {
+    if (!parent)
+        return false;
+    return child.startsWith(parent.endsWith("/") ? parent : parent + "/");
+}
+/**
+ * The repo in `repos` whose path most deeply contains `repo`'s own — the
+ * deepest-path-wins rule buildRepoResolver uses for sessions. Shared by the
+ * list tree (ccs-list) and the group preview (ccs-preview) so the two can
+ * never disagree on whose child a repo is. Null for a top-level repo.
+ */
+export function findParentRepo(repo, repos) {
+    let parent = null;
+    for (const p of repos) {
+        if (p === repo || !isUnderPath(repo.path, p.path))
+            continue;
+        if (!parent || p.path.length > parent.path.length)
+            parent = p;
+    }
+    return parent;
+}
+/**
+ * Bucket a DB timestamp for relative display. The thresholds
+ * (<1m / <60m / <24h / <7d / <4w / absolute date) are the single source of
+ * truth shared by the list badges and the preview pane, so the same
+ * timestamp can never render as "52w" in one place and "2025-06-12" in the
+ * other (audit logic L-3).
+ */
+export function timeBucket(iso, nowMs = Date.now()) {
+    if (!iso)
+        return { kind: "invalid" };
+    // parseDbTime, not Date.parse: naive "YYYY-MM-DD HH:MM:SS" values from
+    // SQLite are UTC and must not be parsed as local time (audit logic H-2).
+    const t = parseDbTime(iso);
+    if (Number.isNaN(t))
+        return { kind: "invalid" };
+    const diffMs = nowMs - t;
+    if (diffMs < 60_000)
+        return { kind: "now" };
+    const m = Math.floor(diffMs / 60_000);
+    if (m < 60)
+        return { kind: "m", value: m };
+    const h = Math.floor(m / 60);
+    if (h < 24)
+        return { kind: "h", value: h };
+    const d = Math.floor(h / 24);
+    if (d < 7)
+        return { kind: "d", value: d };
+    const w = Math.floor(d / 7);
+    if (w < 4)
+        return { kind: "w", value: w };
+    return { kind: "date", iso: new Date(t).toISOString().slice(0, 10) };
+}
+/**
+ * Render a DB timestamp as relative age ("5m ago", "3d ago") or an absolute
+ * date past 4 weeks. `invalid` is returned for null/unparseable input —
+ * list badges pass "" (badge omitted), the preview pane passes "-".
+ */
+export function formatRelativeTime(iso, invalid = "-") {
+    const b = timeBucket(iso);
+    switch (b.kind) {
+        case "invalid":
+            return invalid;
+        case "now":
+            return "<1m ago";
+        case "date":
+            return b.iso;
+        default:
+            return `${b.value}${b.kind} ago`;
+    }
+}
+function localDayIndex(ms) {
+    const d = new Date(ms);
+    // Local calendar day number: only the local Y/M/D parts are used, so a
+    // DST shift cannot move a timestamp into the neighbouring day.
+    return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000);
+}
+/**
+ * Relative time for the list and the cards, written the way people say it
+ * (the words come from the string table, time_*): just now / N min ago /
+ * N h ago / yesterday / N days ago / a date (with the year when it differs).
+ * "yesterday" and "N days ago" follow the local calendar, not 24-hour
+ * blocks, so a session from last night reads "yesterday" the next morning —
+ * except within the first 6 hours, where "N h ago" is the clearer answer
+ * (23:00 seen at 01:00 is "2 h ago", not "yesterday").
+ */
+export function formatFriendlyTime(iso, opts = {}) {
+    const invalid = opts.invalid ?? "-";
+    if (!iso)
+        return invalid;
+    const t = parseDbTime(iso);
+    if (Number.isNaN(t))
+        return invalid;
+    const now = opts.nowMs ?? Date.now();
+    const d = new Date(t);
+    const pad = (n) => String(n).padStart(2, "0");
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const withClock = (s) => (opts.clock ? tr("time_with_clock", { when: s, clock: hm }) : s);
+    const diffMs = now - t;
+    if (diffMs < 60_000)
+        return tr("time_just_now");
+    const minutes = Math.floor(diffMs / 60_000);
+    if (minutes < 60)
+        return tr("time_minutes", { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    const days = localDayIndex(now) - localDayIndex(t);
+    if (days <= 0 || hours < 6)
+        return tr("time_hours", { n: hours });
+    if (days === 1)
+        return withClock(tr("time_yesterday"));
+    if (days < 7)
+        return withClock(tr("time_days", { n: days }));
+    const parts = {
+        year: d.getFullYear(),
+        mon: (tr("time_month_names").split(",")[d.getMonth()] ?? String(d.getMonth() + 1)).trim(),
+        day: d.getDate(),
+    };
+    const date = d.getFullYear() === new Date(now).getFullYear()
+        ? tr("time_date", parts)
+        : tr("time_date_year", parts);
+    return withClock(date);
+}
+// ---------------------------------------------------------------------------
+// Terminal display width (list column alignment)
+// ---------------------------------------------------------------------------
+const WIDE_RANGES = [
+    [0x1100, 0x115f], // Hangul Jamo
+    [0x2e80, 0x303e], // CJK radicals, punctuation
+    [0x3041, 0x33ff], // Hiragana, Katakana, CJK symbols
+    [0x3400, 0x4dbf], // CJK Ext A
+    [0x4e00, 0x9fff], // CJK Unified
+    [0xa000, 0xa4cf], // Yi
+    [0xac00, 0xd7a3], // Hangul syllables
+    [0xf900, 0xfaff], // CJK compatibility
+    [0xfe30, 0xfe4f], // CJK compatibility forms
+    [0xff00, 0xff60], // Fullwidth forms
+    [0xffe0, 0xffe6],
+    [0x20000, 0x3fffd], // CJK Ext B+
+];
+function isWide(cp) {
+    for (const [lo, hi] of WIDE_RANGES) {
+        if (cp >= lo && cp <= hi)
+            return true;
+    }
+    return false;
+}
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
+/**
+ * Terminal column width of plain (ANSI-free) text, the way wcwidth and fzf
+ * count it: CJK and emoji with emoji presentation (🧠 🎬 👑) count 2;
+ * combining marks, ZWJ and variation selectors count 0; everything else 1 —
+ * including symbols that only become emoji with VS16 (✍️ 🛠️ ✴️) and
+ * text-presentation pictographs (🛰). Counting those as 2 (what some
+ * terminals draw) put the description one column left of fzf's own layout.
+ * Used only to pad the simple UI's columns.
+ */
+export function displayWidth(s) {
+    let w = 0;
+    for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        if ((cp >= 0x0300 && cp <= 0x036f) ||
+            cp === 0x200d ||
+            (cp >= 0xfe00 && cp <= 0xfe0f)) {
+            continue;
+        }
+        w += isWide(cp) || EMOJI_PRESENTATION.test(ch) ? 2 : 1;
+    }
+    return w;
+}
+/** Pad plain text with spaces to `width` terminal columns (never truncates). */
+export function padDisplay(s, width) {
+    const gap = width - displayWidth(s);
+    return gap > 0 ? s + " ".repeat(gap) : s;
+}
+/** Shorten an absolute path under $HOME to `~/…` for display. */
+export function tildePath(p, home) {
+    if (!p)
+        return "";
+    if (p === home)
+        return "~";
+    return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+}
+/** Render a DB timestamp as local "YYYY-MM-DD HH:MM"; `invalid` on failure. */
+export function formatDateTime(iso, invalid = "-") {
+    if (!iso)
+        return invalid;
+    const d = new Date(parseDbTime(iso));
+    if (Number.isNaN(d.getTime()))
+        return invalid;
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+/**
+ * Flatten a Claude Code JSONL `message.content` value (string or block
+ * array) into one string. Shared by topic extraction (ccs-scan-sessions)
+ * and the conversation preview (ccs-preview-session); the historical bug
+ * class here was two copies drifting apart behind a "keep in sync" comment
+ * (review A-2) — behavioral differences belong in `opts`, not in forks.
+ */
+export function extractText(content, opts = {}) {
+    if (typeof content === "string")
+        return content;
+    if (!Array.isArray(content))
+        return "";
+    const texts = [];
+    for (const block of content) {
+        if (!block || typeof block !== "object")
+            continue;
+        const b = block;
+        if (b.type === "text" && typeof b.text === "string") {
+            texts.push(b.text);
+        }
+        else if (opts.includeToolBlocks && b.type === "tool_use") {
+            texts.push(`[tool: ${typeof b.name === "string" ? b.name : "?"}]`);
+        }
+        else if (opts.includeToolBlocks && b.type === "tool_result") {
+            texts.push("[tool result]");
+        }
+    }
+    return texts.join(" ");
+}

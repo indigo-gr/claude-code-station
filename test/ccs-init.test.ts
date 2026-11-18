@@ -313,11 +313,7 @@ describe("appendAndValidate()", () => {
 
 const INIT_TS = fileURLToPath(new URL("../bin/ccs-init.ts", import.meta.url));
 
-function tsxAvailable(): boolean {
-  return spawnSync("tsx", ["--version"], { encoding: "utf-8" }).status === 0;
-}
-
-describe("ccs-init discover CLI", { skip: !tsxAvailable() && "tsx not on PATH" }, () => {
+describe("ccs-init discover CLI", () => {
   test("a candidate list larger than the pipe buffer reaches $(...) in full", async () => {
     const { home, cleanup } = await makeHome();
     try {
@@ -342,10 +338,10 @@ describe("ccs-init discover CLI", { skip: !tsxAvailable() && "tsx not on PATH" }
       delete env.CCS_CMD;
       delete env.CCR_CMD;
 
-      // Same capture as bin/ccs: CANDIDATES="$(tsx ccs-init.ts discover)"
+      // Same capture as bin/ccs: CANDIDATES="$(node ccs-init.ts discover)"
       const res = spawnSync(
         "bash",
-        ["-c", 'c="$(tsx "$0" discover)" || exit; printf "%s\\n" "$c"', INIT_TS],
+        ["-c", 'c="$("$0" "$1" discover)" || exit; printf "%s\\n" "$c"', process.execPath, INIT_TS],
         { env, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
       );
       assert.equal(res.status, 0, `discover failed: ${res.stderr}`);

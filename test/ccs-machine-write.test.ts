@@ -141,6 +141,10 @@ function envFor(box: Box, extra: Record<string, string | undefined> = {}): NodeJ
   for (const k of ["CCS_CMD", "CCR_CMD", "CCS_UI", "CCS_NO_UPDATE_CHECK", "CCS_UPDATE_REGISTRY", "CCS_TEST_EDIT_PAUSE_MS"]) {
     delete env[k];
   }
+  // The language: English from a fixed locale unless a test sets it, so the
+  // shell's own locale or CCS_LANG cannot change an answer.
+  for (const k of ["CCS_LANG", "CCS_LANG_RESOLVED", "LC_ALL", "LC_MESSAGES"]) delete env[k];
+  env.LANG = "en_US.UTF-8";
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
@@ -437,7 +441,7 @@ describe("ccs: writing repos.yml", () => {
           assert.equal(code, 130, stdout);
           assert.equal(await read(box), TWO, "repos.yml is as it was");
           assert.equal(await exists(box.reposYml + ".lock"), false, "no lock is left");
-          assert.deepEqual((await readdir(box.tmp)).filter((n) => !n.startsWith("tsx-")), [], "nothing of ccs's stays in TMPDIR");
+          assert.deepEqual(await readdir(box.tmp), [], "nothing of ccs's stays in TMPDIR");
           // One answer, not one from each place that noticed the interrupt.
           const a = answer({ code: 130, stdout, stderr: "" }, what);
           assert.deepEqual(a.reasons.map((r) => r.code), ["interrupted"]);
@@ -497,11 +501,11 @@ describe("ccs config", () => {
     try {
       const a = expect(box, ["config", "get"], "config get", 0, "ok");
       const settings = a.settings as Record<string, unknown>;
-      assert.equal(settings["defaults.ui"], "classic");
+      assert.equal(settings["defaults.ui"], "simple");
       assert.equal(settings["defaults.update_check"], true);
       assert.equal(settings["defaults.terminal"], null);
       const allowed = a.allowed as Record<string, unknown[]>;
-      assert.deepEqual(allowed["defaults.ui"], ["classic", "simple"]);
+      assert.deepEqual(allowed["defaults.ui"], ["simple"]);
       assert.deepEqual(allowed["defaults.update_check"], [true, false]);
       assert.equal(await exists(join(box.home, ".config")), false, "reading creates nothing");
       const plain = run(box, ["config", "get"]);
@@ -539,6 +543,66 @@ describe("ccs config", () => {
       assert.equal(await read(box), text, "the same value writes nothing");
       const got = expect(box, ["config", "get"], "config get", 0, "ok");
       assert.equal((got.settings as Record<string, unknown>)["defaults.ui"], "simple");
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("defaults.ui: set classic is refused (6), set simple is written (0); get says simple either way", async () => {
+    const box = await makeBox();
+    try {
+      const CLASSIC = TWO.replace("repos:", "defaults:\n  ui: classic\nrepos:");
+      await config(box, CLASSIC, "p/web", "p/api");
+      // A classic line already in the file reads as the one look there is.
+      const before = expect(box, ["config", "get"], "config get", 0, "ok");
+      assert.equal((before.settings as Record<string, unknown>)["defaults.ui"], "simple");
+      assert.deepEqual((before.allowed as Record<string, unknown[]>)["defaults.ui"], ["simple"]);
+
+      for (const value of ["classic", "Classic", "fancy"]) {
+        expect(box, ["config", "set", "defaults.ui", value], "config set", 6, "invalid_value");
+        assert.equal(await read(box), CLASSIC, `${value}: the file is untouched`);
+      }
+      assert.equal(await exists(box.reposYml + ".bak"), false);
+
+      const set = expect(box, ["config", "set", "defaults.ui", "simple"], "config set", 0, "ok");
+      assert.deepEqual([set.key, set.changed], ["defaults.ui", true]);
+      const text = await read(box);
+      assert.match(text, /^ {2}ui: simple$/m);
+      assert.doesNotMatch(text, /classic/);
+      const after = expect(box, ["config", "get"], "config get", 0, "ok");
+      assert.equal((after.settings as Record<string, unknown>)["defaults.ui"], "simple");
+    } finally {
+      await box.cleanup();
+    }
+  });
+
+  test("defaults.language: get says auto until set; set auto, ja, en is 0, anything else is 6", async () => {
+    const box = await makeBox();
+    try {
+      // Nothing written yet, and an unknown value read as auto.
+      const empty = expect(box, ["config", "get"], "config get", 0, "ok");
+      assert.equal((empty.settings as Record<string, unknown>)["defaults.language"], "auto");
+      assert.deepEqual((empty.allowed as Record<string, unknown[]>)["defaults.language"], ["auto", "ja", "en"]);
+      const FR = TWO.replace("repos:", "defaults:\n  language: fr\nrepos:");
+      await config(box, FR, "p/web", "p/api");
+      const unknown = expect(box, ["config", "get"], "config get", 0, "ok");
+      assert.equal((unknown.settings as Record<string, unknown>)["defaults.language"], "auto");
+
+      for (const value of ["fr", "JA", "english", "", "auto ja"]) {
+        expect(box, ["config", "set", "defaults.language", value], "config set", 6, "invalid_value");
+        assert.equal(await read(box), FR, `${JSON.stringify(value)}: the file is untouched`);
+      }
+      assert.equal(await exists(box.reposYml + ".bak"), false);
+
+      for (const value of ["ja", "en", "auto"]) {
+        const set = expect(box, ["config", "set", "defaults.language", value], "config set", 0, "ok");
+        assert.deepEqual([set.key, set.changed], ["defaults.language", true], value);
+        assert.match(await read(box), new RegExp(`^ {2}language: ${value}$`, "m"));
+        const got = expect(box, ["config", "get"], "config get", 0, "ok");
+        assert.equal((got.settings as Record<string, unknown>)["defaults.language"], value);
+      }
+      const again = expect(box, ["config", "set", "defaults.language", "auto"], "config set", 0, "ok");
+      assert.equal(again.changed, false);
     } finally {
       await box.cleanup();
     }

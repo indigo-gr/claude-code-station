@@ -1,0 +1,282 @@
+# ccs — English strings (the source of the keys: every key must be here).
+# Format (read by bin/ccs-i18n.ts and bin/ccs-i18n.sh, bash 3.2):
+#   key=text        key is [a-z][a-z0-9_]*; the text runs to the end of the line
+#   key+=text       adds one more line to the key above (long texts)
+#   {name}          a named insertion; \n a line break
+# Texts that go into fzf actions (list_copied_*, list_on_*, list_no_match,
+# list_no_repo_delete) must not contain ASCII ( ) or a single quote.
+
+# --- bin/ccs (launcher, doctor stage 1, init, --help)
+lang_env_unknown=[ccs] CCS_LANG={value} is not a language ccs knows (ja, en); ignored
+lang_flag_unknown=[ccs] --lang={value} is not a language ccs knows: use --lang=ja or --lang=en (usage: unknown_option)
+ccr_cmd_deprecated=[ccs] CCR_CMD is deprecated, please rename it to CCS_CMD (using the CCR_CMD value for now)
+doctor_usage=[ccs] doctor takes only --json (usage: unknown_option)
+doctor_no_tmp=[ccs] doctor: failed: internal_error — cannot create a temporary folder (TMPDIR or /tmp)
+doctor_ok=ccs doctor: ccs works (ok)
+doctor_failed=ccs doctor: ccs does not work (failed)
+doctor_unknown=ccs doctor: could not tell ({status})
+deps_missing=❌ Missing dependencies:
+deps_install=Install with:\n  brew install fzf       # or: apt install fzf
+init_scanning=🔍 Scanning $HOME for git repositories...
+init_none_found=No new git repositories found (everything within depth is already registered).
+init_header=TAB: toggle | Enter: add selected to repos.yml | Esc: cancel
+init_scan_failed=[ccs] scan failed — run `ccs --refresh` to index the new repos
+ui_flag_removed=[ccs] --ui= was removed (since v0.6.0 there is one look only). Run ccs without --ui= (usage: unknown_option)
+unknown_version=unknown
+fzf_too_old=[ccs] ccs needs fzf {need} or newer (this fzf: {found}). To upgrade fzf: brew upgrade fzf
+package_config_above=a package.json above ccs
+package_config_broken=[ccs] cannot open the list (invalid_package_config): Node cannot parse {file}, so it will not load ccs's modules. Fix or remove that file, then run ccs again.
+native_module_missing=[ccs] better-sqlite3 has no prebuilt module for this platform ({platform}); it has to be built from source.
+scan_failed_note=[ccs] The settings file (~/.config/ccs/repos.yml) could not be read, so the previous list was shown. Fix the lines below, then run ccs again.
+scan_notes=[ccs] Notes about the settings file (ccs works as it is).
+list_copied_cmd=📋 Copied the command that opens it
+list_copied_id=📋 Copied the conversation ID or the folder path
+list_no_repo_delete=[ccs] Projects cannot be removed from the list. To remove one, edit ~/.config/ccs/repos.yml — press any key to go back
+list_on_group=  This is a heading. Pick a row below it
+list_on_separator=  This is a divider. Pick a row above or below
+list_no_match=  Nothing matches. Delete some letters
+list_title=Start Claude Code
+list_title_width=17
+update_note=[ccs] ccs v{latest} is out (you have v{current}). To upgrade: {command}
+update_note_node=[ccs] ccs v{latest} is out (you have v{current}). v{latest} needs Node {node_needed} or newer (this Node: {node_now}). Upgrade Node first, then ccs: {command}
+list_guide=  Enter: open   ↑↓ or mouse: pick   Esc: quit
+list_label=  Pick  
+list_label_config_failed=  Pick  ⚠️ The settings file could not be read — quit with Esc to see why  
+list_label_update=  Pick  ccs v{latest} is out  
+list_label_update_node=  Pick  ccs v{latest} is out — upgrade Node first  
+list_input_label=  Search  
+list_preview_label=  Details  
+list_ghost=Type here to narrow the list
+list_not_ready=The list is not ready yet. Run ccs --refresh.
+list_empty_here=No past conversations in this folder yet. Run ccs for the whole list.
+list_empty_sessions=No past conversations yet. Run ccs to pick a project and start a new one.
+list_empty_repos=No projects to list yet.\n  - To pick folders under your home folder: ccs init --auto-discover\n  - To write them yourself, open ~/.config/ccs/repos.yml and add folders under repos:
+list_fzf_failed=[ccs] The list could not open properly. To check fzf: ccs doctor
+list_cancelled=Cancelled. Run ccs to open it again.
+pick_unparsable=❌ Could not read the picked row
+pick_bad_command=❌ Refusing the picked row's command (shell metacharacters or control characters)
+pick_bad_session=❌ Not a session ID: {id}
+pick_bad_repo=❌ Invalid repo name (shell metacharacters or control characters): {name}
+pick_bad_kind=❌ Unknown row kind: {kind}
+launch_outside_home=⚠️  A folder outside your home ({folder}) cannot be opened, so ccs opens in the current folder
+launch_folder_missing=⚠️  The folder {folder} was not found, so ccs opens in the current folder ({here})
+launch_resume=🔄 Resuming the conversation ({folder})
+launch_new=🚀 Opening Claude Code ({folder})
+
+# --- bin/ccs-delete.sh (Ctrl-D)
+delete_press_enter=Press Enter to continue...
+delete_bad_id=❌ Not a session ID
+delete_not_found=❌ The conversation's file was not found
+delete_title=━━━ Delete this conversation ━━━
+delete_confirm=Delete this conversation? (y/N): 
+delete_failed=❌ Could not delete: {file}
+delete_subagent_failed=[ccs] warning: could not remove the subagent folder: {folder}
+delete_cache_failed=[ccs] warning: the list's cache was not updated — the row may stay until the next refresh
+delete_no_node=[ccs] warning: node not found — the list's cache was not updated (run ccs --refresh)
+delete_done=✅ Deleted
+delete_cancelled=Cancelled
+
+# --- bin/ccs-config.ts
+cfg_metachars={file}: {where} contains shell metacharacter(s): {got}
+cfg_must_be_bool={file}: {where} must be true or false (got {got})
+cfg_unknown_key=[ccs] unknown key "{key}" in {where} (ignored)
+cfg_must_be_object={file}: {where} must be an object
+cfg_name_required={file}: {where} is required and must be a non-empty string
+cfg_name_unsafe={file}: {where} contains shell metacharacter(s) or control char(s): {got}
+cfg_path_required_group={file}: {where} is required when launch is false
+cfg_must_be_string={file}: {where} must be a string
+cfg_outside_home={file}: {where} "{path}" is outside $HOME (security)
+cfg_path_missing=[ccs] path not found: {path} ({where} "{name}") — set disabled: true to silence
+cfg_tags={file}: {where} must be an array of strings
+cfg_custom_too_large={file}: {where} exceeds the 64KB limit (measured as 64,000 characters of JSON; got {got})
+cfg_unreadable={file}: cannot read config file ({reason})
+cfg_yaml_error={file}: YAML parse error: {reason}
+cfg_self_reference={file}: {where} has a value that refers to itself (a YAML anchor used inside itself)
+cfg_version={file}: unsupported version: {got}, only 1 is supported
+cfg_ui_value={file}: defaults.ui must be simple (got {got})
+cfg_ui_classic=[ccs] defaults.ui: classic was removed in v0.6.0; ccs opens the simple look (ignored)
+cfg_one_of={file}: {where} must be one of {allowed} (got {got})
+cfg_groups_dir={file}: defaults.groups_dir must be a folder path
+cfg_repos_empty={file}: repos must be a non-empty array
+cfg_duplicate_name={file}: duplicate name {names}
+cfg_language_unknown=[ccs] defaults.language: {got} is not a language ccs knows (auto, ja, en); ignored
+cfg_top_not_object={file}: the top level must be a mapping (key: value pairs)
+cfg_self_reference_file={file}: a value refers to itself (a YAML anchor used inside itself)
+
+# --- bin/ccs-list.ts
+list_heading_groups=Groups
+list_heading_projects=Projects
+list_heading_sessions=Past sessions
+list_folder_unknown=(folder unknown)
+list_project_in_parent={parent} / {name}
+list_no_topic=(no topic)
+list_parent_hint=({parent})
+list_no_cache=[ccs-list] state.db not found. Run `ccs --refresh` first to build the cache.
+
+# --- bin/ccs-machine-notes
+note_sessions_json=`ccs sessions` needs --json (to pick a conversation by hand, run ccs --resume)
+note_config_missing=no repos.yml yet (config_missing)
+note_cache_missing=no cache yet (cache_missing); open the list once, or run ccs --refresh
+note_cache_not_readable=cannot open the cache (cache_not_readable)
+note_no_tty=ccs open --here needs a terminal (no_tty); use --new-window from a script
+note_open_direct=run ccs open through bin/ccs
+note_unsupported_os=ccs open --new-window works on macOS only (unsupported_os)
+note_terminal_not_set=choose a terminal app first: ccs config set defaults.terminal terminal (terminal_not_set)
+note_launch_file=could not write the launcher file (launch_failed)
+note_launch_rejected=the terminal app did not take the launcher (launch_failed)
+note_key_not_settable=only defaults.ui, defaults.language, defaults.terminal, defaults.update_check, label and description can be set
+note_config_not_readable=cannot read repos.yml (config_not_readable)
+note_unknown_command=unknown machine command
+
+# --- bin/ccs-misc
+init_skip_metachars=[ccs-init] skipped (shell metacharacters in the path): {path}
+init_skip_control=[ccs-init] skipped (control or text-direction characters in the path): {path}
+init_skip_malformed=[ccs-init] malformed candidate line skipped: {line}
+init_nothing_selected=[ccs-init] nothing selected — repos.yml unchanged
+init_added=[ccs-init] added {n} repo(s) to {file}
+init_scaffold_ready=Config ready: {file}\nEdit it directly, or run `ccs init --auto-discover` to scan $HOME for git repos.
+scan_locked=[ccs-scan] another scan is in progress — skipping (the list may be a little old; it catches up on the next refresh)
+db_migrated=[ccs] applied migration v{version}
+db_chmod_failed=[ccs-db] warning: could not chmod 0600 {file} — the cache may be readable by other users
+
+# --- bin/ccs-preview-session.ts
+session_not_found=The conversation's record was not found
+session_dir_unreadable=Could not read the folder of conversation records
+session_file_missing=The conversation's file was not found (it may have been deleted)
+session_too_large=A long conversation ({mb} MB), so it is not shown here. Enter still opens it
+session_file_unreadable=Could not read the conversation's file
+session_role_user=👤 You:
+session_role_claude=🤖 Claude:
+session_heading=  ──── The conversation so far ────
+session_empty=  (nothing said yet)
+
+# --- bin/ccs-preview.ts
+card_group_title={icon} Group "{name}"
+card_group_is_heading=  This is a heading. To open something, pick a project below it
+card_group_no_listed=  No project of this group is in the list
+card_group_members=Projects in it ({n})
+card_no_cache=The list is not ready yet.\nQuit with Esc once, then run ccs --refresh.
+card_failed=Could not show the details here. Enter still opens it.
+card_not_in_cache="{name}" is not in the list yet.\nQuit with Esc, then run ccs --refresh.
+card_repo_title=✨ Start Claude Code in {name}
+card_repo_lead=  👑 The lead of this group
+card_folder=Folder
+card_folder_missing=     ⚠️  This folder was not found. Check the path in repos.yml
+card_last_opened=Last opened
+card_never_opened=Never opened yet
+card_changes_some={n} file(s) with changes not saved (committed) yet
+card_changes_none=No unsaved changes
+card_branch=Working branch: {branch}
+card_changes=Changes
+card_handoff=Handoff notes
+card_handoff_count={n} note(s) from earlier work
+card_pending=To do later
+card_pending_count={n} item(s)
+card_services=Connected services
+card_list_separator=, 
+card_recent_topics=Recent topics
+card_recent_topic_line=- {when}  {topic}
+card_repo_footer=Press Enter to open Claude Code in this folder
+card_repo_footer_here=Press Enter to open Claude Code in the current folder
+card_group_empty=  This group has no projects yet
+card_tag_group=(group)
+card_tag_lead=(lead)
+card_session_not_in_cache=This conversation is not in the list yet.\nEnter still opens it.
+card_session_title=↩️  Resume a past conversation
+card_project=Project
+card_last_talked=Last talked
+card_topic=Topic
+card_session_footer=Press Enter to continue this conversation
+card_separator=This is a divider. Pick a row above or below
+card_cannot_open=This row cannot be opened. Pick another row
+
+# --- bin/ccs-utils.ts
+time_just_now=just now
+time_minutes={n} min ago
+time_hours={n} h ago
+time_yesterday=yesterday
+time_days={n} days ago
+time_month_names=Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec
+time_date={mon} {day}
+time_date_year={mon} {day}, {year}
+time_with_clock={when} {clock}
+
+# --- --help
+help=ccs v{version} - Claude Code Station (fzf-powered launcher)
+help+=
+help+=Usage:
+help+=  ccs                 Mixed list: NEW repos + RESUME sessions
+help+=  ccs .               Sessions whose cwd is (under) current dir
+help+=  ccs --new           Only NEW repo entries
+help+=  ccs --resume        Only past sessions
+help+=  ccs --refresh       Force pre-scan before showing list
+help+=  ccs --no-scan       Skip implicit pre-scan (use stale DB)
+help+=  ccs --lang=ja|en    Language of ccs's own text for this run (wins over
+help+=                      CCS_LANG and defaults.language in repos.yml)
+help+=  ccs init            Create ~/.config/ccs/repos.yml from the template
+help+=  ccs init --auto-discover [--depth N]
+help+=                      Scan $HOME for git repos (default depth 5) and pick
+help+=                      which to add to repos.yml via fzf multi-select
+help+=  ccs [options]       Unknown options pass through to launched command
+help+=
+help+=For scripts and tools (no fzf, no questions, no network; --json prints one
+help+=JSON answer on stdout, and the exit code says what happened):
+help+=  ccs doctor [--json] Does ccs work here? Exit 0 works, 1 does not,
+help+=                      2 bad arguments, 3 could not tell
+help+=  ccs list --json [--with-paths]
+help+=                      repos.yml entries after ccs's checks (paths only
+help+=                      with --with-paths)
+help+=  ccs sessions --json [--project NAME] [--limit N] [--with-titles] [--no-scan]
+help+=                      Past conversations per project, newest first
+help+=                      (titles only with --with-titles)
+help+=  ccs repo add PATH [--name NAME] [--description TEXT] [--json]
+help+=  ccs repo remove NAME [--json]
+help+=                      Add a folder under $HOME to repos.yml, or take an
+help+=                      entry out (the folder is never touched)
+help+=  ccs config get [--json]
+help+=  ccs config set [--repo NAME] KEY VALUE [--json]
+help+=                      KEY is defaults.ui, defaults.language,
+help+=                      defaults.terminal, defaults.update_check, or
+help+=                      label / description of the entry named by --repo
+help+=  ccs open (--repo NAME | --session UUID) [--here | --new-window]
+help+=                      Start Claude Code without the list: in this terminal
+help+=                      (--here, the default), or in a new window of
+help+=                      defaults.terminal (--new-window, macOS)
+help+=  Exit codes: 0 ok, 1 failed, 2 bad arguments, 3 could not tell,
+help+=  4 missing prerequisite, 5 not found, 6 refused, 7 partly done,
+help+=  130 interrupted. doctor, list, sessions, repo, config and open are
+help+=  commands only as the first argument; `ccs --new doctor` still passes
+help+=  doctor on. --json output never changes with the language.
+help+=
+help+=Controls:
+help+=  Enter               Launch (or resume) selected entry; does nothing on a
+help+=                      group header (an entry with launch: false)
+help+=  Ctrl-Y              Copy the effective shell command to clipboard
+help+=  Ctrl-I              Copy session UUID (resume) or repo path (new/group)
+help+=  Ctrl-R              Refresh DB and reload list
+help+=  Ctrl-D              Delete session (resume rows only)
+help+=  Esc / Ctrl-C        Cancel
+help+=
+help+=Environment:
+help+=  CCS_CMD             Fallback launch command for repos with no explicit
+help+=                      command. Per-repo command in repos.yml always wins.
+help+=                      Example: export CCS_CMD="opr claude"
+help+=  CCR_CMD             Deprecated — still honored with a warning if CCS_CMD unset
+help+=  CCS_LANG            ja | en — language of ccs's own text (--lang= wins;
+help+=                      then defaults.language, then LC_ALL / LC_MESSAGES / LANG)
+help+=  CCS_NO_UPDATE_CHECK Any non-empty value stops the update check and its notice
+help+=                      (no network request, the cache is not read); so does
+help+=                      defaults.update_check: false in repos.yml
+help+=  CCS_UPDATE_REGISTRY Registry to ask instead of https://registry.npmjs.org
+help+=
+help+=Examples:
+help+=  ccs                                     # Full launcher
+help+=  ccs .                                   # Resume current-dir session
+help+=  ccs --new                               # Pick a repo to launch fresh
+help+=  ccs --refresh                           # Force DB rebuild
+help+=  ccs --dangerously-skip-permissions      # Pass-through flag to claude
+help+=
+help+=Config: ~/.config/ccs/repos.yml
+help+=Cache:  ~/.cache/ccs/state.db, ~/.cache/ccs/update-check
+help+=
+help+={copyright} MIT License.

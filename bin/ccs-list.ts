@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * ccs-list.ts — SQL-driven row builder for the ccs fzf launcher (v0.2.0)
  *
@@ -15,55 +15,37 @@
  *   (default)         NEW first (alpha, nested repos in a tree under their
  *                     parent), then RESUME (last_activity_at DESC)
  *
- * Look (`--ui=`):
- *   classic (default) the rows above, byte-for-byte as before v0.3.0
- *   simple            the friendly look (Japanese): groups (`launch: false`
- *                     headers and what is inside them) first, then the other
- *                     projects, then past conversations, each under a heading
- *                     row; no badge column, no tree glyphs, plain-word times
+ * Look: groups (`launch: false` headers and what is inside them) first,
+ * then the other projects, then past conversations, each under a heading row
+ * (Japanese); the whole visible line lives in column 1 (fzf shows only that
+ * column), column 3 stays empty.
  *
- *   --print-ui        print the `defaults.ui` the last scan stored, then exit
- *   --print-settings  print `ui=<mode>` and `update_check=<on|off>` as the
- *                     last scan stored them, then exit
+ *   --print-settings  print `update_check=<on|off>` as the last scan stored
+ *                     it, then exit
  */
 
 import { homedir } from "node:os";
 import { openDb, getMeta, reposV3Columns } from "./ccs-db.ts";
 import { groupsFromMeta } from "./ccs-groups.ts";
 import { getPaths } from "./ccs-config.ts";
-import { keyForDisplay, pathForDisplay, SHELL_METACHARS } from "./ccs-sanitize.ts";
+import { SHELL_METACHARS } from "./ccs-sanitize.ts";
 import {
-  displayIcon,
   truncate,
-  formatRelativeTime,
-  formatDateTime,
   formatFriendlyTime,
   repoDisplayName,
   findParentRepo,
   displayWidth,
   padDisplay,
   tildePath,
-  isUiMode,
-  uiFromArgv,
-  type UiMode,
 } from "./ccs-utils.ts";
 import { pathToFileURL } from "node:url";
+import { t } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const DESC_MAX = 60;
-const BADGES_MAX = 60;
-const KNOWN_INTEGRATION_KEYS = [
-  "plane_project_id",
-  "attio_workspace",
-  "notion_db",
-  "linear_team",
-  "slack_channel",
-  "github_repo",
-  "figma_file",
-];
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -73,8 +55,6 @@ interface Flags {
   currentOnly: boolean;
   reposOnly: boolean;
   sessionsOnly: boolean;
-  ui: UiMode;
-  printUi: boolean;
   printSettings: boolean;
 }
 
@@ -83,64 +63,12 @@ function parseArgs(argv: string[]): Flags {
     currentOnly: argv.includes("--current-only"),
     reposOnly: argv.includes("--repos-only"),
     sessionsOnly: argv.includes("--sessions-only"),
-    ui: uiFromArgv(argv),
-    printUi: argv.includes("--print-ui"),
     printSettings: argv.includes("--print-settings"),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// truncate / formatRelativeTime / formatDateTime come from ccs-utils.ts —
-// the single source shared with the preview pane (review A-1/A-3/K-8), so
-// list badges and preview text can no longer drift in thresholds or language.
-
-function clipBadges(badges: string[], max: number): string {
-  const out: string[] = [];
-  let len = 0;
-  for (const b of badges) {
-    const add = (out.length === 0 ? 0 : 1) + b.length;
-    if (len + add > max) break;
-    out.push(b);
-    len += add;
-  }
-  return out.join(" ");
-}
-
-function parseCustom(json: string): Record<string, unknown> {
-  try {
-    const v = JSON.parse(json);
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      return v as Record<string, unknown>;
-    }
-  } catch {
-    // ignore
-  }
-  return {};
-}
-
-function integrationShortNames(custom: Record<string, unknown>): string[] {
-  const names: string[] = [];
-  for (const key of KNOWN_INTEGRATION_KEYS) {
-    if (custom[key] === undefined || custom[key] === null || custom[key] === "") continue;
-    // map key -> short label
-    const short = key
-      .replace(/_project_id$/, "")
-      .replace(/_workspace$/, "")
-      .replace(/_db$/, "")
-      .replace(/_team$/, "")
-      .replace(/_channel$/, "")
-      .replace(/_repo$/, "")
-      .replace(/_file$/, "");
-    names.push(short);
-  }
-  return names;
-}
-
-// ---------------------------------------------------------------------------
-// Row builders
+// Row types
 // ---------------------------------------------------------------------------
 
 interface RepoRowFull {
@@ -166,134 +94,11 @@ interface RepoRowFull {
   session_last_at: string | null;
 }
 
-function buildRepoBadges(r: RepoRowFull): string {
-  const badges: string[] = [];
-
-  // scan: false repos keep their last-scanned stats forever — flag the
-  // staleness so the user doesn't read a frozen badge as current state
-  // (audit logic M-2).
-  if (r.scan_enabled === 0) {
-    badges.push(`[scan off]`);
-  }
-
-  if (r.is_git === 1) {
-    const branch = r.branch ?? "?";
-    const ins = r.uncommitted_insertions ?? 0;
-    const del = r.uncommitted_deletions ?? 0;
-    if (ins === 0 && del === 0) {
-      badges.push(`[${branch} clean]`);
-    } else {
-      badges.push(`[${branch} +${ins}/-${del}]`);
-    }
-  }
-
-  if ((r.handoff_count ?? 0) > 0) {
-    badges.push(`[⚠️ handoff×${r.handoff_count}]`);
-  }
-  if ((r.pending_count ?? 0) > 0) {
-    badges.push(`[📝 pending×${r.pending_count}]`);
-  }
-
-  if (r.session_last_at) {
-    const ht = formatRelativeTime(r.session_last_at, "");
-    if (ht) badges.push(`[🔄 ${ht}]`);
-  } else {
-    badges.push(`[💤 未使用]`);
-  }
-
-  const custom = parseCustom(r.custom_json);
-  const names = integrationShortNames(custom).slice(0, 3);
-  if (names.length > 0) {
-    badges.push(`[🔗 ${names.join(",")}]`);
-  }
-
-  return clipBadges(badges, BADGES_MAX);
-}
-
-// Dim vertical bar separator (ANSI 2 = faint) inserted between the label
-// column and the description column to visually distinguish them. fzf is
-// invoked with --ansi so these codes render as styling.
-const LABEL_SEP = " \x1b[2m│\x1b[0m";
-
-interface GroupedRepo {
-  repo: RepoRowFull;
-  parent: RepoRowFull | null;
-  /** Tree glyphs drawn before the icon ("" at the top level). */
-  prefix: string;
-}
-
-// Nest each repo under the listed repo whose path most deeply contains its
-// own — the same deepest-path-wins rule buildRepoResolver uses for sessions
-// (findParentRepo), so no repos.yml key is needed. Children follow their
-// parent, siblings keep the incoming (SQL, name-sorted) order. A disabled
-// parent is not in the list, so its children move up to the next listed
-// ancestor (or the top level).
-//
-// Children are drawn as a tree: `├ ` for a sibling with more after it, `└ `
-// for the last one, and for every ancestor level below the top a `│ ` rail
-// while that ancestor still has later siblings (blank once it was the last).
-//
 // A child marked `lead: true` (the group's director / coordinator) comes
 // first among its siblings; the rest keep name order. Top-level repos are
 // never reordered — a lead only means something inside a group.
 function leadFirst<T extends { lead?: number }>(kids: T[]): T[] {
   return [...kids.filter((k) => k.lead === 1), ...kids.filter((k) => k.lead !== 1)];
-}
-
-function groupRepos(repos: RepoRowFull[]): GroupedRepo[] {
-  const children = new Map<RepoRowFull | null, RepoRowFull[]>();
-  for (const r of repos) {
-    const parent = findParentRepo(r, repos);
-    const siblings = children.get(parent) ?? [];
-    siblings.push(r);
-    children.set(parent, siblings);
-  }
-  const out: GroupedRepo[] = [];
-  const walk = (parent: RepoRowFull | null, rails: string): void => {
-    const kids = parent ? leadFirst(children.get(parent) ?? []) : (children.get(parent) ?? []);
-    kids.forEach((r, i) => {
-      const last = i === kids.length - 1;
-      const prefix = parent ? `  ${rails}${last ? "└ " : "├ "}` : "";
-      out.push({ repo: r, parent, prefix });
-      // Top-level repos draw no glyph of their own, so they add no rail.
-      walk(r, parent ? rails + (last ? "  " : "│ ") : "");
-    });
-  };
-  walk(null, "");
-  return out;
-}
-
-function repoToRow({ repo: r, parent, prefix }: GroupedRepo): string {
-  // Rows show the repos.yml `label` when set (repoDisplayName); `name` stays
-  // the row key. The dim ‹parent› suffix keeps the relation readable when a
-  // fzf query hides the parent row, and lets a query for the parent's name
-  // match its children too. It is dropped when it would only repeat the
-  // row's own name (an entry labelled `Studio` under a `Studio` header).
-  const displayName = repoDisplayName(r);
-  const parentName = parent ? repoDisplayName(parent) : null;
-  const parentHint =
-    parentName && parentName !== displayName
-      ? `  \x1b[2m‹${parentName}›\x1b[0m`
-      : "";
-  const label = `${prefix}${displayIcon(r.icon)} ${displayName}${parentHint}${LABEL_SEP}`;
-  const desc = truncate(r.description || "", DESC_MAX);
-  if (r.launch === 0) {
-    // Group header (`launch: false`): display-only, so no badges (the header
-    // is not scanned) and no COMMAND. CWD carries the path for ^I and the
-    // preview; bin/ccs never launches a `group:` row.
-    return [label, desc, "", `group:${r.name}`, r.path, ""].join("\t");
-  }
-  const badges = buildRepoBadges(r);
-  const cwd = r.cwd && r.cwd.length > 0 ? r.cwd : r.path;
-  const command = r.command || "claude";
-  return [
-    label,
-    desc,
-    badges,
-    `new:${r.name}`,
-    cwd,
-    command,
-  ].join("\t");
 }
 
 interface SessionRowFull {
@@ -312,49 +117,13 @@ function isWellFormedRow(row: string): boolean {
   return row.split("\t").length === 6 && !/[\n\r\x1f]/.test(row);
 }
 
-function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
-  // Mapped sessions use the registered repo icon + name — the unique `name`,
-  // deliberately not the repos.yml `label`, so session rows read the same as
-  // before labels existed.
-  // Unmapped sessions get ❓ as a visible reminder: either a one-off run
-  // or a repo that hasn't been added to repos.yml yet.
-  // Ternary tests s.repo_display directly so TS narrows string|null → string
-  // without a non-null assertion.
-  // Unmapped sessions fall back to showing their cwd. That value is gated at
-  // scan time, but route it through truncate() anyway so the label column
-  // gets the same control-char stripping as every other column (audit NEW-1
-  // defense-in-depth; fzf renders this column with --ansi).
-  const displayName = s.repo_display
-    ? keyForDisplay(s.repo_display)
-    : s.cwd
-      ? pathForDisplay(truncate(s.cwd.replace(homedir(), "~"), DESC_MAX))
-      : "(unknown)";
-  const mapIcon = s.repo_display ? displayIcon(s.repo_icon) : "❓";
-  const label = `🔄 ${mapIcon} ${displayName}${LABEL_SEP}`;
-  const desc = truncate(s.topic || "", DESC_MAX);
-  const badges = `[${formatDateTime(s.last_activity_at)}]`;
-  // Unmapped sessions fall back to the scan-time resolved default
-  // (defaults.command > CCS_CMD > "claude"), not a hardcoded "claude" — the
-  // documented priority chain applies to every launchable row (review A-8).
-  const command = s.repo_command || defaultCommand;
-  return [
-    label,
-    desc,
-    badges,
-    `resume:${s.uuid}`,
-    s.cwd,
-    command,
-  ].join("\t");
-}
-
 // ---------------------------------------------------------------------------
-// ui: simple — row builders
+// Row builders (the list's look)
 // ---------------------------------------------------------------------------
 //
-// Same 6-column TSV contract as the classic rows (bin/ccs reads KIND:KEY, CWD
-// and COMMAND from columns 4-6 and never the LABEL), but the whole visible
-// line lives in column 1 — bin/ccs shows only that column in the simple look
-// (`--with-nth=1`), and fzf can only search what it shows. That is why a
+// A 6-column TSV (bin/ccs reads KIND:KEY, CWD and COMMAND from columns 4-6
+// and never the LABEL); the whole visible line lives in column 1 — bin/ccs
+// shows only that column (`--with-nth=1`), and fzf can only search what it shows. That is why a
 // row inside a group carries the group's name (dim, after the description):
 // typing the group's name narrows the list to the group, its projects and
 // their conversations.
@@ -362,7 +131,7 @@ function sessionToRow(s: SessionRowFull, defaultCommand: string): string {
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
-/** Indent per nesting level, in place of the classic tree glyphs. */
+/** Indent per nesting level. */
 const SIMPLE_INDENT = "   ";
 /** The description column starts here at most (longer names push it). */
 const SIMPLE_NAME_COL_MAX = 34;
@@ -383,7 +152,7 @@ interface SimpleNode {
 }
 
 /**
- * The classic nesting (findParentRepo, name order) flattened with depths,
+ * The nesting (findParentRepo, name order) flattened with depths,
  * split into the two simple sections: top-level `launch: false` headers with
  * everything under them, then every other top-level repo with its subtree.
  */
@@ -415,11 +184,11 @@ function simpleSections(repos: RepoRowFull[]): {
   return { groups, projects };
 }
 
-/** Marks a group's lead entry (repos.yml `lead: true`) in the simple look. */
+/** Marks a group's lead entry (repos.yml `lead: true`) in the list. */
 const LEAD_ICON = "👑";
 
 /**
- * The icon as drawn in the simple look: control characters stripped, a lead
+ * The icon as drawn in the list: control characters stripped, a lead
  * shown as 👑, and always two columns wide — an emoji without emoji
  * presentation (🛰, ✍️, 🛠️) is one column for fzf and the terminal, and its
  * glyph would otherwise run into the name.
@@ -448,7 +217,7 @@ function simpleRepoRow(n: SimpleNode, nameCol: number): string {
   const parentName = n.parent ? repoDisplayName(n.parent) : null;
   const hint =
     parentName && parentName !== displayName
-      ? `  ${DIM}（${parentName}）${RESET}`
+      ? `  ${DIM}${t("list_parent_hint", { parent: parentName })}${RESET}`
       : "";
   const label = `${styled}  ${desc}${hint}`;
   if (r.launch === 0) {
@@ -483,24 +252,6 @@ function logicalGroupsOf(
 /** The icon of a logical group's header (not a repos.yml entry, so no icon of its own). */
 const LOGICAL_ICON = "🗂";
 
-/**
- * Classic rows of the logical groups: a display-only header (KIND=group, key
- * `@<id>`, so the preview looks in the logical groups first) and the members
- * under it, drawn as a tree.
- */
-function logicalGroupRows(groups: LogicalView[]): string[] {
-  const lines: string[] = [];
-  for (const g of groups) {
-    const label = `${displayIcon(LOGICAL_ICON)} ${truncate(g.label, 40)}${LABEL_SEP}`;
-    lines.push([label, "", "", `group:@${g.id}`, "", ""].join("\t"));
-    g.members.forEach((r, i) => {
-      const last = i === g.members.length - 1;
-      lines.push(repoToRow({ repo: r, parent: null, prefix: `  ${last ? "└ " : "├ "}` }));
-    });
-  }
-  return lines;
-}
-
 /** Simple rows of a logical group: the bold header, then its members one level in. */
 function simpleLogicalRows(g: LogicalView, nameCol: number): string[] {
   const head = `${padDisplay(LOGICAL_ICON, 2)} ${truncate(g.label, 40)}`;
@@ -525,13 +276,13 @@ function simpleRepoRows(repos: RepoRowFull[], logical: LogicalView[] = []): stri
   );
   const lines: string[] = [];
   if (groups.length > 0 || logical.length > 0) {
-    lines.push(simpleHeading("グループ"));
+    lines.push(simpleHeading(t("list_heading_groups")));
     for (const n of groups) lines.push(simpleRepoRow(n, nameCol));
     // After the launch: false headers.
     for (const g of logical) lines.push(...simpleLogicalRows(g, nameCol));
   }
   if (projects.length > 0) {
-    lines.push(simpleHeading("プロジェクト"));
+    lines.push(simpleHeading(t("list_heading_projects")));
     for (const n of projects) lines.push(simpleRepoRow(n, nameCol));
   }
   return lines;
@@ -558,12 +309,12 @@ function simpleProjectName(
   if (!repo) {
     return s.cwd
       ? truncate(tildePath(s.cwd, homedir()), SIMPLE_PROJECT_COL_MAX)
-      : "（フォルダ不明）";
+      : t("list_folder_unknown");
   }
   const own = repoDisplayName(repo);
   const parent = findParentRepo(repo, listed);
   const parentName = parent ? repoDisplayName(parent) : null;
-  return parentName && parentName !== own ? `${parentName}・${own}` : own;
+  return parentName && parentName !== own ? t("list_project_in_parent", { parent: parentName, name: own }) : own;
 }
 
 function simpleSessionRows(
@@ -581,7 +332,7 @@ function simpleSessionRows(
   );
   return sessions.map((s, i) => {
     const when = formatFriendlyTime(s.last_activity_at);
-    const topic = truncate(s.topic || "（話題なし）", DESC_MAX);
+    const topic = truncate(s.topic || t("list_no_topic"), DESC_MAX);
     const label = `💬 ${padDisplay(when, SIMPLE_TIME_COL)}  ${padDisplay(projects[i], projectCol)}  ${topic}`;
     return [
       label,
@@ -599,40 +350,15 @@ function simpleSessionRows(
 // ---------------------------------------------------------------------------
 
 /**
- * `--print-ui`: the `defaults.ui` the last scan stored (meta table). Any
- * failure — no cache yet, a cache older than the setting, an unknown value —
- * prints "classic": the launcher must always get an answer it can use.
- */
-function printUi(stateDb: string): number {
-  let ui: UiMode = "classic";
-  try {
-    const handle = openDb(stateDb, { readonly: true, skipMigrate: true });
-    try {
-      const v = getMeta(handle.db, "defaults_ui");
-      if (isUiMode(v)) ui = v;
-    } finally {
-      handle.close();
-    }
-  } catch {
-    // keep classic
-  }
-  process.stdout.write(`${ui}\n`);
-  return 0;
-}
-
-/**
  * `--print-settings`: what the last scan stored, as the pre-scan prints it
- * (`ui=<mode>` and `update_check=<on|off>`). Any failure prints the defaults
- * (classic, on): the launcher must always get an answer it can use.
+ * (`update_check=<on|off>`). Any failure prints the default (on): the
+ * launcher must always get an answer it can use.
  */
 function printSettings(stateDb: string): number {
-  let ui: UiMode = "classic";
   let updateCheck = "on";
   try {
     const handle = openDb(stateDb, { readonly: true, skipMigrate: true });
     try {
-      const v = getMeta(handle.db, "defaults_ui");
-      if (isUiMode(v)) ui = v;
       if (getMeta(handle.db, "defaults_update_check") === "off") updateCheck = "off";
     } finally {
       handle.close();
@@ -640,16 +366,14 @@ function printSettings(stateDb: string): number {
   } catch {
     // keep the defaults
   }
-  process.stdout.write(`ui=${ui}\nupdate_check=${updateCheck}\n`);
+  process.stdout.write(`update_check=${updateCheck}\n`);
   return 0;
 }
 
 function main(): number {
   const flags = parseArgs(process.argv.slice(2));
   const paths = getPaths();
-  if (flags.printUi) return printUi(paths.stateDb);
   if (flags.printSettings) return printSettings(paths.stateDb);
-  const simple = flags.ui === "simple";
   // openDb() is called INSIDE the try so that a cold-start failure (state.db
   // missing before first scan) is caught and rendered as a friendly hint
   // instead of leaking a raw stack trace to fzf.
@@ -683,15 +407,7 @@ function main(): number {
       // defaults.groups_dir: logical groups the last scan matched to these
       // repos (none when the setting is off).
       const logical = logicalGroupsOf(groupsFromMeta(getMeta(db, "logical_groups")), repos);
-      if (simple) {
-        lines.push(...simpleRepoRows(repos, logical));
-      } else {
-        for (const g of groupRepos(repos)) {
-          lines.push(repoToRow(g));
-        }
-        // After every project row, before the conversations.
-        lines.push(...logicalGroupRows(logical));
-      }
+      lines.push(...simpleRepoRows(repos, logical));
     }
 
     if (wantSessions) {
@@ -732,33 +448,20 @@ function main(): number {
               .all()
       ) as SessionRowFull[];
       const sessionRows: string[] = [];
-      if (simple) {
-        // Labels and nesting for the project column (all enabled repos, the
-        // same population as the list's tree).
-        const repoViews = db
-          .prepare(
-            `SELECT r.name, r.path, ${reposV3Columns(db, "r")}
-               FROM repos r WHERE r.disabled = 0
-              ORDER BY r.name COLLATE NOCASE ASC`,
-          )
-          .all() as RepoNameView[];
-        sessionRows.push(...simpleSessionRows(rows, defaultCommand, repoViews));
-      } else {
-        for (const s of rows) {
-          sessionRows.push(sessionToRow(s, defaultCommand));
-        }
-      }
-      // Insert a section separator between NEW repos and RESUME sessions
-      // when both are present. The separator row uses KIND=separator so
-      // bin/ccs recognises it and exits cleanly if the user selects it.
-      // Guard uses the explicit wantRepos flag (not lines.length) so future
-      // additions to `lines` before this block can't spuriously trigger it.
-      if (simple && sessionRows.length > 0) {
-        lines.push(simpleHeading("前の会話のつづき"));
-      } else if (wantRepos && sessionRows.length > 0) {
-        const bar = "─".repeat(20);
-        const label = `\x1b[2m${bar}\x1b[0m \x1b[1;90m Past Sessions \x1b[0m\x1b[2m${bar}\x1b[0m`;
-        lines.push([label, "", "", "separator:-", "", ""].join("\t"));
+      // Labels and nesting for the project column (all enabled repos, the
+      // same population as the list's tree).
+      const repoViews = db
+        .prepare(
+          `SELECT r.name, r.path, ${reposV3Columns(db, "r")}
+             FROM repos r WHERE r.disabled = 0
+            ORDER BY r.name COLLATE NOCASE ASC`,
+        )
+        .all() as RepoNameView[];
+      sessionRows.push(...simpleSessionRows(rows, defaultCommand, repoViews));
+      // The conversations go under their own heading row (KIND=separator, so
+      // bin/ccs moves off it and exits cleanly if it is ever picked).
+      if (sessionRows.length > 0) {
+        lines.push(simpleHeading(t("list_heading_sessions")));
       }
       lines.push(...sessionRows);
     }
@@ -786,7 +489,7 @@ function main(): number {
       /ENOENT/.test(msg);
     if (isMissing) {
       process.stderr.write(
-        "[ccs-list] state.db not found. Run `ccs --refresh` first to build the cache.\n",
+        `${t("list_no_cache")}\n`,
       );
     } else {
       process.stderr.write(`[ccs-list] fatal: ${msg}\n`);

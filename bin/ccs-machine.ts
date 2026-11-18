@@ -11,10 +11,10 @@
  * Run as a script, this module dispatches every machine word but `doctor`
  * (bin/ccs runs bin/ccs-doctor.ts itself, in two stages):
  *
- *   tsx ccs-machine.ts list --json [--with-paths]
- *   tsx ccs-machine.ts sessions --json [--project <name>] [--limit <n>] …
- *   tsx ccs-machine.ts repo add|remove …    config get|set …
- *   tsx ccs-machine.ts open …               (through bin/ccs: it starts the command)
+ *   node ccs-machine.ts list --json [--with-paths]
+ *   node ccs-machine.ts sessions --json [--project <name>] [--limit <n>] …
+ *   node ccs-machine.ts repo add|remove …    config get|set …
+ *   node ccs-machine.ts open …               (through bin/ccs: it starts the command)
  *
  * None of these commands opens fzf, reads stdin, asks anything, goes to the
  * network, or creates the config template. Only `repo add` may create
@@ -27,6 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ConfigError } from "./ccs-config.ts";
 import { jsonForTerminal } from "./ccs-sanitize.ts";
+import { t } from "./ccs-i18n.ts";
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -273,9 +274,10 @@ export function okOutcome(body: Record<string, unknown>): Outcome {
 let answered = false;
 
 /**
- * True once this process has given its answer. SIGINT handlers check it: tsx
- * passes a SIGINT on to the module's process, which then gets it twice (from
- * the terminal's process group and from tsx), and the second one must not
+ * True once this process has given its answer. SIGINT handlers check it: a
+ * runner that starts the module in a child (tsx did) passes a SIGINT on, so
+ * the module's process can get it twice (from the terminal's process group
+ * and from the runner), and the second one must not
  * print a second JSON object (1.8: exactly one).
  */
 export function hasAnswered(): boolean {
@@ -309,7 +311,7 @@ export function emit(command: string, outcome: Outcome, json: boolean): number {
 export function configFailure(err: unknown): Outcome {
   if (err instanceof ConfigError) {
     if (err.code === "config_not_readable") {
-      return cliOutcome("config_not_readable", {}, "cannot read repos.yml (config_not_readable)");
+      return cliOutcome("config_not_readable", {}, t("note_config_not_readable"));
     }
     const extra: Partial<Reason> = { detail: err.code };
     if (err.entryIndex !== undefined) extra.entry_index = err.entryIndex;
@@ -446,7 +448,7 @@ async function main(argv: string[]): Promise<number> {
     default:
       return emit(
         String(word ?? ""),
-        cliOutcome("internal_error", {}, "unknown machine command"),
+        cliOutcome("internal_error", {}, t("note_unknown_command")),
         json,
       );
   }
